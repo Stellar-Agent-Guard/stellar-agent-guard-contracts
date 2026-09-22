@@ -1,4 +1,4 @@
-<p align="center">
+﻿<p align="center">
 <img src="Gemini_Generated_Image_mvimg2mvimg2mvim.jpeg" alt="Stellar Agent Guard" width="700"/>
 </p>
 <p align="center">

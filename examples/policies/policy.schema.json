@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Stellar Agent Guard Policy Configuration",
+  "description": "Schema for Stellar Agent Guard policy configuration artifacts (SPEC §3, §4, §8).",
+  "type": "object",
+  "required": [
+    "per_tx_cap",
+    "window_secs",
+    "window_cap",
+    "assets",
+    "protocols",
+    "recipients",
+    "allow_any_recipient",
+    "active_from",
+    "active_until",
+    "paused",
+    "dms_grace_secs"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "URI to the schema definition."
+    },
+    "per_tx_cap": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "description": "Per asset-transfer call cap in stroops / base units (stringified i128; 0 = disabled)."
+    },
+    "window_secs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Rolling window width in seconds (u64)."
+    },
+    "window_cap": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "description": "Rolling spend cap within window_secs (stringified i128; 0 = disabled)."
+    },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^C[A-Z0-9]{55}$"
+      },
+      "uniqueItems": true,
+      "description": "Allowlisted SAC token contract addresses whose transfers get parsed and enforced."
+    },
+    "protocols": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["contract"],
+        "properties": {
+          "contract": {
+            "type": "string",
+            "pattern": "^C[A-Z0-9]{55}$",
+            "description": "Protocol contract address."
+          },
+          "fns": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 32
+            },
+            "minItems": 1,
+            "uniqueItems": true,
+            "description": "Optional per-function allowlist. If omitted or null, all functions are allowed."
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "Allowlisted non-asset contracts the account may call."
+    },
+    "recipients": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[GC][A-Z0-9]{55}$"
+      },
+      "uniqueItems": true,
+      "description": "Allowed SAC transfer destinations (Stellar G... account or C... contract addresses)."
+    },
+    "allow_any_recipient": {
+      "type": "boolean",
+      "description": "Escape hatch: skip the recipient allowlist (caps still apply)."
+    },
+    "active_from": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Active window start (unix timestamp seconds; 0 = unrestricted)."
+    },
+    "active_until": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Active window end (unix timestamp seconds; 0 = unrestricted)."
+    },
+    "paused": {
+      "type": "boolean",
+      "description": "Admin kill switch (true = account paused)."
+    },
+    "dms_grace_secs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Dead-man switch grace period in seconds (0 = disabled)."
+    }
+  },
+  "additionalProperties": false
+}

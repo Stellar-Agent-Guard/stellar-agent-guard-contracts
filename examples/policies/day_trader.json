@@ -1,0 +1,24 @@
+{
+  "$schema": "./policy.schema.json",
+  "per_tx_cap": "50000000000",
+  "window_secs": 3600,
+  "window_cap": "200000000000",
+  "assets": [
+    "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"
+  ],
+  "protocols": [
+    {
+      "contract": "CC2AXYQ6TLL7ZZV6AELKGYQ35E7D737PGF4H5VR5EFA2K7BZZ2UOP57N",
+      "fns": [
+        "swap_exact_tokens_for_tokens",
+        "swap_tokens_for_exact_tokens"
+      ]
+    }
+  ],
+  "recipients": [],
+  "allow_any_recipient": true,
+  "active_from": 0,
+  "active_until": 0,
+  "paused": false,
+  "dms_grace_secs": 1800
+}

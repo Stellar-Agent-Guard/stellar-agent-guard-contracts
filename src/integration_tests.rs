@@ -1,4 +1,4 @@
-//! Contract-level integration tests (SPEC §11).
+﻿//! Contract-level integration tests (SPEC §11).
 //!
 //! These drive the *real host routing*: `require_auth` on the guard contract
 //! makes the host invoke `PolicyEngine::__check_auth` with a signature payload
@@ -556,3 +556,112 @@ fn revoke_policy_is_instant_default_deny() {
     h.revoke_policy();
     h.transfer_expect_blocked(&recv, 5);
 }
+
+#[test]
+fn policy_preset_artifacts_are_valid() {
+    let preset_files = [
+        "examples/policies/day_trader.json",
+        "examples/policies/payments_bot.json",
+        "examples/policies/watch_only.json",
+        "examples/policies/max_security.json",
+    ];
+
+    for path in preset_files {
+        let content = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read preset at {path}: {e}"));
+        assert!(content.contains("\"per_tx_cap\""), "preset {path} missing per_tx_cap");
+        assert!(content.contains("\"window_secs\""), "preset {path} missing window_secs");
+        assert!(content.contains("\"window_cap\""), "preset {path} missing window_cap");
+        assert!(content.contains("\"assets\""), "preset {path} missing assets");
+        assert!(content.contains("\"protocols\""), "preset {path} missing protocols");
+        assert!(content.contains("\"recipients\""), "preset {path} missing recipients");
+        assert!(content.contains("\"allow_any_recipient\""), "preset {path} missing allow_any_recipient");
+        assert!(content.contains("\"dms_grace_secs\""), "preset {path} missing dms_grace_secs");
+    }
+}
+
+#[test]
+fn policy_preset_configurations_installable() {
+    let h = Harness::new();
+
+    // 1. Day trader preset
+    let day_trader = PolicyConfig {
+        per_tx_cap: 50_000_000_000,
+        window_secs: 3_600,
+        window_cap: 200_000_000_000,
+        assets: soroban_sdk::vec![&h.env, h.asset.clone()],
+        protocols: soroban_sdk::Vec::new(&h.env),
+        recipients: soroban_sdk::Vec::new(&h.env),
+        allow_any_recipient: true,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 1_800,
+    };
+    h.install_policy(&day_trader);
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard).policy(),
+        Some(day_trader)
+    );
+
+    // 2. Payments bot preset
+    let payments_bot = PolicyConfig {
+        per_tx_cap: 5_000_000_000,
+        window_secs: 86_400,
+        window_cap: 50_000_000_000,
+        assets: soroban_sdk::vec![&h.env, h.asset.clone()],
+        protocols: soroban_sdk::Vec::new(&h.env),
+        recipients: soroban_sdk::vec![&h.env, h.recv.clone()],
+        allow_any_recipient: false,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 3_600,
+    };
+    h.install_policy(&payments_bot);
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard).policy(),
+        Some(payments_bot)
+    );
+
+    // 3. Watch only preset
+    let watch_only = PolicyConfig {
+        per_tx_cap: 0,
+        window_secs: 0,
+        window_cap: 0,
+        assets: soroban_sdk::Vec::new(&h.env),
+        protocols: soroban_sdk::Vec::new(&h.env),
+        recipients: soroban_sdk::Vec::new(&h.env),
+        allow_any_recipient: false,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 300,
+    };
+    h.install_policy(&watch_only);
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard).policy(),
+        Some(watch_only)
+    );
+
+    // 4. Max security preset
+    let max_security = PolicyConfig {
+        per_tx_cap: 1_000_000_000,
+        window_secs: 1_800,
+        window_cap: 2_000_000_000,
+        assets: soroban_sdk::vec![&h.env, h.asset.clone()],
+        protocols: soroban_sdk::Vec::new(&h.env),
+        recipients: soroban_sdk::vec![&h.env, h.recv.clone()],
+        allow_any_recipient: false,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 60,
+    };
+    h.install_policy(&max_security);
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard).policy(),
+        Some(max_security)
+    );
+}
+

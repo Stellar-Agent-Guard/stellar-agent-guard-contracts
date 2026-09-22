@@ -1,0 +1,19 @@
+{
+  "$schema": "./policy.schema.json",
+  "per_tx_cap": "5000000000",
+  "window_secs": 86400,
+  "window_cap": "50000000000",
+  "assets": [
+    "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"
+  ],
+  "protocols": [],
+  "recipients": [
+    "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX",
+    "GAB5CDEFGHJKLMNPQRSTUVWXYZ234567ABCDEFGHJKLMNPQRSTUVWXYZ"
+  ],
+  "allow_any_recipient": false,
+  "active_from": 0,
+  "active_until": 0,
+  "paused": false,
+  "dms_grace_secs": 3600
+}

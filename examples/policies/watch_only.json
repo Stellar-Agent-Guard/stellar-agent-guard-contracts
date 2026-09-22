@@ -1,0 +1,14 @@
+{
+  "$schema": "./policy.schema.json",
+  "per_tx_cap": "0",
+  "window_secs": 0,
+  "window_cap": "0",
+  "assets": [],
+  "protocols": [],
+  "recipients": [],
+  "allow_any_recipient": false,
+  "active_from": 0,
+  "active_until": 0,
+  "paused": false,
+  "dms_grace_secs": 300
+}
