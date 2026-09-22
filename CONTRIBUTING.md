@@ -63,12 +63,13 @@ cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 
 ## Pull Request Process
 
-1. Open the PR against `main`. The `ci` status check is required to merge
-   (branch protection).
+1. Open the PR against `main`. Ensure all sections in the [PR template](.github/pull_request_template.md)
+   are completed, including the enforcement impact declaration. The `ci` status
+   check is required to merge (branch protection).
 2. One reviewer approval required (branch protection).
 3. Describe the *why* in the PR body: what was broken/wrong, what the fix does,
    and — for enforcement changes — how it was verified (tests, and testnet
-   evidence where applicable).
+   evidence where applicable), matching the PR template checklist.
 
 ## Project Structure
 
