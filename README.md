@@ -528,7 +528,7 @@ and a review approved for changes to merge.
 
 - GitHub issues: <https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues>
 - Maintainer (GitHub): [@aigbagbobila](https://github.com/aigbagbobila)
-- Security disclosures: see [SECURITY.md](SECURITY.md) (Telegram, the Stellar ecosystem norm)
+- Security disclosures: see [SECURITY.md](SECURITY.md) (GitHub Security Advisories, email fallback)
 
 ## License
 
