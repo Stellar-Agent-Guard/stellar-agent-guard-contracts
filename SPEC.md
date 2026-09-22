@@ -341,6 +341,65 @@ pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
 #[contracttype]
 pub enum CheckResult { Allowed, Blocked(BlockReason) }
 
+### JSON Wire Format & Serde Representation (Non-Rust Consumers)
+
+> [!WARNING]
+> **Decoder-breakage warning:** Field renames are breaking for SDK/dashboard — additive fields only. Struct fields are serialized to JSON-RPC responses with exact `snake_case` names. SDK and dashboard clients hand-write decoders against these exact strings; any field rename will silently produce `undefined` in JavaScript/TypeScript decoders rather than a descriptive error.
+
+#### 1. `Status` Wire Format (`status()` output)
+Contract struct serializes to a JSON object with exact snake_case field names:
+```json
+{
+  "admin_frozen": false,
+  "has_policy": true,
+  "heartbeat_expired": false,
+  "last_heartbeat": 1788855212,
+  "now": 1788863857
+}
+```
+* `admin_frozen` (`bool`): Account is frozen by admin authority.
+* `has_policy` (`bool`): Account has an active policy installed.
+* `heartbeat_expired` (`bool`): Dead-man switch grace period expired without heartbeat.
+* `last_heartbeat` (`u64`): Ledger timestamp of the most recent agent heartbeat.
+* `now` (`u64`): Current ledger timestamp from `env.ledger().timestamp()`.
+
+#### 2. `CheckResult` Wire Format (`check()` pre-flight output)
+Soroban enum serialization uses the standard tagged enum convention:
+* **Allowed:** Serializes as the bare string `"Allowed"`.
+  ```json
+  "Allowed"
+  ```
+* **Blocked:** Serializes as a single-key map/object with the variant name as the key and reason symbol as the string value (NOT an array form):
+  ```json
+  {
+    "Blocked": "heartbeat_expired"
+  }
+  ```
+  *(Live verified blocked reasons: `{"Blocked": "paused"}`, `{"Blocked": "per_tx_cap_exceeded"}`, `{"Blocked": "window_cap_exceeded"}`, `{"Blocked": "asset_not_allowed"}`, `{"Blocked": "recipient_not_allowed"}`)*.
+
+#### 3. `PolicyConfig` Wire Format (`policy()` output)
+Returns `null` if no policy is set (default-deny), or the serialized config object matching live responses:
+```json
+{
+  "active_from": 0,
+  "active_until": 0,
+  "allow_any_recipient": false,
+  "assets": [
+    "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"
+  ],
+  "dms_grace_secs": 60,
+  "paused": false,
+  "per_tx_cap": "1000",
+  "protocols": [],
+  "recipients": [
+    "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"
+  ],
+  "window_cap": "150",
+  "window_secs": 60
+}
+```
+
+
 #[contracterror] #[repr(u32)]
 pub enum Error {            // values stable; see tests/fixtures
     Unauthorized = 1, AlreadyInitialized = 2, NotInitialized = 3,
