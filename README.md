@@ -524,6 +524,20 @@ and a review approved for changes to merge.
 - [Telegram](https://t.me/+EzSusj-2vVhhNmI0)
 - [Discord](https://discord.gg/Z766vsgjg)
 
+## Which repository?
+
+Stellar Agent Guard spans three specialized repositories (`stellar-agent-guard-contracts`, `stellar-agent-guard-sdk`, and `stellar-agent-guard-dashboard`). Use this decision table to find the right tracker for your symptom or question:
+
+| Symptom / Question | Target Repository | Tracker / Template Link |
+|---|---|---|
+| Transfer blocks unexpectedly, authorization error (`Error(Contract, #...)`), or CustomAccount admission failure | `stellar-agent-guard-contracts` | [File Contract Bug Report](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new) |
+| TypeScript SDK or middleware throws an unexpected runtime error, or RPC simulation fails | `stellar-agent-guard-sdk` | [File SDK Bug Report](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues/new) |
+| Panic button won't confirm, wallet connection fails, or UI state is out of sync | `stellar-agent-guard-dashboard` | [File Dashboard Bug Report](https://github.com/aigbagbobila/stellar-agent-guard-dashboard/issues/new) |
+| Policy encoding/decoding mismatch between TypeScript client and Soroban contract | `stellar-agent-guard-contracts` + `stellar-agent-guard-sdk` | [Contracts Tracker](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new) & [SDK Tracker](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues/new) |
+| Requesting a new spending limit policy type, custom account logic, or core smart contract feature | `stellar-agent-guard-contracts` | [File Contract Feature Request](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new) |
+| LangChain, ElizaOS, or agent framework adapter integration question or helper improvement | `stellar-agent-guard-sdk` | [File SDK Feature Request](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues/new) |
+| Documentation error, outdated code snippet, or architecture specification clarification | Specific repo docs / [GitBook](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/) | [Contracts Issues](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new) |
+
 ## Contact
 
 - GitHub issues: <https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues>
