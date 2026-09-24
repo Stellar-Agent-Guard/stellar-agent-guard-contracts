@@ -216,10 +216,21 @@ impl Harness {
     /// Build an auth entry for the guard signed by the agent's key over the
     /// host-computed signature payload.
     fn guard_entry(&mut self, root: &SorobanAuthorizedInvocation) -> SorobanAuthorizationEntry {
+        let key = self.agent.clone(); // entry builder takes &mut self
+        self.guard_entry_with(&key, root)
+    }
+
+    /// Build a guard auth entry signed by an arbitrary key — for tests that
+    /// must present a rotated-out or never-registered key to the account.
+    fn guard_entry_with(
+        &mut self,
+        key: &SigningKey,
+        root: &SorobanAuthorizedInvocation,
+    ) -> SorobanAuthorizationEntry {
         let nonce = self.guard_nonce;
         self.guard_nonce += 1;
         let payload = self.payload(nonce, root);
-        let sig = self.agent.sign(&payload).to_bytes();
+        let sig = key.sign(&payload).to_bytes();
         SorobanAuthorizationEntry {
             credentials: SorobanCredentials::Address(SorobanAddressCredentials {
                 address: xdr::ScAddress::from(&self.guard),
@@ -285,6 +296,34 @@ impl Harness {
             PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
         }));
         assert!(res.is_err(), "expected the heartbeat to be blocked");
+    }
+
+    fn heartbeat_with(&mut self, key: &SigningKey) {
+        let root = self.heartbeat_invocation();
+        let entry = self.guard_entry_with(key, &root);
+        self.enforce(entry);
+        PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
+    }
+
+    /// Send a heartbeat signed by a specific key and assert the guard blocks
+    /// it. Returns the panic payload (the host's `HostError` event log), so
+    /// callers can assert which reason blocked it — e.g. a signature failure
+    /// vs the DMS `HeartbeatExpired`.
+    fn heartbeat_with_expect_blocked(&mut self, key: &SigningKey) -> std::string::String {
+        let root = self.heartbeat_invocation();
+        let entry = self.guard_entry_with(key, &root);
+        self.enforce(entry);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
+        }));
+        if let Err(payload) = res {
+            payload
+                .downcast_ref::<std::string::String>()
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            panic!("expected the heartbeat to be blocked")
+        }
     }
 
     fn unfreeze(&mut self) {
@@ -541,6 +580,62 @@ fn rotated_agent_key_binds() {
     // Swap the harness agent to the new key and confirm it works.
     h.agent = new_key;
     h.transfer(&recv, 5);
+}
+
+#[test]
+fn rotate_agent_key_next_heartbeat_validity_spec_5_7() {
+    // Edge: the DMS clock keeps counting from heartbeats *signed by the old
+    // key* while a rotation lands inside a nearly-expired grace (SPEC §5).
+    // Post-rotate, the new key is the only accepted signer (SPEC §7), and the
+    // DMS rule #2 still gates the new key's heartbeats: fine within grace,
+    // `HeartbeatExpired` once the grace elapses. Unit-level counterpart of the
+    // on-chain agent-key-rotation proof (issue #5, SPEC §11 scenario 6).
+    let mut h = Harness::new();
+    let old = h.agent.clone();
+    let new = SigningKey::from_bytes(&[11u8; 32]);
+
+    let mut p = h.base_policy();
+    p.dms_grace_secs = 60;
+    h.set_time(1_000_000);
+    h.install_policy(&p); // `set_policy` starts the DMS clock: LastHeartbeat = 1_000_000
+
+    // Baseline: the current (old) key heartbeats fine while in grace.
+    h.set_time(1_000_010);
+    h.heartbeat_with(&old);
+    assert_eq!(h.status().last_heartbeat, 1_000_010);
+
+    // Admin rotates mid-grace (50s of 60s used, 10s remain). The rotation
+    // itself neither resets nor consumes the heartbeat clock (SPEC §7).
+    let new_pk = new.verifying_key().to_bytes();
+    h.env.mock_all_auths(); // admin call, not the guarded agent flow
+    PolicyEngineClient::new(&h.env, &h.guard)
+        .rotate_agent_key(&BytesN::from_array(&h.env, &new_pk));
+
+    // 1. Old key is rejected immediately post-rotate. `rotate_agent_key`
+    //    stores the new key *first*, so even a validly signed old-key
+    //    heartbeat now fails signature verification in `__check_auth` —
+    //    and the DMS clock is untouched (still the pre-rotate heartbeat).
+    h.set_time(1_000_050);
+    let blocked = h.heartbeat_with_expect_blocked(&old);
+    assert!(blocked.contains("failed ED25519 verification"));
+    assert_eq!(h.status().last_heartbeat, 1_000_010);
+
+    // 2. New key is accepted while grace remains (signature verifies against
+    //    the new stored key; 45 of 60s elapsed — rule #2 still passes).
+    h.set_time(1_000_055);
+    h.heartbeat_with(&new);
+    assert_eq!(h.status().last_heartbeat, 1_000_055);
+
+    // 3. Once the grace elapses, the (correctly signed) new-key heartbeat is
+    //    blocked — DMS rule #2 fires with `HeartbeatExpired`. This pins that
+    //    the DMS is not reset by a valid signature alone; only a heartbeat
+    //    admitted by the engine restarts the clock. The host event log records
+    //    the emitted `auth_checked` reason (`heartbeat_expired`) even though
+    //    the failing frame rolls the event back from the ledger events API.
+    h.set_time(1_000_120);
+    let blocked = h.heartbeat_with_expect_blocked(&new);
+    assert!(blocked.contains("heartbeat_expired"));
+    assert_eq!(h.status().last_heartbeat, 1_000_055);
 }
 
 #[test]
