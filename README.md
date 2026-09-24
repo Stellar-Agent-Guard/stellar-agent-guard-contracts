@@ -118,6 +118,15 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
   --agent_pubkey 1cb479acb9bb7d9b3a04a6865f5c44216f8a463d64ea7ceeb1447fee21cdcc05
 # → ❌ transaction simulation failed: HostError: Error(Contract, #2)   (AlreadyInitialized)
 ```
+
+> **Recovery: `AlreadyInitialized` is not a failure.** Deploy scripts that retry — a
+> fee-bump double-submit or an operator panic-retry — hit `Error(Contract, #2)` on the
+> second attempt when the **first** attempt actually succeeded. If you see it, do **not**
+> redeploy a fresh guard (you would split your policy admin across two contracts): check
+> `status()` first, and only if it reads sane (`has_policy: false`/`admin_frozen: false`,
+> agent key as expected) proceed directly to the next step, `set_policy`. Redeploy only
+> if `status()` shows the first attempt genuinely failed (nothing was ever initialized).
+
 The Phase-1 deployment's real `initialize` transaction:
 `cb17b7b1c65bff74b6bc99f67fe3cf1070c7a28f14bdd71527ba60c9d4a81264`.
 
