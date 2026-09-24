@@ -48,6 +48,9 @@ cargo build --release --manifest-path tools/agent-tx/Cargo.toml
    or blocks should add a unit/integration test **and**, where it is a user-
    visible enforcement change, be recorded in the testnet proof plan
    (`tests/fixtures/README.md`) per the Phase-1 exit-criteria pattern.
+7. **Denial-reason messages:** `docs/reason-glossary.md` is the canonical
+   message-content source for SDK/UI work — map new user-facing denial text to
+   its agent/operator/auditor columns instead of inventing new phrasing.
 
 ## Commit Discipline (strict)
 
