@@ -364,7 +364,18 @@ pub enum Error {            // values stable; see tests/fixtures
   respective vectors to matter (empty `assets` = no SAC transfer is ever allowed; empty
   `recipients` with `allow_any_recipient == false` = no recipient allowed).
 - Duplicate addresses within a list are rejected.
-- Self-address may not appear in `assets`/`protocols`.
+- The contract's own address may not appear in **any** of the three address lists:
+  - `assets` — the guard is not an SAC; self-calls are governed by the fixed §6.1 rule, not
+    by policy, so a self-entry would be a nonsensical allowlist.
+  - `protocols` — same: allowlisting the account to call itself through the policy path is
+    meaningless (and §6.1 already decides what self-calls are allowed).
+  - `recipients` — the account paying itself is a no-op loop (a self-debit/re-credit of the
+    same SAC balance) with no purpose; allowing it adds no capability while making a
+    mis-pasted recipient address look like a deliberate policy. Rejected (recommended:
+    catches typos) rather than allowed-with-documentation.
+  The self-address is known pre-`initialize` (`env.current_contract_address()` is a
+  deployment-time constant), and `set_policy` can only run post-initialize, so the check
+  always compares against the real deployed contract ID.
 
 Invalid config → `InvalidConfig`, policy unchanged (fail-closed, never partially applied).
 
