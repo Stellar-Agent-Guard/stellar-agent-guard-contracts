@@ -17,19 +17,22 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{Error as GuardError, PolicyConfig};
-use crate::{PolicyEngine, PolicyEngineClient};
+use crate::types::{DataKey, Error as GuardError, PolicyConfig, WindowState};
+use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
-use soroban_sdk::auth::{Context, CustomAccountInterface};
+use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{
-    self, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs, Limited, Limits,
-    ScBytes, ScSymbol, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
-    SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, WriteXdr,
+    self, ContractCostType, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs,
+    Limited, Limits, ScBytes, ScSymbol, ScVal, SorobanAddressCredentials,
+    SorobanAuthorizationEntry, SorobanAuthorizedFunction, SorobanAuthorizedInvocation,
+    SorobanCredentials, WriteXdr,
 };
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val};
+use soroban_sdk::{
+    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val,
+};
 
 const SIG_EXPIRATION_LEDGER: u32 = 6_000_000;
 
@@ -44,6 +47,68 @@ fn heartbeat_event_count(env: &Env) -> usize {
             matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&want))
         })
         .count()
+}
+
+// ── Storage-read accounting (issue #135) ─────────────────────────────────
+//
+// How the read set of one authorization is measured here.
+//
+// The host exposes **no per-`get_contract_data` counter**. Its storage map is
+// read-through cached and is deliberately *not* reset between invocations
+// ("the storage itself shouldn't be reset, as it's treated as the ledger state
+// before invocation"), so the second read of a key is a pure cache hit that
+// emits no separately countable event, and `ContractCostType` has no
+// storage-read variant at all. A counting `SnapshotSource` cannot recover it
+// either: the source is only consulted on a cache *miss*, i.e. once per key.
+//
+// Two exact quantities are observable, and they are what this module uses:
+//
+// * `MemCmp` budget charges. A storage read adds a constant, strictly positive
+//   number of them, so "charges consumed" is a linear read counter. Because
+//   the comparison work is bounded and independent of the stored value, a
+//   measured total is only attributable to a read *count* when the measured
+//   code does nothing else — which is precisely the case for the isolated
+//   `AuthSnapshot::load` measurement in
+//   `authorization_reads_each_storage_key_exactly_once`.
+// * `resources().memory_read_entries`, the host's own footprint accounting:
+//   the number of distinct ledger entries an invocation put in its footprint,
+//   i.e. how many storage *keys* it read. This is host-reported and exact, and
+//   it pins the read *set* of a real `__check_auth` frame.
+
+/// `MemCmp` charges consumed by the frame currently executing.
+fn memcmp_charges(env: &Env) -> i64 {
+    env.cost_estimate()
+        .budget()
+        .tracker(ContractCostType::MemCmp)
+        .iterations
+        .try_into()
+        .expect("MemCmp charges fit in i64")
+}
+
+/// `MemCmp` charges consumed by the four persistent keys an authorization
+/// reads, read inline — the exact reference for `AuthSnapshot::load`.
+///
+/// Deliberately *not* `load_ledger`-style shared code: this is an independent
+/// restatement of the audited read set, so the test comparing the two detects
+/// drift in either direction.
+fn reference_snapshot_reads(env: &Env, guard: &Address) -> i64 {
+    env.as_contract(guard, || {
+        let before = memcmp_charges(env);
+        let _: Option<PolicyConfig> = env.storage().persistent().get(&DataKey::Policy);
+        let _: Option<bool> = env.storage().persistent().get(&DataKey::AdminFrozen);
+        let _: Option<u64> = env.storage().persistent().get(&DataKey::LastHeartbeat);
+        let _: Option<WindowState> = env.storage().persistent().get(&DataKey::Window);
+        memcmp_charges(env) - before
+    })
+}
+
+/// What the host charged one `__check_auth` frame.
+#[derive(Debug, Clone, Copy)]
+struct AuthMeters {
+    /// Distinct ledger entries the frame put in its footprint.
+    memory_read_entries: i32,
+    /// `MemCmp` charges for the whole frame.
+    memcmp: i64,
 }
 
 // ── Test contracts ───────────────────────────────────────────────────────
@@ -62,6 +127,11 @@ impl MockAsset {
         env.events()
             .publish((Symbol::new(&env, "transfer_ok"),), (to, amount));
     }
+
+    /// Touches no storage at all. Calibration point for the fixed entry that
+    /// `memory_read_entries` reports for every invocation of a registered
+    /// contract, on top of whatever storage entries the frame actually read.
+    pub fn ping() {}
 }
 
 /// Admin account contract: approves every authorization it is asked to
@@ -324,6 +394,120 @@ impl Harness {
             .any(|e| match &e.body {
                 xdr::ContractEventBody::V0(v0) => v0.topics.get(1) == Some(&want),
             })
+    }
+
+    /// Run one real, agent-signed transfer authorization and return the host's
+    /// accounting for it.
+    ///
+    /// `try_invoke_contract_check_auth` calls `__check_auth` as the *root*
+    /// invocation, so the budget trackers and the invocation resources describe
+    /// exactly that frame and nothing else. Going through
+    /// `MockAsset::transfer` + `require_auth` instead would nest it under the
+    /// asset call and mix the two frames' costs together.
+    fn measure_authorization(&mut self, to: &Address, amount: i128) -> AuthMeters {
+        let root = self.transfer_invocation(&self.guard, to, amount);
+        let nonce = self.guard_nonce;
+        self.guard_nonce += 1;
+        let payload = self.payload(nonce, &root);
+        let sig = self.agent.sign(&payload).to_bytes();
+
+        let mut args: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(&self.env);
+        args.push_back(self.guard.clone().into_val(&self.env)); // from
+        args.push_back(to.clone().into_val(&self.env));
+        args.push_back(amount.into_val(&self.env));
+        let contexts = vec![
+            &self.env,
+            Context::Contract(ContractContext {
+                contract: self.asset.clone(),
+                fn_name: Symbol::new(&self.env, "transfer"),
+                args,
+            }),
+        ];
+
+        let payload = BytesN::<32>::from_array(&self.env, &payload);
+        let signature: Val = BytesN::<64>::from_array(&self.env, &sig).into_val(&self.env);
+        self.env
+            .try_invoke_contract_check_auth::<GuardError>(
+                &self.guard,
+                &payload,
+                signature,
+                &contexts,
+            )
+            .expect("the harness policy allows this transfer");
+
+        let detailed = self
+            .env
+            .host()
+            .get_detailed_last_invocation_resources()
+            .expect("the check_auth frame is metered");
+        AuthMeters {
+            memory_read_entries: detailed.resources.memory_read_entries,
+            memcmp: memcmp_charges(&self.env),
+        }
+    }
+
+    /// Same as `measure_authorization`, but tolerates the default-deny answer:
+    /// with no policy installed the frame is expected to be rejected, and the
+    /// point of the measurement is what it read *before* rejecting.
+    fn measure_blocking_authorization(&mut self, to: &Address, amount: i128) -> AuthMeters {
+        let root = self.transfer_invocation(&self.guard, to, amount);
+        let nonce = self.guard_nonce;
+        self.guard_nonce += 1;
+        let payload = self.payload(nonce, &root);
+        let sig = self.agent.sign(&payload).to_bytes();
+
+        let mut args: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(&self.env);
+        args.push_back(self.guard.clone().into_val(&self.env));
+        args.push_back(to.clone().into_val(&self.env));
+        args.push_back(amount.into_val(&self.env));
+        let contexts = vec![
+            &self.env,
+            Context::Contract(ContractContext {
+                contract: self.asset.clone(),
+                fn_name: Symbol::new(&self.env, "transfer"),
+                args,
+            }),
+        ];
+
+        let payload = BytesN::<32>::from_array(&self.env, &payload);
+        let signature: Val = BytesN::<64>::from_array(&self.env, &sig).into_val(&self.env);
+        let outcome = self.env.try_invoke_contract_check_auth::<GuardError>(
+            &self.guard,
+            &payload,
+            signature,
+            &contexts,
+        );
+        assert!(
+            matches!(outcome, Err(Ok(GuardError::NoPolicy))),
+            "an account with no policy is default-deny, got {outcome:?}"
+        );
+
+        let detailed = self
+            .env
+            .host()
+            .get_detailed_last_invocation_resources()
+            .expect("the check_auth frame is metered");
+        AuthMeters {
+            memory_read_entries: detailed.resources.memory_read_entries,
+            memcmp: memcmp_charges(&self.env),
+        }
+    }
+
+    /// The fixed entry `memory_read_entries` reports for *every* invocation of
+    /// a registered contract, independent of how much storage the frame reads.
+    /// Calibrated against an entry point that reads nothing, so the per-key
+    /// read counts asserted on a real authorization are read off the host's
+    /// footprint accounting rather than hard-coded.
+    fn footprint_constant(&self) -> i32 {
+        MockAssetClient::new(&self.env, &self.asset).ping();
+        self.footprint_entries()
+    }
+
+    fn footprint_entries(&self) -> i32 {
+        self.env
+            .host()
+            .get_detailed_last_invocation_resources()
+            .map_or(0, |d| d.resources.memory_read_entries)
     }
 }
 
@@ -643,4 +827,260 @@ fn revoke_policy_is_instant_default_deny() {
     h.env.mock_all_auths();
     h.revoke_policy();
     h.transfer_expect_blocked(&recv, 5);
+}
+
+#[test]
+fn authorization_reads_each_storage_key_exactly_once() {
+    // ── The audited read set (issue #135) ─────────────────────────────────
+    //
+    // Before this change `__check_auth` read `DataKey::Window` twice on the
+    // allowed path: once to build the ledger, then again for `had_window`.
+    // The snapshot now carries that flag, so the read set of one authorization
+    // is:
+    //
+    //   instance    DataKey::AgentPubkey          once, to verify the signature
+    //   persistent  DataKey::Policy               ┐
+    //               DataKey::AdminFrozen          │ each once, all four inside
+    //               DataKey::LastHeartbeat        │ `AuthSnapshot::load`
+    //               DataKey::Window                ┘
+    //
+    // Totals measured here: 468 MemCmp charges for an allowed authorization
+    // (down from 524 before the snapshot), 81 for the default-deny short
+    // circuit (unchanged — the removed read was on the allowed path only).
+
+    // ── Calibration: the read quantum is constant and positive ───────────
+    // A storage read charges a fixed number of `MemCmp` comparisons, so the
+    // count is recoverable from a total. This is the assumption that makes
+    // every measurement below meaningful, so it is asserted rather than
+    // assumed.
+    let env = Env::default();
+    let guard = env.register(PolicyEngine, ());
+    let marginal = env.as_contract(&guard, || {
+        // First read of the key pays the footprint insert; every later read of
+        // an already-resident key is the pure "one more read" cost.
+        let _: Option<u64> = env.storage().persistent().get(&DataKey::PolicyRevision);
+        let before = memcmp_charges(&env);
+        let _: Option<u64> = env.storage().persistent().get(&DataKey::PolicyRevision);
+        memcmp_charges(&env) - before
+    });
+    assert!(
+        marginal > 0,
+        "a storage read must cost something measurable"
+    );
+
+    // ── Multiplicity: the snapshot does exactly four reads, no more ──────
+    // `AuthSnapshot::load` is pure storage access, so its total is attributable
+    // to reads alone and the count is exact: equal to the reference means four
+    // reads, anything higher means a key is read more than once. Measured in
+    // the same env, so an SDK cost-model change moves both sides together.
+    let mut h = Harness::new();
+    h.install_policy(&h.base_policy());
+    h.set_time(1_000);
+    let recv = h.recv.clone();
+
+    let reference = reference_snapshot_reads(&h.env, &h.guard);
+    let snapshot = h.env.as_contract(&h.guard, || {
+        let before = memcmp_charges(&h.env);
+        let snap = AuthSnapshot::load(&h.env).expect("a policy is installed");
+        let charges = memcmp_charges(&h.env) - before;
+        // The snapshot carries the write-back decision without a second read:
+        // `set_policy` seeds an *empty* `Window` entry, so "an entry exists"
+        // and "the ledger has entries" are genuinely different facts — which
+        // is exactly the distinction the pre-#135 second `Window` read
+        // recomputed.
+        assert!(snap.window_persisted, "set_policy seeds a Window entry");
+        assert_eq!(snap.ledger.len(), 0, "nothing has been spent yet");
+        assert!(!snap.admin_frozen);
+        charges
+    });
+    std::println!(
+        "AuthSnapshot::load: memcmp={snapshot} (four reads = {reference}, \
+         one read = {marginal})"
+    );
+    assert_eq!(
+        snapshot, reference,
+        "AuthSnapshot::load must perform exactly one read per key \
+         (a redundant read costs {marginal} MemCmp charges)"
+    );
+
+    // ── The read set of a real authorization ────────────────────────────
+    // `memory_read_entries` is the host's own footprint accounting, so this
+    // pins which storage keys a real `__check_auth` frame loads. The first
+    // authorization on a fresh account is measured with an empty window.
+    let allowed = h.measure_authorization(&recv, 5);
+
+    // Every invocation of a registered contract contributes one fixed entry
+    // (its contract code) on top of the storage entries it reads. Pin that
+    // constant against an entry point that reads nothing.
+    let constant = h.footprint_constant();
+    assert_eq!(
+        constant, 1,
+        "expected exactly one fixed (contract code) entry per invocation"
+    );
+    assert_eq!(
+        allowed.memory_read_entries,
+        constant + 4,
+        "__check_auth must read exactly the four snapshot keys \
+         (Policy, AdminFrozen, LastHeartbeat, Window) and nothing else; \
+         measured {}",
+        allowed.memory_read_entries - constant
+    );
+
+    // A second authorization is allowed to re-read the same four keys (a new
+    // transaction is a new frame), and must not reach a fifth.
+    let again = h.measure_authorization(&recv, 6);
+    assert_eq!(
+        again.memory_read_entries,
+        constant + 4,
+        "the read set must not depend on how many authorizations came before"
+    );
+    std::println!(
+        "__check_auth: memory_read_entries={} memcmp={} (repeat: \
+         memory_read_entries={} memcmp={})",
+        allowed.memory_read_entries,
+        allowed.memcmp,
+        again.memory_read_entries,
+        again.memcmp,
+    );
+
+    // ── The default-deny short circuit reads less ───────────────────────
+    // With no policy installed the snapshot stops at the `?` after
+    // `DataKey::Policy`, so the frame must not touch the other three keys.
+    let mut bare = Harness::new();
+    bare.set_time(1_000);
+    let bare_recv = bare.recv.clone();
+    let no_policy = bare.measure_blocking_authorization(&bare_recv, 5);
+    assert_eq!(
+        no_policy.memory_read_entries,
+        constant + 1,
+        "the no-policy short circuit must read DataKey::Policy and stop"
+    );
+    std::println!(
+        "__check_auth (no policy): memory_read_entries={} memcmp={}",
+        no_policy.memory_read_entries,
+        no_policy.memcmp
+    );
+}
+
+/// Body of `fn <name>` in `src/lib.rs`, brace-matched, as written (the file on
+/// disk is pre-`#[contractimpl]` expansion, so this is the code a contributor
+/// edits).
+fn lib_fn_body(name: &str) -> std::string::String {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("src/lib.rs is readable");
+    let start = src
+        .find(&std::format!("fn {name}("))
+        .unwrap_or_else(|| std::panic!("fn {name} not found in src/lib.rs"));
+    let open = src[start..]
+        .find('{')
+        .map(|i| start + i)
+        .expect("function body opens");
+    let mut depth = 0_usize;
+    for (i, ch) in src[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            // Closing brace of the body: the first time the nesting returns to
+            // zero, excluding the opening brace itself.
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return std::string::ToString::to_string(&src[open..=(open + i)]);
+                }
+            }
+            _ => {}
+        }
+    }
+    std::panic!("fn {name} body is not brace-balanced");
+}
+
+#[test]
+fn authorization_touches_storage_only_through_the_snapshot() {
+    // The numeric side of #135 (`authorization_reads_each_storage_key_exactly_once`)
+    // measures the read *set* exactly, but the host exposes no counter for how
+    // many times an already-loaded key is read again, so a redundant read does
+    // not move any observable number. Re-introducing the pre-#135 second
+    // `DataKey::Window` read was verified to leave every assertion passing.
+    //
+    // So the invariant is also enforced at the source level: the authorization
+    // path may reach storage only through `AuthSnapshot::load`. This is the
+    // mechanical form of the comment on `AuthSnapshot`, and it is what keeps a
+    // future edit from adding an inline read back.
+    for fn_name in ["__check_auth", "check"] {
+        let body = lib_fn_body(fn_name);
+
+        let snapshots = body.matches("AuthSnapshot::load").count();
+        assert_eq!(
+            snapshots, 1,
+            "fn {fn_name} must take exactly one storage snapshot, found {snapshots}\n{body}"
+        );
+
+        for forbidden in ["persist_get", "persist_set", "load_window", "load_ledger"] {
+            assert!(
+                !body.contains(forbidden),
+                "fn {fn_name} reads storage directly (`{forbidden}`); load new keys \
+                 in `AuthSnapshot::load` so every key is read exactly once per \
+                 authorization\n{body}"
+            );
+        }
+
+        // The one key legitimately read outside the snapshot is the registered
+        // agent pubkey: it is needed to verify the signature, which has to
+        // happen before any policy state is touched. It must still be read
+        // exactly once, and before the verification that consumes it.
+        let inline = body.matches(".storage()").count();
+        let agent_reads = body.matches("DataKey::AgentPubkey").count();
+        let (agent_at, verify_at) = (
+            body.find("DataKey::AgentPubkey"),
+            body.find("ed25519_verify"),
+        );
+        match (verify_at, agent_at) {
+            // `__check_auth`: exactly the one pre-verification agent-key read.
+            (Some(v), Some(a)) => {
+                assert_eq!(agent_reads, 1, "fn {fn_name} reads AgentPubkey once");
+                assert_eq!(inline, 1, "fn {fn_name} has one inline storage read");
+                assert!(
+                    a < v,
+                    "fn {fn_name} must read the agent key before verifying with it"
+                );
+            }
+            // `check`: a pre-flight, so it has no signature to verify and no
+            // reason to touch the agent key at all.
+            (None, None) => assert_eq!(
+                inline, 0,
+                "fn {fn_name} must reach storage only through the snapshot\n{body}"
+            ),
+            _ => std::panic!("fn {fn_name} has a storage read unrelated to the snapshot"),
+        }
+    }
+
+    // The snapshot is the single read site: it reads one key per gate —
+    // policy, the admin freeze flag, the heartbeat stamp — and delegates the
+    // rolling window to `load_window`, which reads that key once and reports
+    // whether it was present so no caller has to ask again.
+    let load = lib_fn_body("load");
+    let load_window = lib_fn_body("load_window");
+    assert_eq!(
+        load.matches("persist_get").count() + load_window.matches("persist_get").count(),
+        4,
+        "the snapshot must read exactly the four audited keys\n{load}\n{load_window}"
+    );
+    for key in [
+        "DataKey::Policy",
+        "DataKey::AdminFrozen",
+        "DataKey::LastHeartbeat",
+    ] {
+        assert!(
+            load.contains(key),
+            "AuthSnapshot::load must read {key}\n{load}"
+        );
+    }
+    assert!(
+        load.contains("load_window(env)"),
+        "AuthSnapshot::load must take the window through load_window\n{load}"
+    );
+    assert_eq!(
+        load_window.matches("DataKey::Window").count(),
+        1,
+        "load_window must reference DataKey::Window exactly once\n{load_window}"
+    );
 }
