@@ -644,3 +644,116 @@ fn revoke_policy_is_instant_default_deny() {
     h.revoke_policy();
     h.transfer_expect_blocked(&recv, 5);
 }
+
+#[test]
+fn batch_events_emit_in_order_with_context_index() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    p.window_cap = 0;
+    p.allow_any_recipient = true;
+    h.install_policy(&p);
+
+    let to = Address::generate(&h.env);
+
+    let ctx1 = soroban_sdk::auth::Context::Contract(soroban_sdk::auth::ContractContext {
+        contract: h.asset.clone(),
+        fn_name: Symbol::new(&h.env, "transfer"),
+        args: soroban_sdk::vec![
+            &h.env,
+            h.guard.into_val(&h.env),
+            to.into_val(&h.env),
+            50i128.into_val(&h.env),
+        ],
+    });
+
+    let ctx2 = soroban_sdk::auth::Context::Contract(soroban_sdk::auth::ContractContext {
+        contract: h.asset.clone(),
+        fn_name: Symbol::new(&h.env, "transfer"),
+        args: soroban_sdk::vec![
+            &h.env,
+            h.guard.into_val(&h.env),
+            to.into_val(&h.env),
+            200i128.into_val(&h.env),
+        ],
+    });
+
+    let ctx3 = soroban_sdk::auth::Context::Contract(soroban_sdk::auth::ContractContext {
+        contract: h.asset.clone(),
+        fn_name: Symbol::new(&h.env, "transfer"),
+        args: soroban_sdk::vec![
+            &h.env,
+            h.guard.into_val(&h.env),
+            to.into_val(&h.env),
+            10i128.into_val(&h.env),
+        ],
+    });
+
+    let contexts = soroban_sdk::vec![&h.env, ctx1, ctx2, ctx3];
+
+    let payload_bytes = [0u8; 32];
+    let payload = soroban_sdk::BytesN::from_array(&h.env, &payload_bytes);
+    let sig = h.agent.sign(&payload_bytes).to_bytes();
+    let signatures = soroban_sdk::BytesN::from_array(&h.env, &sig);
+
+    let res = h.env.as_contract(&h.guard, || {
+        <PolicyEngine as soroban_sdk::auth::CustomAccountInterface>::__check_auth(
+            h.env.clone(),
+            unsafe {
+                std::mem::transmute::<soroban_sdk::BytesN<32>, soroban_sdk::crypto::Hash<32>>(
+                    payload.clone(),
+                )
+            },
+            signatures.clone(),
+            contexts.clone(),
+        )
+    });
+    assert!(res.is_err());
+
+    // Verify events
+    let want_allowed = soroban_sdk::xdr::ScVal::Symbol(
+        soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("allowed")).unwrap(),
+    );
+    let want_blocked = soroban_sdk::xdr::ScVal::Symbol(
+        soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("blocked")).unwrap(),
+    );
+
+    let mut auth_events = std::vec::Vec::new();
+    for e in h.env.events().all().events() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &e.body;
+        if v0.topics.len() == 3 {
+            let res = v0.topics.get(1).unwrap();
+            if res == &want_allowed || res == &want_blocked {
+                auth_events.push((v0.topics.clone(), v0.data.clone()));
+            }
+        }
+    }
+
+    assert_eq!(auth_events.len(), 3);
+
+    let build_map = |idx: u32| {
+        let key = soroban_sdk::xdr::ScVal::Symbol(
+            soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("context_index")).unwrap(),
+        );
+        let val = soroban_sdk::xdr::ScVal::U32(idx);
+        soroban_sdk::xdr::ScVal::Map(Some(soroban_sdk::xdr::ScMap(
+            soroban_sdk::xdr::VecM::try_from(std::vec::Vec::from([soroban_sdk::xdr::ScMapEntry {
+                key,
+                val,
+            }]))
+            .unwrap(),
+        )))
+    };
+
+    // ctx1: allowed
+    assert_eq!(auth_events[0].0.get(1).unwrap(), &want_allowed);
+    assert_eq!(auth_events[0].1, build_map(0)); // context_index
+
+    // ctx2: blocked, PerTxCapExceeded
+    assert_eq!(auth_events[1].0.get(1).unwrap(), &want_blocked);
+    assert_eq!(auth_events[1].1, build_map(1));
+
+    // ctx3: allowed (even though the batch fails, decide evaluates all contexts and emits for all)
+    assert_eq!(auth_events[2].0.get(1).unwrap(), &want_allowed);
+    assert_eq!(auth_events[2].1, build_map(2));
+}

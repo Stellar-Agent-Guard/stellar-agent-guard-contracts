@@ -9,6 +9,8 @@
 //! verifies the Ed25519 signature presented over the transaction auth payload
 //! and then evaluates the policy (SPEC §4/§6/§7). No CAP-71 delegation in v1.
 
+extern crate alloc;
+
 #[cfg(test)]
 extern crate std;
 
@@ -40,6 +42,7 @@ struct EventAuthChecked {
     result: Symbol,
     #[topic]
     reason: Symbol,
+    context_index: u32,
 }
 
 /// Agent heartbeat: data `at` (unix seconds).
@@ -194,12 +197,13 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
 
 // ── Event emission ───────────────────────────────────────────────────────
 
-fn emit_auth(env: &Env, allowed: bool, reason: Option<Error>) {
+fn emit_auth(env: &Env, allowed: bool, reason: Option<Error>, context_index: u32) {
     let res = if allowed { "allowed" } else { "blocked" };
     let reason = reason.map_or("", |e| e.reason());
     EventAuthChecked {
         result: Symbol::new(env, res),
         reason: Symbol::new(env, reason),
+        context_index,
     }
     .publish(env);
 }
@@ -368,10 +372,14 @@ impl PolicyEngine {
     /// Pure pre-flight of the asset-transfer decision path (no writes): lets
     /// agents/SDK simulate a transfer before signing. Emits the same
     /// `auth_checked` events as an in-path decision.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the policy engine's `decide` evaluation returns an empty list of verdicts.
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult {
         let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
-            emit_auth(&env, false, Some(Error::NoPolicy));
+            emit_auth(&env, false, Some(Error::NoPolicy), 0);
             return CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason()));
         };
         let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
@@ -380,7 +388,7 @@ impl PolicyEngine {
         let self_addr = env.current_contract_address();
         let mut ledger = load_ledger(&env);
         let call = transfer_context(&env, &asset, &to, amount);
-        match decide(
+        let verdicts = decide(
             &env,
             &self_addr,
             Some(&cfg),
@@ -391,13 +399,14 @@ impl PolicyEngine {
             &mut ledger,
             now,
             vec![&env, call],
-        ) {
+        );
+        match verdicts.first().unwrap() {
             Decision::Allowed => {
-                emit_auth(&env, true, None);
+                emit_auth(&env, true, None, 0);
                 CheckResult::Allowed
             }
             Decision::Blocked(e) => {
-                emit_auth(&env, false, Some(e));
+                emit_auth(&env, false, Some(*e), 0);
                 CheckResult::Blocked(Symbol::new(&env, e.reason()))
             }
         }
@@ -439,7 +448,9 @@ impl CustomAccountInterface for PolicyEngine {
         // 1. Agent key registered (initialize done).
         let agent: Option<BytesN<32>> = env.storage().instance().get(&DataKey::AgentPubkey);
         let Some(agent) = agent else {
-            emit_auth(&env, false, Some(Error::NotInitialized));
+            for i in 0..auth_contexts.len() {
+                emit_auth(&env, false, Some(Error::NotInitialized), i);
+            }
             return Err(Error::NotInitialized);
         };
 
@@ -451,7 +462,9 @@ impl CustomAccountInterface for PolicyEngine {
 
         // 3. Policy snapshot + gate evaluation over every context.
         let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
-            emit_auth(&env, false, Some(Error::NoPolicy));
+            for i in 0..auth_contexts.len() {
+                emit_auth(&env, false, Some(Error::NoPolicy), i);
+            }
             return Err(Error::NoPolicy);
         };
         let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
@@ -460,7 +473,7 @@ impl CustomAccountInterface for PolicyEngine {
         let self_addr = env.current_contract_address();
 
         let mut ledger = load_ledger(&env);
-        match decide(
+        let verdicts = decide(
             &env,
             &self_addr,
             Some(&cfg),
@@ -471,21 +484,33 @@ impl CustomAccountInterface for PolicyEngine {
             &mut ledger,
             now,
             auth_contexts,
-        ) {
-            Decision::Allowed => {
-                // 4. Persist window changes made by the decision.
-                let had_window = persist_get::<WindowState>(&env, &DataKey::Window).is_some();
-                let has_entries = ledger.len() > 0;
-                if had_window || has_entries {
-                    save_ledger(&env, &ledger);
+        );
+
+        let mut all_passed = true;
+        let mut first_error = None;
+        for (i, v) in verdicts.iter().enumerate() {
+            match v {
+                Decision::Allowed => emit_auth(&env, true, None, u32::try_from(i).unwrap()),
+                Decision::Blocked(e) => {
+                    all_passed = false;
+                    if first_error.is_none() {
+                        first_error = Some(*e);
+                    }
+                    emit_auth(&env, false, Some(*e), u32::try_from(i).unwrap());
                 }
-                emit_auth(&env, true, None);
-                Ok(())
             }
-            Decision::Blocked(e) => {
-                emit_auth(&env, false, Some(e));
-                Err(e)
+        }
+
+        if all_passed {
+            // 4. Persist window changes made by the decision.
+            let had_window = persist_get::<WindowState>(&env, &DataKey::Window).is_some();
+            let has_entries = ledger.len() > 0;
+            if had_window || has_entries {
+                save_ledger(&env, &ledger);
             }
+            Ok(())
+        } else {
+            Err(first_error.unwrap())
         }
     }
 }

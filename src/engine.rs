@@ -12,10 +12,11 @@ pub struct AccountState {
     pub last_heartbeat: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// Every context admitted; window updates applied to `ledger`.
+    /// Context admitted.
     Allowed,
-    /// First failing reason.
+    /// Failing reason.
     Blocked(Error),
 }
 
@@ -112,7 +113,7 @@ fn parse_call(env: &Env, self_addr: &Address, ctx: &Context, cfg: &PolicyConfig)
 
 // ── Decision ─────────────────────────────────────────────────────────────
 
-#[allow(clippy::needless_pass_by_value)] // by-value host Vec avoids slice/coercion limits
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)] // by-value host Vec avoids slice/coercion limits
 pub fn decide(
     env: &Env,
     self_addr: &Address,
@@ -121,73 +122,79 @@ pub fn decide(
     ledger: &mut Ledger,
     now: u64,
     contexts: soroban_sdk::Vec<Context>,
-) -> Decision {
+) -> alloc::vec::Vec<Decision> {
+    let mut verdicts = alloc::vec::Vec::new();
+
     let Some(cfg) = policy else {
-        return Decision::Blocked(Error::NoPolicy);
+        for _ in 0..contexts.len() {
+            verdicts.push(Decision::Blocked(Error::NoPolicy));
+        }
+        return verdicts;
     };
 
-    // ── Account-level gates (SPEC §4, rules 1-5) ─────────────────────────
-    if state.admin_frozen {
-        return Decision::Blocked(Error::AdminFrozen);
-    }
-    if cfg.dms_grace_secs > 0
+    let account_error = if state.admin_frozen {
+        Some(Error::AdminFrozen)
+    } else if cfg.dms_grace_secs > 0
         && state.last_heartbeat != 0
         && now.saturating_sub(state.last_heartbeat) > cfg.dms_grace_secs
     {
-        return Decision::Blocked(Error::HeartbeatExpired);
-    }
-    if cfg.paused {
-        return Decision::Blocked(Error::Paused);
-    }
-    if (cfg.active_from != 0 && now < cfg.active_from)
+        Some(Error::HeartbeatExpired)
+    } else if cfg.paused {
+        Some(Error::Paused)
+    } else if (cfg.active_from != 0 && now < cfg.active_from)
         || (cfg.active_until != 0 && now > cfg.active_until)
     {
-        return Decision::Blocked(Error::OutsideActiveWindow);
+        Some(Error::OutsideActiveWindow)
+    } else {
+        None
+    };
+
+    if let Some(e) = account_error {
+        for _ in 0..contexts.len() {
+            verdicts.push(Decision::Blocked(e));
+        }
+        return verdicts;
     }
 
     // ── Per-context rules (SPEC §6) ──────────────────────────────────────
-    // Window: prune expired entries once up front, then check every transfer
-    // against the running total (current total + amounts already admitted in
-    // this request). Admission is staged and committed only after every
-    // context passes.
     if cfg.window_cap > 0 {
         ledger.prune(now, cfg.window_secs);
     }
     let mut pending: i128 = 0;
     let mut admission: Vec<crate::types::SpendEntry> = Vec::new(env);
+    let mut all_passed = true;
+
     for ctx in contexts.iter() {
         let call = parse_call(env, self_addr, &ctx, cfg);
-        match call {
-            // heartbeat is the only allowed self-call.
+        let ctx_decision = match call {
             ParsedCall::SelfCall { fname } => {
-                if fname != Symbol::new(env, "heartbeat") {
-                    return Decision::Blocked(Error::SelfFunctionNotAllowed);
+                if fname == Symbol::new(env, "heartbeat") {
+                    Decision::Allowed
+                } else {
+                    Decision::Blocked(Error::SelfFunctionNotAllowed)
                 }
             }
-            ParsedCall::CreateContract => {
-                return Decision::Blocked(Error::CreateContractNotAllowed);
-            }
-            ParsedCall::Unknown { .. } => return Decision::Blocked(Error::UnknownContract),
-            ParsedCall::AssetOther { .. } => return Decision::Blocked(Error::FunctionNotAllowed),
+            ParsedCall::CreateContract => Decision::Blocked(Error::CreateContractNotAllowed),
+            ParsedCall::Unknown { .. } => Decision::Blocked(Error::UnknownContract),
+            ParsedCall::AssetOther { .. } => Decision::Blocked(Error::FunctionNotAllowed),
             ParsedCall::AssetTransfer { to, amount, .. } => {
                 if amount <= 0 {
-                    return Decision::Blocked(Error::InvalidAmount);
-                }
-                if !cfg.allow_any_recipient && !contains_addr(&cfg.recipients, &to) {
-                    return Decision::Blocked(Error::RecipientNotAllowed);
-                }
-                if cfg.per_tx_cap > 0 && amount > cfg.per_tx_cap {
-                    return Decision::Blocked(Error::PerTxCapExceeded);
-                }
-                if cfg.window_cap > 0 {
-                    // Cumulative against the current window: existing total +
-                    // amounts staged earlier in this same request.
+                    Decision::Blocked(Error::InvalidAmount)
+                } else if !cfg.allow_any_recipient && !contains_addr(&cfg.recipients, &to) {
+                    Decision::Blocked(Error::RecipientNotAllowed)
+                } else if cfg.per_tx_cap > 0 && amount > cfg.per_tx_cap {
+                    Decision::Blocked(Error::PerTxCapExceeded)
+                } else if cfg.window_cap > 0 {
                     let projected = ledger.total.saturating_add(pending);
                     if projected.saturating_add(amount) > cfg.window_cap {
-                        return Decision::Blocked(Error::WindowCapExceeded);
+                        Decision::Blocked(Error::WindowCapExceeded)
+                    } else {
+                        pending = pending.saturating_add(amount);
+                        admission.push_back(crate::types::SpendEntry { ts: now, amount });
+                        Decision::Allowed
                     }
-                    pending = pending.saturating_add(amount);
-                    admission.push_back(crate::types::SpendEntry { ts: now, amount });
+                } else {
+                    Decision::Allowed
                 }
             }
             ParsedCall::Protocol { contract, fname } => {
@@ -206,21 +213,29 @@ pub fn decide(
                     }
                 }
                 if !found {
-                    return Decision::Blocked(Error::ProtocolNotAllowed);
-                }
-                if !fn_ok {
-                    return Decision::Blocked(Error::FunctionNotAllowed);
+                    Decision::Blocked(Error::ProtocolNotAllowed)
+                } else if !fn_ok {
+                    Decision::Blocked(Error::FunctionNotAllowed)
+                } else {
+                    Decision::Allowed
                 }
             }
+        };
+
+        if let Decision::Blocked(_) = &ctx_decision {
+            all_passed = false;
         }
+        verdicts.push(ctx_decision);
     }
 
     // ── Commit staged window admissions (all contexts admissible) ────────
-    for e in admission.iter() {
-        ledger.admit(e.ts, e.amount);
+    if all_passed {
+        for e in admission.iter() {
+            ledger.admit(e.ts, e.amount);
+        }
     }
 
-    Decision::Allowed
+    verdicts
 }
 
 #[cfg(test)]
@@ -297,7 +312,10 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx(&env, 1, 2, 5)];
         let d = decide(&env, &sa, None, &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d, Decision::Blocked(Error::NoPolicy)));
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::NoPolicy)
+        ));
     }
 
     #[test]
@@ -309,7 +327,7 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx(&env, 1, 2, 5)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d, Decision::Allowed));
+        assert!(matches!(d.first().unwrap(), Decision::Allowed));
         assert_eq!(l.total, 5);
     }
 
@@ -322,7 +340,10 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx(&env, 1, 2, 11)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d, Decision::Blocked(Error::PerTxCapExceeded)));
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::PerTxCapExceeded)
+        ));
         assert_eq!(l.total, 0);
     }
 
@@ -334,12 +355,15 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx(&env, 1, 99, 5)];
         let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d, Decision::Blocked(Error::RecipientNotAllowed)));
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::RecipientNotAllowed)
+        ));
         let mut p2 = base_policy(&env);
         p2.allow_any_recipient = true;
         let ctx2 = vec![&env, transfer_ctx(&env, 1, 99, 5)];
         let d2 = decide(&env, &sa, Some(&p2), &alive(), &mut l, 1000, ctx2.clone());
-        assert!(matches!(d2, Decision::Allowed));
+        assert!(matches!(d2.first().unwrap(), Decision::Allowed));
     }
 
     #[test]
@@ -350,7 +374,10 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx(&env, 7, 2, 5)];
         let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d, Decision::Blocked(Error::UnknownContract)));
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::UnknownContract)
+        ));
     }
 
     #[test]
@@ -369,7 +396,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 60)],
         );
-        assert!(matches!(d1, Decision::Allowed));
+        assert!(matches!(d1.first().unwrap(), Decision::Allowed));
         let d2 = decide(
             &env,
             &sa,
@@ -379,7 +406,10 @@ mod tests {
             2000,
             vec![&env, transfer_ctx(&env, 1, 2, 60)],
         );
-        assert!(matches!(d2, Decision::Blocked(Error::WindowCapExceeded)));
+        assert!(matches!(
+            d2.first().unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
         let d3 = decide(
             &env,
             &sa,
@@ -389,7 +419,7 @@ mod tests {
             200_000,
             vec![&env, transfer_ctx(&env, 1, 2, 60)],
         );
-        assert!(matches!(d3, Decision::Allowed));
+        assert!(matches!(d3.first().unwrap(), Decision::Allowed));
     }
 
     #[test]
@@ -405,7 +435,10 @@ mod tests {
             transfer_ctx(&env, 1, 2, 60),
         ];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d, Decision::Blocked(Error::WindowCapExceeded)));
+        assert!(matches!(
+            d.get(1).unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
         assert_eq!(l.total, 0);
     }
 
@@ -431,7 +464,9 @@ mod tests {
                 &mut l,
                 1000,
                 vec![&env, proto_ctx(&env, 3, "swap")]
-            ),
+            )
+            .first()
+            .unwrap(),
             Decision::Allowed
         ));
         assert!(matches!(
@@ -443,7 +478,9 @@ mod tests {
                 &mut l,
                 1000,
                 vec![&env, proto_ctx(&env, 3, "drain")]
-            ),
+            )
+            .first()
+            .unwrap(),
             Decision::Blocked(Error::FunctionNotAllowed)
         ));
         assert!(matches!(
@@ -455,7 +492,9 @@ mod tests {
                 &mut l,
                 1000,
                 vec![&env, proto_ctx(&env, 4, "swap")]
-            ),
+            )
+            .first()
+            .unwrap(),
             Decision::Blocked(Error::UnknownContract)
         ));
     }
@@ -473,7 +512,9 @@ mod tests {
             last_heartbeat: 0,
         };
         assert!(matches!(
-            decide(&env, &sa, p.as_ref(), &frozen, &mut l, 1000, ctx.clone()),
+            decide(&env, &sa, p.as_ref(), &frozen, &mut l, 1000, ctx.clone())
+                .first()
+                .unwrap(),
             Decision::Blocked(Error::AdminFrozen)
         ));
 
@@ -488,7 +529,9 @@ mod tests {
                 &mut l,
                 1000,
                 ctx.clone()
-            ),
+            )
+            .first()
+            .unwrap(),
             Decision::Blocked(Error::Paused)
         ));
 
@@ -499,7 +542,9 @@ mod tests {
             last_heartbeat: 500,
         };
         assert!(matches!(
-            decide(&env, &sa, Some(&dms), &st, &mut l, 700, ctx.clone()),
+            decide(&env, &sa, Some(&dms), &st, &mut l, 700, ctx.clone())
+                .first()
+                .unwrap(),
             Decision::Blocked(Error::HeartbeatExpired)
         ));
         let st2 = AccountState {
@@ -507,7 +552,9 @@ mod tests {
             last_heartbeat: 650,
         };
         assert!(matches!(
-            decide(&env, &sa, Some(&dms), &st2, &mut l, 700, ctx.clone()),
+            decide(&env, &sa, Some(&dms), &st2, &mut l, 700, ctx.clone())
+                .first()
+                .unwrap(),
             Decision::Allowed
         ));
     }
@@ -525,7 +572,9 @@ mod tests {
         };
         let mut l = Ledger::empty(&env);
         assert!(matches!(
-            decide(&env, &sa, Some(&p), &expired, &mut l, 700, hb.clone()),
+            decide(&env, &sa, Some(&p), &expired, &mut l, 700, hb.clone())
+                .first()
+                .unwrap(),
             Decision::Blocked(Error::HeartbeatExpired)
         ));
         let fresh = AccountState {
@@ -533,7 +582,9 @@ mod tests {
             last_heartbeat: 650,
         };
         assert!(matches!(
-            decide(&env, &sa, Some(&p), &fresh, &mut l, 700, hb.clone()),
+            decide(&env, &sa, Some(&p), &fresh, &mut l, 700, hb.clone())
+                .first()
+                .unwrap(),
             Decision::Allowed
         ));
     }
@@ -554,7 +605,7 @@ mod tests {
         ];
         let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx.clone());
         assert!(matches!(
-            d,
+            d.first().unwrap(),
             Decision::Blocked(Error::SelfFunctionNotAllowed)
         ));
     }
