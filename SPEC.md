@@ -208,6 +208,13 @@ admin's `unfreeze` (§7). This is the precise freeze/reversal boundary.
   function does `require_auth` on the account itself, so it routes through `__check_auth`, which
   verifies the agent's signature, and then records `LastHeartbeat = now`). No fund movement, no
   window accounting.
+- **Redundant heartbeats are skipped (gas optimization).** A heartbeat that arrives in the same
+  ledger second as the previous one (`now == LastHeartbeat`) is a true no-op: no persistent write,
+  no TTL extension, and no `heartbeat` event. The stored value is already `now`, and the first
+  heartbeat of that second already extended the entry's TTL, so the duplicate carries no new
+  information and only burns fees. Distinct-second heartbeats (the normal case) always write and
+  emit. Measured: see `redundant_same_second_heartbeat_is_a_measured_no_op` (CPU instruction delta
+  between a fresh and a redundant heartbeat).
 - **Grace:** `dms_grace_secs` in the policy (0 disables). Recommended default on testnet proofs:
   small (e.g. 60s) so the freeze is observable; production guidance ≥ several days.
 - **Freeze mechanism:** automatic and *lazy*. There is no stored "auto-frozen" flag — rule #2
@@ -336,7 +343,8 @@ impl CustomAccountInterface for PolicyEngine {
 ```rust
 #[contracttype]
 pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
-                   pub last_heartbeat: u64, pub now: u64, pub has_policy: bool }
+                   pub last_heartbeat: u64, pub now: u64, pub has_policy: bool,
+                   pub policy_revision: u64 }
 
 #[contracttype]
 pub enum CheckResult { Allowed, Blocked(BlockReason) }
@@ -389,7 +397,7 @@ filtering by the SDK listener.
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
 | `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | — | every `__check_auth` / `check` decision |
-| `heartbeat` | — | `at: u64` | on agent heartbeat |
+| `heartbeat` | — | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `frozen` / `unfrozen` | — | `by: Address` | admin freeze / unfreeze |
 | `policy_set` / `policy_revoked` | — | `by: Address` | admin policy changes |
 

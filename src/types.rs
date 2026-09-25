@@ -88,6 +88,7 @@ pub enum ParsedCall {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
     pub has_policy: bool,
+    pub policy_revision: u64,
     pub admin_frozen: bool,
     pub heartbeat_expired: bool,
     pub last_heartbeat: u64,
@@ -121,6 +122,8 @@ pub enum DataKey {
     LastHeartbeat,
     /// Persistent: admin-initiated freeze flag.
     AdminFrozen,
+    /// Persistent: incrementing counter for policy changes.
+    PolicyRevision,
 }
 
 #[contracterror]
