@@ -1,0 +1,21 @@
+name: Fuzz smoke
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "fuzz/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+
+jobs:
+  check-auth-full-path:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run bounded check-auth smoke test
+        run: cargo fuzz run check_auth_full_path --fuzz-dir fuzz -- -max_total_time=60

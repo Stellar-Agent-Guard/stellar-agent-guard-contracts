@@ -1,0 +1,21 @@
+[package]
+name = "stellar-agent-guard-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+ed25519-dalek = "2"
+libfuzzer-sys = "0.4"
+soroban-sdk = { version = "27.0.6", features = ["testutils"] }
+stellar-agent-guard-contracts = { path = ".." }
+
+[[bin]]
+name = "check_auth_full_path"
+path = "fuzz_targets/check_auth_full_path.rs"
+test = false
+doc = false
+bench = false

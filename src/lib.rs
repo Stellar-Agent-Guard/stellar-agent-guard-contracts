@@ -25,7 +25,8 @@ use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, TryFromVal, Val,
 };
-use types::{CheckResult, DataKey, Error, PolicyConfig, Status, WindowState};
+use types::{CheckResult, DataKey, Status, WindowState};
+pub use types::{Error, PolicyConfig};
 use window::Ledger;
 
 // ── Contract events (SPEC §9). Each event is its own type; topic layout
