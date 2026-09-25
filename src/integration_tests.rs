@@ -644,3 +644,67 @@ fn revoke_policy_is_instant_default_deny() {
     h.revoke_policy();
     h.transfer_expect_blocked(&recv, 5);
 }
+
+// ── Heartbeat same-second no-op (issue #126) ─────────────────────────────
+
+fn heartbeat_event_count(h: &Harness) -> usize {
+    h.env.events().all().events().len()
+}
+
+#[test]
+fn heartbeat_same_second_is_noop() {
+    let mut h = Harness::new();
+    h.install_policy(&h.base_policy());
+    // Non-zero timestamp: `LastHeartbeat == 0` ("never") always records,
+    // so the skip only triggers on a genuine same-second re-fire.
+    h.set_time(5_000);
+
+    h.heartbeat();
+    let status_after_first = h.status();
+    assert_eq!(status_after_first.last_heartbeat, 5_000);
+    let events_after_first = heartbeat_event_count(&h);
+
+    // Same ledger second: no write, no event, status identical.
+    h.heartbeat();
+    let status_after_second = h.status();
+    assert_eq!(status_after_second.last_heartbeat, 5_000);
+    assert_eq!(
+        status_after_second.heartbeat_expired,
+        status_after_first.heartbeat_expired
+    );
+    assert_eq!(heartbeat_event_count(&h), events_after_first);
+
+    // A later second records normally again.
+    h.set_time(5_001);
+    h.heartbeat();
+    assert_eq!(h.status().last_heartbeat, 5_001);
+}
+
+/// Measures the metered CPU cost of a heartbeat with and without the
+/// same-second skip, so the PR records whether the redundant write costs
+/// anything. Compares the meter deltas across the two invocations and
+/// asserts the skipped re-fire is strictly cheaper. Fully deterministic
+/// in the mocked test env (stable across runs).
+#[test]
+fn heartbeat_same_second_skips_write_cost() {
+    let mut h = Harness::new();
+    h.install_policy(&h.base_policy());
+    h.set_time(9_000);
+    h.env.cost_estimate().budget().reset_unlimited();
+
+    // Fresh snapshot read each time; each invocation's marginal cost is
+    // the meter delta across it.
+    let r0 = h.env.cost_estimate().budget().cpu_instruction_cost();
+    h.heartbeat();
+    let r1 = h.env.cost_estimate().budget().cpu_instruction_cost();
+    h.heartbeat();
+    let r2 = h.env.cost_estimate().budget().cpu_instruction_cost();
+    std::println!("#126 raw meter: r0={r0} r1={r1} r2={r2}");
+    let first = r0.abs_diff(r1);
+    let second = r1.abs_diff(r2);
+    std::println!("#126 budget: first heartbeat cpu={first}, same-second re-fire cpu={second}");
+    assert!(
+        second < first,
+        "skipped re-fire ({second}) must cost less than a recording heartbeat ({first})"
+    );
+}
