@@ -587,7 +587,10 @@ fn self_address_rejected_in_every_list() {
 
     // protocols: the guard itself listed as an allowlisted protocol contract.
     let mut p = h.base_policy();
-    let rule = ProtocolRule { contract: h.guard.clone(), fns: None };
+    let rule = ProtocolRule {
+        contract: h.guard.clone(),
+        fns: None,
+    };
     p.protocols = soroban_sdk::vec![&h.env, rule];
     expect_invalid(&p, "protocols");
 
