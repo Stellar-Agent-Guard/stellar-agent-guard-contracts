@@ -325,6 +325,8 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // Pure pre-flight replica of the §6.2 decision path (same code, no writes):
     // lets agents/SDK simulate an asset transfer before signing. Emits the same
     // events as an in-path decision so telemetry sees one vocabulary.
+pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
+  // Same zero-write pre-flight, with remaining_window and effective cap metrics.
 
 // ── Enforcement (host-invoked; not callable by anyone) ────────────────────
 impl CustomAccountInterface for PolicyEngine {
@@ -338,7 +340,7 @@ impl CustomAccountInterface for PolicyEngine {
 }
 ```
 
-`Status` / `CheckResult` / reasons:
+`Status` / `CheckResult` / `CheckDetail` / reasons:
 
 ```rust
 #[contracttype]
@@ -348,6 +350,15 @@ pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
 
 #[contracttype]
 pub enum CheckResult { Allowed, Blocked(BlockReason) }
+
+#[contracttype]
+pub struct CheckDetail {
+  pub result: CheckResult,
+  pub remaining_window: Option<i128>,
+  pub per_tx_cap: Option<i128>,
+  pub effective_per_tx_cap: Option<i128>,
+  pub effective_window_cap: Option<i128>,
+}
 
 #[contracterror] #[repr(u32)]
 pub enum Error {            // values stable; see tests/fixtures
@@ -360,6 +371,13 @@ pub enum Error {            // values stable; see tests/fixtures
     UnknownContract = 26, SelfFunctionNotAllowed = 27,
 }
 ```
+
+`check_detailed` loads and prunes only an in-memory copy of the rolling ledger.
+It writes no ledger state and emits the same `auth_checked` event, with the same
+`allowed`/`blocked` result and reason, as `check`. `remaining_window` is the
+capacity available before the requested transfer; it is `None` when the rolling
+window cap is disabled. The configured and effective caps are `None` when
+disabled; v1 has no per-asset overrides, so effective caps equal configured caps.
 
 ---
 

@@ -260,6 +260,22 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 # → {"Blocked":"heartbeat_expired"}
 ```
 
+For operator triage, `check_detailed` returns the same verdict plus current headroom and
+effective caps without writing the rolling window:
+```rust
+pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
+```
+Example CLI read for a policy with a 150-unit rolling cap and 40 units already spent:
+```bash
+stellar contract invoke --id GUARD_CONTRACT_ID --network testnet --source-account operator --send=no -- \
+  check_detailed --asset ASSET_CONTRACT_ID --to RECIPIENT_ADDRESS --amount 25
+# → {"result":"Allowed","remaining_window":"110","per_tx_cap":"1000",\
+#    "effective_per_tx_cap":"1000","effective_window_cap":"150"}
+```
+When a cap is disabled, its corresponding detail is `None` rather than a sentinel value.
+The SDK and dashboard should consume these fields for pre-signing warnings and blocked-call
+operator reports.
+
 ### `__check_auth` (host-invoked — not callable by anyone)
 ```rust
 fn __check_auth(env: Env, signature_payload: Hash<32>, signatures: BytesN<64>,
