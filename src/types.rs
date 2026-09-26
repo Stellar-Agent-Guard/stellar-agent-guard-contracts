@@ -102,6 +102,19 @@ pub enum CheckResult {
     Blocked(Symbol),
 }
 
+/// Advisory result for a targeted asset transfer. All fields are calculated
+/// from the current policy and window snapshot; this type never represents a
+/// storage mutation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckDetail {
+    pub result: CheckResult,
+    pub remaining_window: Option<i128>,
+    pub per_tx_cap: Option<i128>,
+    pub effective_per_tx_cap: Option<i128>,
+    pub effective_window_cap: Option<i128>,
+}
+
 // Storage layout (SPEC §3). `Initialized`/`Admin`/`AgentPubkey` live in
 // instance storage (auto-TTL on every invocation); the rest live in
 // persistent storage with explicit TTL extension on every write.

@@ -215,6 +215,12 @@ cd tools/agent-tx && cargo build --release
   --agent-secret S...   # the registered agent's Ed25519 secret (AGENT_SECRET env also works)
 ```
 
+For the full steady-state loop an agent must run (heartbeat cadence, per-transfer
+pre-flight, blocked-reason handling, DMS stop conditions), see
+[`examples/agent-loop.md`](examples/agent-loop.md).
+The TypeScript equivalent is the SDK's
+[agent-runtime guide issue](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
+
 ### `freeze` / `unfreeze`
 ```rust
 pub fn freeze(env: Env)      // admin only — sets AdminFrozen = true
@@ -279,6 +285,22 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
   --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX --amount 50
 # → {"Blocked":"heartbeat_expired"}
 ```
+
+For operator triage, `check_detailed` returns the same verdict plus current headroom and
+effective caps without writing the rolling window:
+```rust
+pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
+```
+Example CLI read for a policy with a 150-unit rolling cap and 40 units already spent:
+```bash
+stellar contract invoke --id GUARD_CONTRACT_ID --network testnet --source-account operator --send=no -- \
+  check_detailed --asset ASSET_CONTRACT_ID --to RECIPIENT_ADDRESS --amount 25
+# → {"result":"Allowed","remaining_window":"110","per_tx_cap":"1000",\
+#    "effective_per_tx_cap":"1000","effective_window_cap":"150"}
+```
+When a cap is disabled, its corresponding detail is `None` rather than a sentinel value.
+The SDK and dashboard should consume these fields for pre-signing warnings and blocked-call
+operator reports.
 
 ### `__check_auth` (host-invoked — not callable by anyone)
 ```rust
@@ -463,6 +485,9 @@ Stellar Agent Guard operates across three dedicated repositories:
   (custom-account) address and submits real testnet transactions. The `stellar` CLI
   cannot sign auth entries whose address is a contract, so this tool fills that gap; it
   is the prototype of the Phase 2 SDK's signing path.
+- `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat
+  cadence formula (`interval ≤ grace / 3`), pre-flight `check()`, blocked-reason
+  handling table, and stop conditions, with tested `agent-tx` commands.
 - `tests/fixtures/README.md` — the real testnet evidence for the five scenarios.
 - `SPEC.md` — the full architecture specification.
 

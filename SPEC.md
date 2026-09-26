@@ -177,6 +177,15 @@ Implementation (exact, lazy, bounded):
   `window_secs` span") is preserved in all cases; in the pathological region of ≥8192 distinct
   spend seconds within one window the engine is conservative until density drops. This is
   documented here and in the README, not hidden.
+- **Measured worst case (single lazy prune burst):** the real bench measurement for the pathological
+  case of 8192 stale entries being pruned in one authorization is `worst_case_prune_cpu_cost=86925434`
+  CPU instructions (`cargo test prune_worst_case_measured_cost -- --nocapture`). That is a
+  real worst-case cost and is over the per-call host budget; the fix is tracked in
+  [issue #113](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/113)
+  (bulk-prune / sorted search), not a false all-clear. The bounded `MAX_WINDOW_ENTRIES` cap
+  also interacts with storage rent/TTL because each persisted window entry is a ledger item that
+  must remain live; see [issue #85](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/85)
+  for the long-lived-account rent/TTL model.
 
 **Invariant (window):** for every authorization decision, `total` after any admission equals the
 sum of `entries[i].amount` over entries with `ts > now - window_secs`, and a new asset transfer
@@ -355,6 +364,8 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // Pure pre-flight replica of the §6.2 decision path (same code, no writes):
     // lets agents/SDK simulate an asset transfer before signing. Emits the same
     // events as an in-path decision so telemetry sees one vocabulary.
+pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
+  // Same zero-write pre-flight, with remaining_window and effective cap metrics.
 
 // ── Enforcement (host-invoked; not callable by anyone) ────────────────────
 impl CustomAccountInterface for PolicyEngine {
@@ -368,7 +379,7 @@ impl CustomAccountInterface for PolicyEngine {
 }
 ```
 
-`Status` / `CheckResult` / reasons:
+`Status` / `CheckResult` / `CheckDetail` / reasons:
 
 **Wire format:** Exact JSON serialization for non-Rust consumers (SDK, dashboard) is documented in [Wire Format](docs/research/wire-format.md) — includes field names, enum tagging convention (`Allowed` bare vs `{"Blocked":"reason"}`), and decoder-breakage warning.
 
@@ -381,6 +392,15 @@ pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
 #[contracttype]
 pub enum CheckResult { Allowed, Blocked(BlockReason) }
 
+#[contracttype]
+pub struct CheckDetail {
+  pub result: CheckResult,
+  pub remaining_window: Option<i128>,
+  pub per_tx_cap: Option<i128>,
+  pub effective_per_tx_cap: Option<i128>,
+  pub effective_window_cap: Option<i128>,
+}
+
 #[contracterror] #[repr(u32)]
 pub enum Error {            // values stable; see tests/fixtures
     Unauthorized = 1, AlreadyInitialized = 2, NotInitialized = 3,
@@ -392,6 +412,13 @@ pub enum Error {            // values stable; see tests/fixtures
     UnknownContract = 26, SelfFunctionNotAllowed = 27,
 }
 ```
+
+`check_detailed` loads and prunes only an in-memory copy of the rolling ledger.
+It writes no ledger state and emits the same `auth_checked` event, with the same
+`allowed`/`blocked` result and reason, as `check`. `remaining_window` is the
+capacity available before the requested transfer; it is `None` when the rolling
+window cap is disabled. The configured and effective caps are `None` when
+disabled; v1 has no per-asset overrides, so effective caps equal configured caps.
 
 ---
 
