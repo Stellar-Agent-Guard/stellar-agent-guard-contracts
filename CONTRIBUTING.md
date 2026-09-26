@@ -108,3 +108,10 @@ Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the
 [issue tracker](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues);
 each carries one `complexity: trivial|small|medium|large` label. Good first
 tasks for the Drips Stellar Wave contributor sprints.
+
+## Dependency drift check
+
+When bumping `soroban-sdk` version in `Cargo.toml`, you **must** re-verify
+SPEC §1.1 quotes against the new SDK source (`src/auth.rs`, `src/custom_account.rs`).
+Update the version comment in `Cargo.toml` and the SPEC §1.1 header accordingly.
+This is the mechanical ratchet preventing silent auth-semantics drift.

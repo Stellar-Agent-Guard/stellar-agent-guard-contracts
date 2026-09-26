@@ -410,6 +410,7 @@ pub enum Error {            // values stable; see tests/fixtures
     AssetNotAllowed = 20, RecipientNotAllowed = 21, PerTxCapExceeded = 22,
     WindowCapExceeded = 23, ProtocolNotAllowed = 24, FunctionNotAllowed = 25,
     UnknownContract = 26, SelfFunctionNotAllowed = 27,
+    CreateContractNotAllowed = 28,
 }
 ```
 
