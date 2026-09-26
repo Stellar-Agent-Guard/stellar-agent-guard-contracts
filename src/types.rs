@@ -156,6 +156,7 @@ pub enum Error {
 
 impl Error {
     /// Stable, human- and telemetry-readable reason name (no env needed).
+    #[allow(clippy::must_use_candidate)]
     pub fn reason(self) -> &'static str {
         match self {
             Self::Unauthorized => "unauthorized",

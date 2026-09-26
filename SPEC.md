@@ -201,6 +201,30 @@ Note the dead-man auto-freeze (`#2`) applies even to `heartbeat` from the regist
 heartbeat arriving after the grace window expired cannot revive the account — revival is the
 admin's `unfreeze` (§7). This is the precise freeze/reversal boundary.
 
+### 4.1 Gate cost order (measured)
+
+The decision table above is ordered **semantically first** (admin freeze → dead-man → policy gates → classification), not cost-optimized. Benchmarks on the Soroban test environment (see `benches/denial_path_gas.rs`) show the following CPU instruction costs for a blocked authorization at each gate:
+
+| Gate | Condition | Approx. Instructions |
+|------|-----------|---------------------|
+| 1 | `AdminFrozen` | ~8,750 |
+| 2 | `HeartbeatExpired` | ~8,750 |
+| 3 | `NoPolicy` | ~8,750 |
+| 4 | `Paused` | ~8,750 |
+| 5 | `OutsideActiveWindow` | ~8,750 |
+| 6 | `SelfFunctionNotAllowed` | ~10,600 |
+| 7a | `AssetNotAllowed` (unlisted asset) | ~16,300 |
+| 7b | `RecipientNotAllowed` | ~17,700 |
+| 7c | `PerTxCapExceeded` | ~14,200 |
+| 7d | `WindowCapExceeded` | ~14,300 |
+| 7e | `ProtocolNotAllowed` | ~8,200 |
+| 7f | `FunctionNotAllowed` | ~10,500 |
+| 7g | `UnknownContract` | ~11,800 |
+
+For comparison, an **allowed** transfer with window pruning costs ~14,800 instructions, while an allowed transfer without window costs ~17,800 instructions.
+
+**Observation:** The early gates (#1–#5) are consistently the cheapest (~8.7k instructions) because they only check simple boolean/int flags on the account state. The classification gates (#7a–#7g) are more expensive because they require parsing the auth context, looking up allowlists, and evaluating caps. The semantic ordering therefore *accidentally* aligns with cost ordering: the cheapest gates run first. Reordering for cost would not yield meaningful savings and would weaken the semantic clarity of the freeze/reversal boundary (admin freeze must remain first). The delta between semantic and cost-optimal ordering is immaterial (<2x on the fast path).
+
 ---
 
 ## 5. Dead-man switch — precise definition
