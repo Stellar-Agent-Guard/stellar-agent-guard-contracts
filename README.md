@@ -5,6 +5,9 @@
 <a href="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/ci.yml">
 <img src="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/ci.yml/badge.svg" alt="CI"/>
 </a>
+<a href="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/host-watch.yml">
+  <img src="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/host-watch.yml/badge.svg" alt="Futurenet host watch"/>
+</a>
 <a href="LICENSE-MIT">
 <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"/>
 </a>
@@ -34,6 +37,14 @@ switch, and a dead-man switch (heartbeat with admin-attested reversal).
 Stellar testnet (protocol 28) with real contract IDs and transaction hashes — evidence is
 recorded in [`tests/fixtures/README.md`](tests/fixtures/README.md), and the deployed
 contract's read functions were cross-checked live during this README pass (below).
+
+The weekly [Futurenet host watch](.github/workflows/host-watch.yml) builds the contract, runs the
+hermetic suite, then deploys a fresh ephemeral account to Futurenet and exercises
+`initialize` → `set_policy` → an agent-signed `heartbeat` (the real `__check_auth` path) → read
+`check`/`status` simulations. It also reports the Futurenet protocol version. This is intentionally
+a compatibility signal, not a claim that Futurenet state is persistent; a failed run is visible
+in Actions and is not silently opened as an issue. The host behaviors this watch covers are
+listed in [SPEC §1.1](SPEC.md#11-sdk-and-host-surface-this-is-built-on-soroban-sdk-27).
 
 ## 🎯 What makes this different
 
@@ -194,6 +205,12 @@ cd tools/agent-tx && cargo build --release
   --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --agent-secret S...   # the registered agent's Ed25519 secret (AGENT_SECRET env also works)
 ```
+
+For the full steady-state loop an agent must run (heartbeat cadence, per-transfer
+pre-flight, blocked-reason handling, DMS stop conditions), see
+[`examples/agent-loop.md`](examples/agent-loop.md).
+The TypeScript equivalent is the SDK's
+[agent-runtime guide issue](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
 
 ### `freeze` / `unfreeze`
 ```rust
@@ -443,6 +460,9 @@ Stellar Agent Guard operates across three dedicated repositories:
   (custom-account) address and submits real testnet transactions. The `stellar` CLI
   cannot sign auth entries whose address is a contract, so this tool fills that gap; it
   is the prototype of the Phase 2 SDK's signing path.
+- `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat
+  cadence formula (`interval ≤ grace / 3`), pre-flight `check()`, blocked-reason
+  handling table, and stop conditions, with tested `agent-tx` commands.
 - `tests/fixtures/README.md` — the real testnet evidence for the five scenarios.
 - `SPEC.md` — the full architecture specification.
 
