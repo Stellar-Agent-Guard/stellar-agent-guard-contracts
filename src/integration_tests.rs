@@ -33,6 +33,18 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, FromVal, IntoVal
 
 const SIG_EXPIRATION_LEDGER: u32 = 6_000_000;
 
+/// A `ScVal::Symbol` built from a plain string (event names / map keys).
+fn symbol_val(s: &str) -> ScVal {
+    ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from(s)).unwrap())
+}
+
+/// Off-chain reproduction of the contract's key fingerprint (SPEC §9):
+/// `sha256(pubkey)[0..8]`, as the `ScVal::Bytes` an event data map carries.
+fn fingerprint(pubkey: &[u8; 32]) -> ScVal {
+    let digest = Sha256::digest(pubkey);
+    ScVal::Bytes(ScBytes::try_from(digest[..8].to_vec()).unwrap())
+}
+
 /// Number of `heartbeat` events published by the last contract invocation.
 fn heartbeat_event_count(env: &Env) -> usize {
     let want = ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("event_heartbeat")).unwrap());
@@ -325,6 +337,36 @@ impl Harness {
                 xdr::ContractEventBody::V0(v0) => v0.topics.get(1) == Some(&want),
             })
     }
+
+    /// The `(old, new)` key fingerprints carried by the most recent
+    /// `agent_rotated` event (SPEC §9), as raw `ScVal`s. Panics if the event
+    /// is absent or malformed.
+    fn agent_rotated_fingerprints(&self) -> (ScVal, ScVal) {
+        let event_name = symbol_val("event_agent_rotated");
+        for event in self.env.events().all().events().iter().rev() {
+            let xdr::ContractEventBody::V0(v0) = &event.body;
+            if v0.topics.first() != Some(&event_name) {
+                continue;
+            }
+            let ScVal::Map(Some(map)) = &v0.data else {
+                panic!("agent_rotated data is not a map");
+            };
+            let mut old = None;
+            let mut new = None;
+            for entry in &map.0 {
+                if entry.key == symbol_val("old_fingerprint") {
+                    old = Some(entry.val.clone());
+                } else if entry.key == symbol_val("new_fingerprint") {
+                    new = Some(entry.val.clone());
+                }
+            }
+            return (
+                old.expect("agent_rotated is missing old_fingerprint"),
+                new.expect("agent_rotated is missing new_fingerprint"),
+            );
+        }
+        panic!("no agent_rotated event was emitted");
+    }
 }
 
 // ── Scenarios ────────────────────────────────────────────────────────────
@@ -603,6 +645,24 @@ fn wrong_signature_is_rejected_by_host_crypto() {
 
     // The registered agent still works afterwards.
     h.transfer(&recv, 5);
+}
+
+#[test]
+fn rotate_agent_key_event_carries_old_and_new_fingerprints() {
+    let h = Harness::new();
+    let old_pk = h.agent.verifying_key().to_bytes();
+    let new_pk = SigningKey::from_bytes(&[11u8; 32])
+        .verifying_key()
+        .to_bytes();
+
+    // First rotation: the `old` fingerprint is the key set at `initialize`.
+    PolicyEngineClient::new(&h.env, &h.guard)
+        .rotate_agent_key(&BytesN::from_array(&h.env, &new_pk));
+
+    let (old_fp, new_fp) = h.agent_rotated_fingerprints();
+    assert_eq!(old_fp, fingerprint(&old_pk));
+    assert_eq!(new_fp, fingerprint(&new_pk));
+    assert_ne!(old_fp, new_fp, "old and new keys must be distinguishable");
 }
 
 #[test]

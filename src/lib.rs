@@ -81,10 +81,15 @@ struct EventPolicyRevoked {
     by: Address,
 }
 
+/// Agent key rotation: data `by` (the admin that acted) plus truncated
+/// fingerprints of the outgoing and incoming agent keys, so an auditor can
+/// reconstruct the old→new linkage without carrying full pubkeys (SPEC §9).
 #[contractevent]
 #[derive(Clone)]
 struct EventAgentRotated {
     by: Address,
+    old_fingerprint: BytesN<8>,
+    new_fingerprint: BytesN<8>,
 }
 
 // ── Persistent-storage helpers (SPEC §3) ────────────────────────────────
@@ -224,8 +229,26 @@ fn emit_policy_set(env: &Env, by: &Address) {
 fn emit_policy_revoked(env: &Env, by: &Address) {
     EventPolicyRevoked { by: by.clone() }.publish(env);
 }
-fn emit_agent_rotated(env: &Env, by: &Address) {
-    EventAgentRotated { by: by.clone() }.publish(env);
+/// Compact key fingerprint: the first 8 bytes of `SHA-256(pubkey)`. Rendered
+/// as 16 lowercase hex characters off-chain (greppable, small event payload);
+/// deliberately truncating so events never carry a full pubkey.
+fn key_fingerprint(env: &Env, pubkey: &BytesN<32>) -> BytesN<8> {
+    let digest: [u8; 32] = env
+        .crypto()
+        .sha256(&Bytes::from_array(env, &pubkey.to_array()))
+        .into();
+    let mut fingerprint = [0u8; 8];
+    fingerprint.copy_from_slice(&digest[..8]);
+    BytesN::from_array(env, &fingerprint)
+}
+
+fn emit_agent_rotated(env: &Env, by: &Address, old: &BytesN<32>, new: &BytesN<32>) {
+    EventAgentRotated {
+        by: by.clone(),
+        old_fingerprint: key_fingerprint(env, old),
+        new_fingerprint: key_fingerprint(env, new),
+    }
+    .publish(env);
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────
@@ -295,10 +318,16 @@ impl PolicyEngine {
     /// power; it can only replace the key the account will authenticate.
     pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>) {
         let admin = Self::admin_or_panic(&env);
+        // Post-initialize the key always exists; the fingerprint needs the old
+        // key before the storage slot is overwritten.
+        let old_pubkey: Option<BytesN<32>> = env.storage().instance().get(&DataKey::AgentPubkey);
+        let Some(old_pubkey) = old_pubkey else {
+            panic_with_error!(&env, Error::NotInitialized);
+        };
         env.storage()
             .instance()
             .set(&DataKey::AgentPubkey, &new_pubkey);
-        emit_agent_rotated(&env, &admin);
+        emit_agent_rotated(&env, &admin, &old_pubkey, &new_pubkey);
     }
 
     // ── Dead-man switch / freeze (SPEC §5) ───────────────────────────────
