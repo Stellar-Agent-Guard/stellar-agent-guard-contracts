@@ -1,0 +1,183 @@
+name: Futurenet host watch
+
+on:
+  schedule:
+    # Mondays at 06:17 UTC: Futurenet is reset more often than Testnet, so this
+    # always starts from a fresh account and never relies on persistent state.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: host-watch
+  cancel-in-progress: false
+
+jobs:
+  host-watch:
+    name: Build + Futurenet __check_auth smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+          components: clippy, rustfmt
+
+      - name: Install Stellar CLI
+        uses: stellar/stellar-cli@v28.0.0
+        with:
+          version: 28.0.0
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: Unit + integration tests
+        run: cargo test
+
+      - name: Build contract wasm
+        run: cargo build --release --target wasm32v1-none
+
+      - name: Build custom-account transaction helper
+        run: cargo build --release --manifest-path tools/agent-tx/Cargo.toml
+
+      - name: Check Futurenet RPC health and protocol
+        env:
+          FUTURENET_RPC: https://rpc-futurenet.stellar.org
+          FUTURENET_PASSPHRASE: Test SDF Future Network ; October 2022
+        run: |
+          set -euo pipefail
+
+          rpc() {
+            curl --silent --show-error --fail-with-body --retry 3 --retry-delay 2 \
+              -H 'Content-Type: application/json' \
+              --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\"}" \
+              "$FUTURENET_RPC"
+          }
+
+          health="$(rpc getHealth)"
+          jq -e '.error == null and .result.status == "healthy"' <<<"$health" >/dev/null
+
+          network="$(rpc getNetwork)"
+          jq -e --arg passphrase "$FUTURENET_PASSPHRASE" \
+            '.error == null and .result.passphrase == $passphrase and .result.protocolVersion >= 28' \
+            <<<"$network" >/dev/null
+          protocol_version="$(jq -r '.result.protocolVersion' <<<"$network")"
+
+          echo "Futurenet RPC is healthy; protocolVersion=$protocol_version."
+
+      - name: Deploy and exercise __check_auth on Futurenet
+        env:
+          FUTURENET_RPC: https://rpc-futurenet.stellar.org
+          FUTURENET_PASSPHRASE: Test SDF Future Network ; October 2022
+        run: |
+          set -euo pipefail
+
+          # A fresh identity avoids a reset making this run depend on an old
+          # contract, policy, nonce, or account sequence.
+          stellar keys generate host-watch --network futurenet --fund
+          source_address="$(stellar keys public-key host-watch)"
+          agent_secret="$(stellar keys secret host-watch)"
+
+          # __check_auth stores the raw 32-byte Ed25519 public key. Decode the
+          # account strkey locally; never print or persist the secret outside
+          # the runner's temporary CLI identity.
+          agent_pubkey="$(python3 - "$source_address" <<'PY'
+          import base64
+          import sys
+          raw = base64.b32decode(sys.argv[1].encode("ascii"))
+          if raw[0] != 6 << 3 or len(raw) != 35:
+              raise SystemExit("unexpected Stellar account strkey")
+          print(raw[1:33].hex())
+          PY
+          )"
+
+          stellar contract deploy \
+            --wasm target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm \
+            --source-account host-watch \
+            --network futurenet \
+            --alias host-watch-contract \
+            --auto-sign
+
+          guard="$(stellar contract alias show host-watch-contract --network futurenet)"
+          case "$guard" in
+            C*) ;;
+            *) echo "could not resolve deployed contract id: $guard" >&2; exit 1 ;;
+          esac
+
+          # Install a minimal policy first. The account is intentionally fresh,
+          # so the setup transaction must be submitted before the signed self-call.
+          stellar contract invoke \
+            --contract-id "$guard" \
+            --source-account host-watch \
+            --network futurenet \
+            --auto-sign \
+            -- initialize \
+            --admin "$source_address" \
+            --agent_pubkey "$agent_pubkey"
+
+          stellar contract invoke \
+            --contract-id "$guard" \
+            --source-account host-watch \
+            --network futurenet \
+            --auto-sign \
+            -- set_policy \
+            --config '{"per_tx_cap":0,"window_secs":0,"window_cap":0,"assets":[],"protocols":[],"recipients":[],"allow_any_recipient":false,"active_from":0,"active_until":0,"paused":false,"dms_grace_secs":0}'
+
+          # The helper signs the account's own Soroban authorization entry. The
+          # heartbeat therefore exercises the live host's context, payload
+          # digest, and custom-account dispatch, not just local unit tests.
+          ./tools/agent-tx/target/release/agent-tx heartbeat \
+            --guard "$guard" \
+            --agent-secret "$agent_secret" \
+            --rpc-url "$FUTURENET_RPC" \
+            --network-passphrase "$FUTURENET_PASSPHRASE" \
+            || {
+              echo "Futurenet custom-account heartbeat failed; investigate host compatibility." >&2
+              exit 1
+            }
+
+          # Read/invoke smoke: these are unauthenticated contract simulations,
+          # so they remain safe to repeat after every Futurenet reset.
+          stellar contract invoke \
+            --contract-id "$guard" \
+            --source-account host-watch \
+            --network futurenet \
+            --auto-sign \
+            -- check \
+            --asset "$source_address" \
+            --to "$source_address" \
+            --amount 1
+          stellar contract invoke \
+            --contract-id "$guard" \
+            --source-account host-watch \
+            --network futurenet \
+            --auto-sign \
+            -- status
+
+      - name: Explain failure visibility
+        if: failure()
+        run: |
+          echo "The Futurenet host watch failed visibly. Review this run and its logs for a host, CLI, or network compatibility change; no issue is auto-created because that would require an issue-writing credential."
+
+      - name: Report compatibility result
+        if: always()
+        run: echo "See the preceding steps for the Futurenet protocol and live __check_auth result."

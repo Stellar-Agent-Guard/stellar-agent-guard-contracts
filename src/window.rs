@@ -17,6 +17,7 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    #[allow(clippy::must_use_candidate)]
     pub fn empty(env: &Env) -> Self {
         Self {
             total: 0,
@@ -26,6 +27,7 @@ impl Ledger {
 
     /// Build from persisted entries (consumed), recomputing the total so a
     /// corrupted cached total can never admit spend.
+    #[allow(clippy::must_use_candidate)]
     pub fn from_entries(env: &Env, mut entries: soroban_sdk::Vec<SpendEntry>) -> Self {
         let mut acc: i128 = 0;
         let mut clean: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(env);
@@ -41,6 +43,7 @@ impl Ledger {
         }
     }
 
+    #[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
     pub fn len(&self) -> u32 {
         self.entries.len()
     }
