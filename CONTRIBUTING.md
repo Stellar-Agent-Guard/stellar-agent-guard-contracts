@@ -13,7 +13,7 @@ We welcome contributions! Here's how to get started.
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
-# Run tests (30 unit + integration tests, no network needed)
+# Run tests (31 unit + integration tests, no network needed)
 cargo test
 
 # Lint (clippy all + pedantic are denied via [lints.clippy])

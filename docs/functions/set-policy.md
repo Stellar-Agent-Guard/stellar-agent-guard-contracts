@@ -46,7 +46,8 @@ The following rules are checked before anything is written. Invalid config retur
 - No duplicate addresses in `assets` or `recipients`
 - No duplicate protocol contracts
 - Empty per-protocol `fns` lists are rejected
-- Self-address may not appear in `assets` or `protocols`
+- Self-address may not appear in `assets`, `protocols`, **or `recipients`** — the account
+  paying itself is a no-op loop that almost certainly signals a mis-pasted address
 
 ## Example
 

@@ -36,7 +36,7 @@ cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ## Run tests
 
 ```bash
-cargo test                                      # 33 tests, isolated (no network)
+cargo test                                      # 34 tests (31 contract + 3 agent-tx), isolated (no network)
 cargo clippy --all-targets --all-features       # clippy all + pedantic denied
 cargo fmt --check                               # format check
 ```

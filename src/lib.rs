@@ -169,6 +169,15 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
             }
         }
     }
+    // The deployed address is rejected in all three lists: an asset/protocol
+    // self-entry is a nonsensical allowlist (self-calls are governed by the
+    // fixed §6.1 rule, not policy), and a self-recipient is a no-op loop that
+    // almost certainly signals a mis-pasted address. `self_addr` is fixed at
+    // deployment (known before `initialize`), and `set_policy` can only run
+    // post-initialize, so this always compares against the real contract ID.
+    if contains_addr(&cfg.recipients, &self_addr) {
+        return Err(Error::InvalidConfig);
+    }
     if has_dup(env, &cfg.assets) || has_dup(env, &cfg.recipients) {
         return Err(Error::InvalidConfig);
     }
