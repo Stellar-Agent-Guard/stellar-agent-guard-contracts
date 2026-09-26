@@ -229,10 +229,21 @@ impl Harness {
     /// Build an auth entry for the guard signed by the agent's key over the
     /// host-computed signature payload.
     fn guard_entry(&mut self, root: &SorobanAuthorizedInvocation) -> SorobanAuthorizationEntry {
+        let key = self.agent.clone(); // entry builder takes &mut self
+        self.guard_entry_with(&key, root)
+    }
+
+    /// Build a guard auth entry signed by an arbitrary key — for tests that
+    /// must present a rotated-out or never-registered key to the account.
+    fn guard_entry_with(
+        &mut self,
+        key: &SigningKey,
+        root: &SorobanAuthorizedInvocation,
+    ) -> SorobanAuthorizationEntry {
         let nonce = self.guard_nonce;
         self.guard_nonce += 1;
         let payload = self.payload(nonce, root);
-        let sig = self.agent.sign(&payload).to_bytes();
+        let sig = key.sign(&payload).to_bytes();
         SorobanAuthorizationEntry {
             credentials: SorobanCredentials::Address(SorobanAddressCredentials {
                 address: xdr::ScAddress::from(&self.guard),
@@ -298,6 +309,34 @@ impl Harness {
             PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
         }));
         assert!(res.is_err(), "expected the heartbeat to be blocked");
+    }
+
+    fn heartbeat_with(&mut self, key: &SigningKey) {
+        let root = self.heartbeat_invocation();
+        let entry = self.guard_entry_with(key, &root);
+        self.enforce(entry);
+        PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
+    }
+
+    /// Send a heartbeat signed by a specific key and assert the guard blocks
+    /// it. Returns the panic payload (the host's `HostError` event log), so
+    /// callers can assert which reason blocked it — e.g. a signature failure
+    /// vs the DMS `HeartbeatExpired`.
+    fn heartbeat_with_expect_blocked(&mut self, key: &SigningKey) -> std::string::String {
+        let root = self.heartbeat_invocation();
+        let entry = self.guard_entry_with(key, &root);
+        self.enforce(entry);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
+        }));
+        if let Err(payload) = res {
+            payload
+                .downcast_ref::<std::string::String>()
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            panic!("expected the heartbeat to be blocked")
+        }
     }
 
     fn unfreeze(&mut self) {
