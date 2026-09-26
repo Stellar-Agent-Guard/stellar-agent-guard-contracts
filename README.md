@@ -195,6 +195,12 @@ cd tools/agent-tx && cargo build --release
   --agent-secret S...   # the registered agent's Ed25519 secret (AGENT_SECRET env also works)
 ```
 
+For the full steady-state loop an agent must run (heartbeat cadence, per-transfer
+pre-flight, blocked-reason handling, DMS stop conditions), see
+[`examples/agent-loop.md`](examples/agent-loop.md).
+The TypeScript equivalent is the SDK's
+[agent-runtime guide issue](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
+
 ### `freeze` / `unfreeze`
 ```rust
 pub fn freeze(env: Env)      // admin only — sets AdminFrozen = true
@@ -443,6 +449,9 @@ Stellar Agent Guard operates across three dedicated repositories:
   (custom-account) address and submits real testnet transactions. The `stellar` CLI
   cannot sign auth entries whose address is a contract, so this tool fills that gap; it
   is the prototype of the Phase 2 SDK's signing path.
+- `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat
+  cadence formula (`interval ≤ grace / 3`), pre-flight `check()`, blocked-reason
+  handling table, and stop conditions, with tested `agent-tx` commands.
 - `tests/fixtures/README.md` — the real testnet evidence for the five scenarios.
 - `SPEC.md` — the full architecture specification.
 
