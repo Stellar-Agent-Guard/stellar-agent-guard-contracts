@@ -6,8 +6,8 @@
 //! changes, the snapshot must be updated deliberately (and the impl comment
 //! updated).
 
-use stellar_agent_guard_contracts::types::{PolicyConfig, ProtocolRule};
 use soroban_sdk::{Address, BytesN, Symbol, Vec};
+use stellar_agent_guard_contracts::types::{PolicyConfig, ProtocolRule};
 
 #[test]
 fn policy_config_debug_snapshot() {
