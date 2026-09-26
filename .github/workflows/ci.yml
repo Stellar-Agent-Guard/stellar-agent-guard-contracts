@@ -40,5 +40,8 @@ jobs:
       - name: Contract build (wasm32v1-none)
         run: cargo build --release --target wasm32v1-none
 
+      - name: Verify README claims
+        run: scripts/verify-readme.sh
+
       - name: Agent submission tool build (tools/agent-tx)
         run: cargo build --release --manifest-path tools/agent-tx/Cargo.toml
