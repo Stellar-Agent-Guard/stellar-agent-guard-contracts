@@ -88,6 +88,7 @@ pub enum ParsedCall {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
     pub has_policy: bool,
+    pub policy_revision: u64,
     pub admin_frozen: bool,
     pub heartbeat_expired: bool,
     pub last_heartbeat: u64,
@@ -99,6 +100,19 @@ pub struct Status {
 pub enum CheckResult {
     Allowed,
     Blocked(Symbol),
+}
+
+/// Advisory result for a targeted asset transfer. All fields are calculated
+/// from the current policy and window snapshot; this type never represents a
+/// storage mutation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckDetail {
+    pub result: CheckResult,
+    pub remaining_window: Option<i128>,
+    pub per_tx_cap: Option<i128>,
+    pub effective_per_tx_cap: Option<i128>,
+    pub effective_window_cap: Option<i128>,
 }
 
 // Storage layout (SPEC §3). `Initialized`/`Admin`/`AgentPubkey` live in
@@ -121,6 +135,8 @@ pub enum DataKey {
     LastHeartbeat,
     /// Persistent: admin-initiated freeze flag.
     AdminFrozen,
+    /// Persistent: incrementing counter for policy changes.
+    PolicyRevision,
 }
 
 #[contracterror]
@@ -153,6 +169,7 @@ pub enum Error {
 
 impl Error {
     /// Stable, human- and telemetry-readable reason name (no env needed).
+    #[allow(clippy::must_use_candidate)]
     pub fn reason(self) -> &'static str {
         match self {
             Self::Unauthorized => "unauthorized",

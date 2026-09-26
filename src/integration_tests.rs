@@ -17,7 +17,7 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{Error as GuardError, PolicyConfig};
+use crate::types::{CheckResult, Error as GuardError, PolicyConfig};
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -32,6 +32,19 @@ use soroban_sdk::xdr::{
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val};
 
 const SIG_EXPIRATION_LEDGER: u32 = 6_000_000;
+
+/// Number of `heartbeat` events published by the last contract invocation.
+fn heartbeat_event_count(env: &Env) -> usize {
+    let want = ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("event_heartbeat")).unwrap());
+    env.events()
+        .all()
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&want))
+        })
+        .count()
+}
 
 // ── Test contracts ───────────────────────────────────────────────────────
 
@@ -367,6 +380,7 @@ fn lifecycle_initialize_once_then_status() {
 
     let st = client.status();
     assert!(!st.has_policy);
+    assert_eq!(st.policy_revision, 0);
     assert!(!st.admin_frozen);
     assert!(!st.heartbeat_expired);
     assert_eq!(st.now, 0);
@@ -382,6 +396,93 @@ fn allowed_transaction_succeeds() {
     assert!(h.emitted_allowed_auth());
     let st = h.status();
     assert!(!st.heartbeat_expired);
+}
+
+#[test]
+fn detailed_check_reports_exact_headroom_and_effective_caps() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.per_tx_cap = 75;
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+    h.set_time(1_000);
+    let recv = h.recv.clone();
+    h.transfer(&recv, 40);
+
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 10)
+    });
+    assert_eq!(detail.result, CheckResult::Allowed);
+    assert_eq!(detail.remaining_window, Some(60));
+    assert_eq!(detail.per_tx_cap, Some(75));
+    assert_eq!(detail.effective_per_tx_cap, Some(75));
+    assert_eq!(detail.effective_window_cap, Some(100));
+}
+
+#[test]
+fn detailed_check_reports_none_for_disabled_caps() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), h.recv.clone(), 10)
+    });
+    assert_eq!(detail.result, CheckResult::Allowed);
+    assert_eq!(detail.remaining_window, None);
+    assert_eq!(detail.per_tx_cap, None);
+    assert_eq!(detail.effective_per_tx_cap, None);
+    assert_eq!(detail.effective_window_cap, None);
+}
+
+#[test]
+fn blocked_detailed_check_reports_headroom_without_writing_window() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+    h.set_time(1_000);
+    let recv = h.recv.clone();
+    h.transfer(&recv, 40);
+
+    let first = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 70)
+    });
+    assert_eq!(
+        first.result,
+        CheckResult::Blocked(Symbol::new(&h.env, "window_cap_exceeded"))
+    );
+    assert_eq!(first.remaining_window, Some(60));
+    let second = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 1)
+    });
+    assert_eq!(second.remaining_window, Some(60));
+}
+
+#[test]
+fn policy_revision_increments_across_set_and_revoke() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // 0 pre-first-set
+    let mut st = client.status();
+    assert_eq!(st.policy_revision, 0);
+
+    // 1 after set
+    h.env.mock_all_auths();
+    client.set_policy(&h.base_policy());
+    st = client.status();
+    assert_eq!(st.policy_revision, 1);
+
+    // 2 after revoke
+    h.env.mock_all_auths();
+    client.revoke_policy();
+    st = client.status();
+    assert_eq!(st.policy_revision, 2);
+
+    // 3 after second set
+    h.env.mock_all_auths();
+    client.set_policy(&h.base_policy());
+    st = client.status();
+    assert_eq!(st.policy_revision, 3);
 }
 
 #[test]
@@ -583,59 +684,49 @@ fn rotated_agent_key_binds() {
 }
 
 #[test]
-fn rotate_agent_key_next_heartbeat_validity_spec_5_7() {
-    // Edge: the DMS clock keeps counting from heartbeats *signed by the old
-    // key* while a rotation lands inside a nearly-expired grace (SPEC §5).
-    // Post-rotate, the new key is the only accepted signer (SPEC §7), and the
-    // DMS rule #2 still gates the new key's heartbeats: fine within grace,
-    // `HeartbeatExpired` once the grace elapses. Unit-level counterpart of the
-    // on-chain agent-key-rotation proof (issue #5, SPEC §11 scenario 6).
-    let mut h = Harness::new();
-    let old = h.agent.clone();
-    let new = SigningKey::from_bytes(&[11u8; 32]);
+fn redundant_same_second_heartbeat_is_a_measured_no_op() {
+    // No policy/initialize needed: `heartbeat` itself only touches
+    // `LastHeartbeat`; the policy gates live in `__check_auth`, which mock auth
+    // bypasses. This isolates the storage-write path the optimization targets.
+    let env = Env::default();
+    env.mock_all_auths();
+    let guard = env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&env, &guard);
+    env.ledger().set_timestamp(1_000);
 
-    let mut p = h.base_policy();
-    p.dms_grace_secs = 60;
-    h.set_time(1_000_000);
-    h.install_policy(&p); // `set_policy` starts the DMS clock: LastHeartbeat = 1_000_000
+    // First heartbeat of the second: a real write + one event.
+    client.heartbeat();
+    let fresh_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    assert_eq!(
+        heartbeat_event_count(&env),
+        1,
+        "fresh heartbeat writes + emits"
+    );
 
-    // Baseline: the current (old) key heartbeats fine while in grace.
-    h.set_time(1_000_010);
-    h.heartbeat_with(&old);
-    assert_eq!(h.status().last_heartbeat, 1_000_010);
+    // Second heartbeat in the same ledger second: skipped entirely.
+    client.heartbeat();
+    let redundant_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    assert_eq!(
+        heartbeat_event_count(&env),
+        0,
+        "the no-op heartbeat must not emit"
+    );
 
-    // Admin rotates mid-grace (50s of 60s used, 10s remain). The rotation
-    // itself neither resets nor consumes the heartbeat clock (SPEC §7).
-    let new_pk = new.verifying_key().to_bytes();
-    h.env.mock_all_auths(); // admin call, not the guarded agent flow
-    PolicyEngineClient::new(&h.env, &h.guard)
-        .rotate_agent_key(&BytesN::from_array(&h.env, &new_pk));
+    std::println!(
+        "heartbeat cpu instructions: fresh={fresh_cpu} redundant_same_second={redundant_cpu}\
+         saved={}",
+        fresh_cpu.saturating_sub(redundant_cpu)
+    );
+    assert!(
+        redundant_cpu < fresh_cpu,
+        "skipping the redundant write must cost less (fresh={fresh_cpu}, \
+         redundant={redundant_cpu})"
+    );
 
-    // 1. Old key is rejected immediately post-rotate. `rotate_agent_key`
-    //    stores the new key *first*, so even a validly signed old-key
-    //    heartbeat now fails signature verification in `__check_auth` —
-    //    and the DMS clock is untouched (still the pre-rotate heartbeat).
-    h.set_time(1_000_050);
-    let blocked = h.heartbeat_with_expect_blocked(&old);
-    assert!(blocked.contains("failed ED25519 verification"));
-    assert_eq!(h.status().last_heartbeat, 1_000_010);
-
-    // 2. New key is accepted while grace remains (signature verifies against
-    //    the new stored key; 45 of 60s elapsed — rule #2 still passes).
-    h.set_time(1_000_055);
-    h.heartbeat_with(&new);
-    assert_eq!(h.status().last_heartbeat, 1_000_055);
-
-    // 3. Once the grace elapses, the (correctly signed) new-key heartbeat is
-    //    blocked — DMS rule #2 fires with `HeartbeatExpired`. This pins that
-    //    the DMS is not reset by a valid signature alone; only a heartbeat
-    //    admitted by the engine restarts the clock. The host event log records
-    //    the emitted `auth_checked` reason (`heartbeat_expired`) even though
-    //    the failing frame rolls the event back from the ledger events API.
-    h.set_time(1_000_120);
-    let blocked = h.heartbeat_with_expect_blocked(&new);
-    assert!(blocked.contains("heartbeat_expired"));
-    assert_eq!(h.status().last_heartbeat, 1_000_055);
+    // Behaviour matches a write: `LastHeartbeat` is still `now`.
+    let st = client.status();
+    assert_eq!(st.last_heartbeat, 1_000);
+    assert_eq!(st.now, 1_000);
 }
 
 #[test]

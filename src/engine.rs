@@ -19,8 +19,22 @@ pub enum Decision {
     Blocked(Error),
 }
 
+/// Return advisory cap metrics from an already-loaded ledger. The current
+/// policy has no per-asset overrides, so effective asset caps equal the
+/// configured caps.
+pub fn cap_metrics(
+    policy: &PolicyConfig,
+    ledger: &Ledger,
+) -> (Option<i128>, Option<i128>, Option<i128>) {
+    let window_cap = (policy.window_cap > 0).then_some(policy.window_cap);
+    let per_tx_cap = (policy.per_tx_cap > 0).then_some(policy.per_tx_cap);
+    let remaining = window_cap.map(|cap| cap.saturating_sub(ledger.total).max(0));
+    (remaining, per_tx_cap, window_cap)
+}
+
 // ── Small contains helpers (soroban Vec has no `contains`) ───────────────
 
+#[allow(clippy::must_use_candidate)]
 pub fn contains_addr(list: &Vec<Address>, a: &Address) -> bool {
     for i in 0..list.len() {
         if let Some(x) = list.get(i) {
@@ -45,7 +59,25 @@ fn contains_sym(list: &Vec<Symbol>, s: &Symbol) -> bool {
 
 // ── Context parsing (SPEC §6) ────────────────────────────────────────────
 
+#[cfg(feature = "testutils")]
+#[allow(clippy::must_use_candidate)]
+pub fn parse_call(env: &Env, self_addr: &Address, ctx: &Context, cfg: &PolicyConfig) -> ParsedCall {
+    parse_call_inner(env, self_addr, ctx, cfg)
+}
+
+#[cfg(not(feature = "testutils"))]
+#[allow(clippy::must_use_candidate)]
 fn parse_call(env: &Env, self_addr: &Address, ctx: &Context, cfg: &PolicyConfig) -> ParsedCall {
+    parse_call_inner(env, self_addr, ctx, cfg)
+}
+
+#[allow(clippy::must_use_candidate)]
+fn parse_call_inner(
+    env: &Env,
+    self_addr: &Address,
+    ctx: &Context,
+    cfg: &PolicyConfig,
+) -> ParsedCall {
     match ctx {
         Context::Contract(ContractContext {
             contract,
