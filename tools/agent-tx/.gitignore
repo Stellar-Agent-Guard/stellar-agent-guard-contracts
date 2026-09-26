@@ -1,0 +1,15 @@
+# Build artifacts
+/target
+**/target
+
+# WASM artifacts (if any)
+*.wasm
+
+# Secret hygiene
+.env
+.env.*
+!.env.example
+
+# IDE
+*.swp
+.DS_Store

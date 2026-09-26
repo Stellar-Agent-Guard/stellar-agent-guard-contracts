@@ -32,6 +32,18 @@ cargo build --release --target wasm32v1-none
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
 
+## Clean Build Artifacts
+
+```bash
+# Clean root workspace (contract + all members)
+cargo clean
+
+# Clean agent-tx tool specifically
+cargo clean --manifest-path tools/agent-tx/Cargo.toml
+```
+
+This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` is configured to exclude these from version control.
+
 ## Coding Standards
 
 1. **No `unwrap()` / `expect()` / indexing without bounds in contract code** —
