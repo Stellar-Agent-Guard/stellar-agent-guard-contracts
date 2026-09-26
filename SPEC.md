@@ -177,6 +177,15 @@ Implementation (exact, lazy, bounded):
   `window_secs` span") is preserved in all cases; in the pathological region of ≥8192 distinct
   spend seconds within one window the engine is conservative until density drops. This is
   documented here and in the README, not hidden.
+- **Measured worst case (single lazy prune burst):** the real bench measurement for the pathological
+  case of 8192 stale entries being pruned in one authorization is `worst_case_prune_cpu_cost=86925434`
+  CPU instructions (`cargo test prune_worst_case_measured_cost -- --nocapture`). That is a
+  real worst-case cost and is over the per-call host budget; the fix is tracked in
+  [issue #113](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/113)
+  (bulk-prune / sorted search), not a false all-clear. The bounded `MAX_WINDOW_ENTRIES` cap
+  also interacts with storage rent/TTL because each persisted window entry is a ledger item that
+  must remain live; see [issue #85](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/85)
+  for the long-lived-account rent/TTL model.
 
 **Invariant (window):** for every authorization decision, `total` after any admission equals the
 sum of `entries[i].amount` over entries with `ts > now - window_secs`, and a new asset transfer
