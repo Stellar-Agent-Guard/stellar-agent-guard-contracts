@@ -1,0 +1,66 @@
+name: Release
+
+# Cut a release by pushing a version tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The job builds the deployable WASM and attaches it to a GitHub Release
+# together with a CycloneDX SBOM (sbom.cdx.json) that inventories every crate
+# and version compiled into that WASM build — the artifact an auditor or bug
+# bounty reviewer needs to know exactly what shipped. See SECURITY.md.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Required to create/update the Release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build contract (wasm32v1-none)
+        run: cargo build --release --target wasm32v1-none
+
+      # Tool choice: cargo-cyclonedx (cyclonedx-rust-cargo). Unlike lockfile-only
+      # scanners it sources Cargo metadata + Cargo.lock and honours --target, so
+      # the component list describes the WASM build's dependency graph rather
+      # than the host build's.
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate CycloneDX SBOM (WASM target)
+        run: cargo cyclonedx --format json --describe binaries --target wasm32v1-none
+
+      - name: Stage release assets
+        run: |
+          mkdir -p dist
+          cp target/wasm32v1-none/release/*.wasm dist/
+          # `--describe binaries` emits one SBOM per binary target; this crate
+          # has exactly one (the shipped cdylib), renamed to a stable asset name.
+          cp ./*-cdylib.cdx.json dist/sbom.cdx.json
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.wasm
+            dist/sbom.cdx.json
+          generate_release_notes: true

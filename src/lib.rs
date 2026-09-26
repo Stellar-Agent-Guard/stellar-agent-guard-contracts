@@ -19,13 +19,14 @@ mod window;
 #[cfg(test)]
 mod integration_tests;
 
-use engine::{contains_addr, decide, AccountState, Decision};
+use engine::{cap_metrics, contains_addr, decide, AccountState, Decision};
 use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
 use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, TryFromVal, Val,
 };
-use types::{CheckResult, DataKey, Error, PolicyConfig, Status, WindowState};
+pub use types::{CheckDetail, Error, PolicyConfig};
+use types::{CheckResult, DataKey, Status, WindowState};
 use window::Ledger;
 
 // ── Contract events (SPEC §9). Each event is its own type; topic layout
@@ -118,6 +119,13 @@ fn save_ledger(env: &Env, ledger: &Ledger) {
             entries: ledger.entries.clone(),
         },
     );
+}
+
+fn increment_revision(env: &Env) -> u64 {
+    let rev = persist_get::<u64>(env, &DataKey::PolicyRevision).unwrap_or(0);
+    let next = rev.saturating_add(1);
+    persist_set(env, &DataKey::PolicyRevision, &next);
+    next
 }
 
 // ── Policy config validation (SPEC §8) ───────────────────────────────────
@@ -267,6 +275,7 @@ impl PolicyEngine {
         let admin = Self::admin_or_panic(&env);
         validate_config(&env, &config).unwrap_or_else(|e| panic_with_error!(&env, e));
         persist_set(&env, &DataKey::Policy, &config);
+        increment_revision(&env);
         save_ledger(&env, &Ledger::empty(&env));
         let now = env.ledger().timestamp();
         persist_set(&env, &DataKey::LastHeartbeat, &now);
@@ -278,6 +287,7 @@ impl PolicyEngine {
         let admin = Self::admin_or_panic(&env);
         env.storage().persistent().remove(&DataKey::Policy);
         env.storage().persistent().remove(&DataKey::Window);
+        increment_revision(&env);
         emit_policy_revoked(&env, &admin);
     }
 
@@ -300,6 +310,14 @@ impl PolicyEngine {
     pub fn heartbeat(env: Env) {
         env.current_contract_address().require_auth();
         let now = env.ledger().timestamp();
+        // Redundant same-second heartbeat: `LastHeartbeat` is already `now`, so
+        // the write (with its TTL extension) and the event carry no new
+        // information — the first heartbeat of this second already extended the
+        // entry's TTL. Skip both rather than pay for a no-op write (SPEC §5).
+        let last = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+        if now == last {
+            return;
+        }
         persist_set(&env, &DataKey::LastHeartbeat, &now);
         emit_heartbeat(&env, now);
     }
@@ -330,6 +348,7 @@ impl PolicyEngine {
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn status(env: Env) -> Status {
         let has_policy = persist_get::<PolicyConfig>(&env, &DataKey::Policy).is_some();
+        let policy_revision = persist_get::<u64>(&env, &DataKey::PolicyRevision).unwrap_or(0);
         let admin_frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
         let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
         let now = env.ledger().timestamp();
@@ -337,6 +356,7 @@ impl PolicyEngine {
             persist_get::<PolicyConfig>(&env, &DataKey::Policy).map_or(0, |c| c.dms_grace_secs);
         Status {
             has_policy,
+            policy_revision,
             admin_frozen,
             heartbeat_expired: grace > 0
                 && last_heartbeat != 0
@@ -348,20 +368,39 @@ impl PolicyEngine {
 
     /// Pure pre-flight of the asset-transfer decision path (no writes): lets
     /// agents/SDK simulate a transfer before signing. Emits the same
-    /// `auth_checked` events as an in-path decision.
+    /// `auth_checked` event as an in-path decision.
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult {
+        Self::check_detailed(env, asset, to, amount).result
+    }
+
+    /// Pre-flight decision plus current cap headroom for the targeted asset.
+    /// This path only reads storage, mutates a local ledger copy, and emits
+    /// exactly the same `auth_checked` event as `check`.
+    #[allow(clippy::must_use_candidate)] // public read surface
+    pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
         let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
             emit_auth(&env, false, Some(Error::NoPolicy));
-            return CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason()));
+            return CheckDetail {
+                result: CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason())),
+                remaining_window: None,
+                per_tx_cap: None,
+                effective_per_tx_cap: None,
+                effective_window_cap: None,
+            };
         };
         let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
         let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
         let now = env.ledger().timestamp();
         let self_addr = env.current_contract_address();
         let mut ledger = load_ledger(&env);
+        if cfg.window_cap > 0 {
+            ledger.prune(now, cfg.window_secs);
+        }
+        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&cfg, &ledger);
+        let effective_per_tx_cap = per_tx_cap;
         let call = transfer_context(&env, &asset, &to, amount);
-        match decide(
+        let result = match decide(
             &env,
             &self_addr,
             Some(&cfg),
@@ -381,6 +420,13 @@ impl PolicyEngine {
                 emit_auth(&env, false, Some(e));
                 CheckResult::Blocked(Symbol::new(&env, e.reason()))
             }
+        };
+        CheckDetail {
+            result,
+            remaining_window,
+            per_tx_cap,
+            effective_per_tx_cap,
+            effective_window_cap,
         }
     }
 }
@@ -469,4 +515,17 @@ impl CustomAccountInterface for PolicyEngine {
             }
         }
     }
+}
+
+// ── Test utilities (exposed via `testutils` feature) ──────────────────────
+#[cfg(feature = "testutils")]
+#[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
+pub mod testutils {
+    pub use crate::engine::{contains_addr, decide, parse_call, AccountState, Decision};
+    pub use crate::types::{
+        CheckResult, DataKey, Error, PolicyConfig, ProtocolRule, Status, WindowState,
+    };
+    pub use crate::window::Ledger;
+    pub use soroban_sdk::auth::{Context, ContractContext};
+    pub use soroban_sdk::{vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Val, Vec};
 }

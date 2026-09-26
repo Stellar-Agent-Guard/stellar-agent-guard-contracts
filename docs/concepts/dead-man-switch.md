@@ -54,6 +54,10 @@ pub fn unfreeze(env: Env) {
 
 After `unfreeze`, a subsequently-heartbeating agent keeps the account alive from there.
 
+For the agent-side steady-state loop that keeps this clock alive — heartbeat cadence
+(`interval ≤ grace / 3`), pre-flight, and the stop conditions when grace does lapse —
+see [`examples/agent-loop.md`](../../examples/agent-loop.md).
+
 ## Admin freeze vs. dead-man freeze
 
 These are **separate conditions**:

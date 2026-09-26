@@ -17,7 +17,7 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{Error as GuardError, PolicyConfig};
+use crate::types::{CheckResult, Error as GuardError, PolicyConfig};
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -32,6 +32,19 @@ use soroban_sdk::xdr::{
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val};
 
 const SIG_EXPIRATION_LEDGER: u32 = 6_000_000;
+
+/// Number of `heartbeat` events published by the last contract invocation.
+fn heartbeat_event_count(env: &Env) -> usize {
+    let want = ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("event_heartbeat")).unwrap());
+    env.events()
+        .all()
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&want))
+        })
+        .count()
+}
 
 // ── Test contracts ───────────────────────────────────────────────────────
 
@@ -328,6 +341,7 @@ fn lifecycle_initialize_once_then_status() {
 
     let st = client.status();
     assert!(!st.has_policy);
+    assert_eq!(st.policy_revision, 0);
     assert!(!st.admin_frozen);
     assert!(!st.heartbeat_expired);
     assert_eq!(st.now, 0);
@@ -343,6 +357,93 @@ fn allowed_transaction_succeeds() {
     assert!(h.emitted_allowed_auth());
     let st = h.status();
     assert!(!st.heartbeat_expired);
+}
+
+#[test]
+fn detailed_check_reports_exact_headroom_and_effective_caps() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.per_tx_cap = 75;
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+    h.set_time(1_000);
+    let recv = h.recv.clone();
+    h.transfer(&recv, 40);
+
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 10)
+    });
+    assert_eq!(detail.result, CheckResult::Allowed);
+    assert_eq!(detail.remaining_window, Some(60));
+    assert_eq!(detail.per_tx_cap, Some(75));
+    assert_eq!(detail.effective_per_tx_cap, Some(75));
+    assert_eq!(detail.effective_window_cap, Some(100));
+}
+
+#[test]
+fn detailed_check_reports_none_for_disabled_caps() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), h.recv.clone(), 10)
+    });
+    assert_eq!(detail.result, CheckResult::Allowed);
+    assert_eq!(detail.remaining_window, None);
+    assert_eq!(detail.per_tx_cap, None);
+    assert_eq!(detail.effective_per_tx_cap, None);
+    assert_eq!(detail.effective_window_cap, None);
+}
+
+#[test]
+fn blocked_detailed_check_reports_headroom_without_writing_window() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+    h.set_time(1_000);
+    let recv = h.recv.clone();
+    h.transfer(&recv, 40);
+
+    let first = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 70)
+    });
+    assert_eq!(
+        first.result,
+        CheckResult::Blocked(Symbol::new(&h.env, "window_cap_exceeded"))
+    );
+    assert_eq!(first.remaining_window, Some(60));
+    let second = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 1)
+    });
+    assert_eq!(second.remaining_window, Some(60));
+}
+
+#[test]
+fn policy_revision_increments_across_set_and_revoke() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // 0 pre-first-set
+    let mut st = client.status();
+    assert_eq!(st.policy_revision, 0);
+
+    // 1 after set
+    h.env.mock_all_auths();
+    client.set_policy(&h.base_policy());
+    st = client.status();
+    assert_eq!(st.policy_revision, 1);
+
+    // 2 after revoke
+    h.env.mock_all_auths();
+    client.revoke_policy();
+    st = client.status();
+    assert_eq!(st.policy_revision, 2);
+
+    // 3 after second set
+    h.env.mock_all_auths();
+    client.set_policy(&h.base_policy());
+    st = client.status();
+    assert_eq!(st.policy_revision, 3);
 }
 
 #[test]
@@ -541,6 +642,52 @@ fn rotated_agent_key_binds() {
     // Swap the harness agent to the new key and confirm it works.
     h.agent = new_key;
     h.transfer(&recv, 5);
+}
+
+#[test]
+fn redundant_same_second_heartbeat_is_a_measured_no_op() {
+    // No policy/initialize needed: `heartbeat` itself only touches
+    // `LastHeartbeat`; the policy gates live in `__check_auth`, which mock auth
+    // bypasses. This isolates the storage-write path the optimization targets.
+    let env = Env::default();
+    env.mock_all_auths();
+    let guard = env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&env, &guard);
+    env.ledger().set_timestamp(1_000);
+
+    // First heartbeat of the second: a real write + one event.
+    client.heartbeat();
+    let fresh_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    assert_eq!(
+        heartbeat_event_count(&env),
+        1,
+        "fresh heartbeat writes + emits"
+    );
+
+    // Second heartbeat in the same ledger second: skipped entirely.
+    client.heartbeat();
+    let redundant_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    assert_eq!(
+        heartbeat_event_count(&env),
+        0,
+        "the no-op heartbeat must not emit"
+    );
+
+    std::println!(
+        "heartbeat cpu instructions: fresh={fresh_cpu} redundant_same_second={redundant_cpu}\
+         saved={}",
+        fresh_cpu.saturating_sub(redundant_cpu)
+    );
+    assert!(
+        redundant_cpu < fresh_cpu,
+        "skipping the redundant write must cost less (fresh={fresh_cpu}, \
+         redundant={redundant_cpu})"
+    );
+
+    // Behaviour matches a write: `LastHeartbeat` is still `now`.
+    let st = client.status();
+    assert_eq!(st.last_heartbeat, 1_000);
+    assert_eq!(st.now, 1_000);
 }
 
 #[test]

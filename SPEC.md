@@ -31,9 +31,11 @@ before the action can touch a target protocol. `__check_auth` is the single enfo
   of its own), so every action of the account is a Soroban invocation and therefore passes
   through `__check_auth`. There is no classic-op enforcement gap to configure.
 
-### 1.1 SDK surface this is built on (soroban-sdk 27)
+### 1.1 SDK and host surface this is built on (soroban-sdk 27)
 
-Verified against `soroban-sdk 27.0.6` source (`src/auth.rs`, `src/custom_account.rs`):
+Verified against `soroban-sdk 27.0.6` source (`src/auth.rs`, `src/custom_account.rs`). The SDK
+version is pinned in `Cargo.toml`; the host is not a library dependency, so this section also
+records the host contract that the contract depends on:
 
 ```rust
 pub trait CustomAccountInterface {
@@ -61,10 +63,12 @@ pub struct ContractContext {
 
 The host invokes `__check_auth` once per authorization the account must approve, supplying the
 contexts of the calls being authorized. `type Signature = BytesN<64>` (single registered agent
-Ed25519 key; a `Vec` of keys / threshold signatures is a v2 item). Signature verification:
+Ed25519 key; a `Vec` of keys / threshold signatures is a v2 item — see [Multi-Sig Threshold Models](docs/research/multi-sig-threshold-models.md)). Signature verification:
 `env.crypto().ed25519_verify(registered_pubkey, signature_payload (32B), presented_sig)`, then
 policy evaluation. CAP-71 delegation (`env.custom_account().get_delegated_signers()` /
 `delegate_auth`) is available but **out of v1 scope**.
+
+**Research note (v2):** Verifiable off-chain policy attestation is explored in [Policy Attestation](docs/research/policy-attestation.md) — admin signs `policy_hash()` output; agent verifies before bootstrap. Current conclusion: deferral (direct chain read is stronger for typical deployments).
 
 ---
 
@@ -98,6 +102,8 @@ This boundary is an inherent property of the platform (an independent current co
 OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer contexts and
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
 states the same scope in the same terms.
+
+**Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol parsers, rate limiting, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Recommended direction: protocol rate limiting (count-based) as core deliverable; opt-in protocol parsers as secondary.
 
 ---
 
@@ -171,6 +177,15 @@ Implementation (exact, lazy, bounded):
   `window_secs` span") is preserved in all cases; in the pathological region of ≥8192 distinct
   spend seconds within one window the engine is conservative until density drops. This is
   documented here and in the README, not hidden.
+- **Measured worst case (single lazy prune burst):** the real bench measurement for the pathological
+  case of 8192 stale entries being pruned in one authorization is `worst_case_prune_cpu_cost=86925434`
+  CPU instructions (`cargo test prune_worst_case_measured_cost -- --nocapture`). That is a
+  real worst-case cost and is over the per-call host budget; the fix is tracked in
+  [issue #113](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/113)
+  (bulk-prune / sorted search), not a false all-clear. The bounded `MAX_WINDOW_ENTRIES` cap
+  also interacts with storage rent/TTL because each persisted window entry is a ledger item that
+  must remain live; see [issue #85](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/85)
+  for the long-lived-account rent/TTL model.
 
 **Invariant (window):** for every authorization decision, `total` after any admission equals the
 sum of `entries[i].amount` over entries with `ts > now - window_secs`, and a new asset transfer
@@ -197,6 +212,30 @@ Note the dead-man auto-freeze (`#2`) applies even to `heartbeat` from the regist
 heartbeat arriving after the grace window expired cannot revive the account — revival is the
 admin's `unfreeze` (§7). This is the precise freeze/reversal boundary.
 
+### 4.1 Gate cost order (measured)
+
+The decision table above is ordered **semantically first** (admin freeze → dead-man → policy gates → classification), not cost-optimized. Benchmarks on the Soroban test environment (see `benches/denial_path_gas.rs`) show the following CPU instruction costs for a blocked authorization at each gate:
+
+| Gate | Condition | Approx. Instructions |
+|------|-----------|---------------------|
+| 1 | `AdminFrozen` | ~8,750 |
+| 2 | `HeartbeatExpired` | ~8,750 |
+| 3 | `NoPolicy` | ~8,750 |
+| 4 | `Paused` | ~8,750 |
+| 5 | `OutsideActiveWindow` | ~8,750 |
+| 6 | `SelfFunctionNotAllowed` | ~10,600 |
+| 7a | `AssetNotAllowed` (unlisted asset) | ~16,300 |
+| 7b | `RecipientNotAllowed` | ~17,700 |
+| 7c | `PerTxCapExceeded` | ~14,200 |
+| 7d | `WindowCapExceeded` | ~14,300 |
+| 7e | `ProtocolNotAllowed` | ~8,200 |
+| 7f | `FunctionNotAllowed` | ~10,500 |
+| 7g | `UnknownContract` | ~11,800 |
+
+For comparison, an **allowed** transfer with window pruning costs ~14,800 instructions, while an allowed transfer without window costs ~17,800 instructions.
+
+**Observation:** The early gates (#1–#5) are consistently the cheapest (~8.7k instructions) because they only check simple boolean/int flags on the account state. The classification gates (#7a–#7g) are more expensive because they require parsing the auth context, looking up allowlists, and evaluating caps. The semantic ordering therefore *accidentally* aligns with cost ordering: the cheapest gates run first. Reordering for cost would not yield meaningful savings and would weaken the semantic clarity of the freeze/reversal boundary (admin freeze must remain first). The delta between semantic and cost-optimal ordering is immaterial (<2x on the fast path).
+
 ---
 
 ## 5. Dead-man switch — precise definition
@@ -208,6 +247,13 @@ admin's `unfreeze` (§7). This is the precise freeze/reversal boundary.
   function does `require_auth` on the account itself, so it routes through `__check_auth`, which
   verifies the agent's signature, and then records `LastHeartbeat = now`). No fund movement, no
   window accounting.
+- **Redundant heartbeats are skipped (gas optimization).** A heartbeat that arrives in the same
+  ledger second as the previous one (`now == LastHeartbeat`) is a true no-op: no persistent write,
+  no TTL extension, and no `heartbeat` event. The stored value is already `now`, and the first
+  heartbeat of that second already extended the entry's TTL, so the duplicate carries no new
+  information and only burns fees. Distinct-second heartbeats (the normal case) always write and
+  emit. Measured: see `redundant_same_second_heartbeat_is_a_measured_no_op` (CPU instruction delta
+  between a fresh and a redundant heartbeat).
 - **Grace:** `dms_grace_secs` in the policy (0 disables). Recommended default on testnet proofs:
   small (e.g. 60s) so the freeze is observable; production guidance ≥ several days.
 - **Freeze mechanism:** automatic and *lazy*. There is no stored "auto-frozen" flag — rule #2
@@ -318,6 +364,8 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // Pure pre-flight replica of the §6.2 decision path (same code, no writes):
     // lets agents/SDK simulate an asset transfer before signing. Emits the same
     // events as an in-path decision so telemetry sees one vocabulary.
+pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
+  // Same zero-write pre-flight, with remaining_window and effective cap metrics.
 
 // ── Enforcement (host-invoked; not callable by anyone) ────────────────────
 impl CustomAccountInterface for PolicyEngine {
@@ -331,15 +379,27 @@ impl CustomAccountInterface for PolicyEngine {
 }
 ```
 
-`Status` / `CheckResult` / reasons:
+`Status` / `CheckResult` / `CheckDetail` / reasons:
+
+**Wire format:** Exact JSON serialization for non-Rust consumers (SDK, dashboard) is documented in [Wire Format](docs/research/wire-format.md) — includes field names, enum tagging convention (`Allowed` bare vs `{"Blocked":"reason"}`), and decoder-breakage warning.
 
 ```rust
 #[contracttype]
 pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
-                   pub last_heartbeat: u64, pub now: u64, pub has_policy: bool }
+                   pub last_heartbeat: u64, pub now: u64, pub has_policy: bool,
+                   pub policy_revision: u64 }
 
 #[contracttype]
 pub enum CheckResult { Allowed, Blocked(BlockReason) }
+
+#[contracttype]
+pub struct CheckDetail {
+  pub result: CheckResult,
+  pub remaining_window: Option<i128>,
+  pub per_tx_cap: Option<i128>,
+  pub effective_per_tx_cap: Option<i128>,
+  pub effective_window_cap: Option<i128>,
+}
 
 #[contracterror] #[repr(u32)]
 pub enum Error {            // values stable; see tests/fixtures
@@ -352,6 +412,13 @@ pub enum Error {            // values stable; see tests/fixtures
     UnknownContract = 26, SelfFunctionNotAllowed = 27,
 }
 ```
+
+`check_detailed` loads and prunes only an in-memory copy of the rolling ledger.
+It writes no ledger state and emits the same `auth_checked` event, with the same
+`allowed`/`blocked` result and reason, as `check`. `remaining_window` is the
+capacity available before the requested transfer; it is `None` when the rolling
+window cap is disabled. The configured and effective caps are `None` when
+disabled; v1 has no per-asset overrides, so effective caps equal configured caps.
 
 ---
 
@@ -378,7 +445,7 @@ filtering by the SDK listener.
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
 | `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | — | every `__check_auth` / `check` decision |
-| `heartbeat` | — | `at: u64` | on agent heartbeat |
+| `heartbeat` | — | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `frozen` / `unfrozen` | — | `by: Address` | admin freeze / unfreeze |
 | `policy_set` / `policy_revoked` | — | `by: Address` | admin policy changes |
 

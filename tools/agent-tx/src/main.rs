@@ -656,6 +656,200 @@ fn run(call: &Call, args: &Args) {
     std::process::exit(1);
 }
 
+// ── Guard Registry ────────────────────────────────────────────────────────
+///
+/// Local registry for guard contract addresses. Stored as JSON at
+/// `~/.config/agent-tx/guards.json` (or `AGENT_TX_GUARDS_PATH` env var).
+/// The registry is gitignore'd — contract IDs are public but we keep them
+/// out of the repo to avoid accidental commits.
+///
+/// Format:
+/// ```json
+/// {
+///   "guards": [
+///     { "alias": "prod", "address": "C...", "admin": "G...", "added_at": 1234567890 }
+///   ],
+///   "default": "prod"
+/// }
+/// ```
+
+use std::fs;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct GuardEntry {
+    alias: String,
+    address: String,
+    admin: String,
+    added_at: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone, Debug)]
+struct Registry {
+    guards: Vec<GuardEntry>,
+    default: Option<String>,
+}
+
+fn registry_path() -> PathBuf {
+    if let Ok(path) = std::env::var("AGENT_TX_GUARDS_PATH") {
+        return PathBuf::from(path);
+    }
+    let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push("agent-tx");
+    fs::create_dir_all(&path).ok();
+    path.push("guards.json");
+    path
+}
+
+fn load_registry() -> Registry {
+    let path = registry_path();
+    if !path.exists() {
+        return Registry::default();
+    }
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_registry(reg: &Registry) {
+    let path = registry_path();
+    let json = serde_json::to_string_pretty(reg).expect("serialize registry");
+    fs::write(&path, json).expect("write registry");
+}
+
+fn now_ts() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn verify_guard(rpc: &Rpc, guard_addr: &str, _passphrase: &str) -> Result<(), String> {
+    let guard: ScAddress = guard_addr.parse().map_err(|e| format!("invalid guard address: {e}"))?;
+    let env = guard_footprint(&guard);
+    let keys = env.read_write.iter().cloned().collect::<Vec<_>>();
+    let fp = LedgerFootprint {
+        read_only: VecM::default(),
+        read_write: VecM::try_from(keys).expect("footprint bound"),
+    };
+    let tx = Transaction {
+        source_account: MuxedAccount::Ed25519(Uint256([0u8; 32])),
+        fee: 0,
+        seq_num: SequenceNumber(0),
+        cond: Preconditions::None,
+        memo: Memo::None,
+        operations: VecM::default(),
+        ext: TransactionExt::V1(SorobanTransactionData {
+            resources: SorobanResources {
+                footprint: fp,
+                instructions: 0,
+                disk_read_bytes: 0,
+                write_bytes: 0,
+            },
+            resource_fee: 0,
+            ext: SorobanTransactionDataExt::V0,
+        }),
+    };
+    let env = TransactionEnvelope::Tx(TransactionV1Envelope { tx, signatures: VecM::default() });
+    let sim = rpc.simulate(&b64_encode_xdr(&env));
+    if let Some(err) = sim.get("error") {
+        let msg = err["message"].as_str().unwrap_or("unknown error");
+        return Err(format!("guard verification failed: {msg}"));
+    }
+    Ok(())
+}
+
+fn cmd_guards_add<I: Iterator<Item = String>>(args: &mut I) -> Result<(), String> {
+    let alias = args.next().ok_or("missing alias")?;
+    let address = args.next().ok_or("missing address")?;
+    let admin = args.next().ok_or("missing admin")?;
+    let rpc_url = args.next().unwrap_or_else(|| DEFAULT_RPC.to_string());
+    let passphrase = args.next().unwrap_or_else(|| DEFAULT_PASSPHRASE.to_string());
+
+    let rpc = Rpc { url: rpc_url };
+    verify_guard(&rpc, &address, &passphrase)?;
+
+    let mut reg = load_registry();
+    if reg.guards.iter().any(|g| g.alias == alias) {
+        return Err(format!("alias '{alias}' already exists"));
+    }
+    if reg.guards.iter().any(|g| g.address == address) {
+        return Err(format!("address '{address}' already registered under another alias"));
+    }
+    reg.guards.push(GuardEntry {
+        alias: alias.clone(),
+        address,
+        admin,
+        added_at: now_ts(),
+    });
+    if reg.default.is_none() {
+        reg.default = Some(alias.clone());
+    }
+    save_registry(&reg);
+    println!("Added guard '{alias}' (default: {})", reg.default.as_deref().unwrap_or("none"));
+    Ok(())
+}
+
+fn cmd_guards_list() {
+    let reg = load_registry();
+    if reg.guards.is_empty() {
+        println!("No guards registered. Use `agent-tx guards add <alias> <address> <admin>`");
+        return;
+    }
+    println!("Registered guards:");
+    for g in &reg.guards {
+        let default_mark = if reg.default.as_ref() == Some(&g.alias) { " (default)" } else { "" };
+        println!("  {} -> {} [admin: {}]{}", g.alias, g.address, g.admin, default_mark);
+    }
+}
+
+fn cmd_guards_remove<I: Iterator<Item = String>>(args: &mut I) -> Result<(), String> {
+    let alias = args.next().ok_or("missing alias")?;
+    let mut reg = load_registry();
+    let idx = reg.guards.iter().position(|g| g.alias == alias).ok_or("alias not found")?;
+    reg.guards.remove(idx);
+    if reg.default.as_ref() == Some(&alias) {
+        reg.default = reg.guards.first().map(|g| g.alias.clone());
+    }
+    save_registry(&reg);
+    println!("Removed guard '{alias}'");
+    Ok(())
+}
+
+fn cmd_guards_set_default<I: Iterator<Item = String>>(args: &mut I) -> Result<(), String> {
+    let alias = args.next().ok_or("missing alias")?;
+    let mut reg = load_registry();
+    if !reg.guards.iter().any(|g| g.alias == alias) {
+        return Err("alias not found".into());
+    }
+    reg.default = Some(alias.clone());
+    save_registry(&reg);
+    println!("Default guard set to '{alias}'");
+    Ok(())
+}
+
+fn resolve_guard(guard_arg: Option<&str>) -> Result<String, String> {
+    if let Some(g) = guard_arg {
+        return Ok(g.to_string());
+    }
+    let reg = load_registry();
+    if let Some(default) = reg.default {
+        if let Some(g) = reg.guards.iter().find(|g| g.alias == default) {
+            return Ok(g.address.clone());
+        }
+    }
+    if reg.guards.is_empty() {
+        return Err("no guard specified and no guards registered. Use `agent-tx guards add <alias> <address> <admin>` to register one, or pass --guard".into());
+    }
+    Err(format!(
+        "no guard specified and no default set. Registered guards:\n{}",
+        reg.guards.iter()
+            .map(|g| format!("  {} -> {}", g.alias, g.address))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -703,7 +897,28 @@ mod tests {
 
 fn main() {
     let mut it = std::env::args().skip(1);
-    let cmd = it.next().expect("subcommand: transfer | heartbeat");
+    let cmd = it.next().expect("subcommand: transfer | heartbeat | guards");
+
+    match cmd.as_str() {
+        "guards" => {
+            let subcmd = it.next().expect("guards subcommand: add | list | remove | set-default");
+            let result = match subcmd.as_str() {
+                "add" => cmd_guards_add(&mut it),
+                "list" => { cmd_guards_list(); Ok(()) }
+                "remove" => cmd_guards_remove(&mut it),
+                "set-default" => cmd_guards_set_default(&mut it),
+                other => Err(format!("unknown guards subcommand: {other}")),
+            };
+            if let Err(e) = result {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        "transfer" | "heartbeat" => {}
+        other => panic!("unknown subcommand {other}"),
+    }
+
     let mut guard_s = None;
     let mut token_s = None;
     let mut to_s = None;
@@ -727,11 +942,15 @@ fn main() {
             other => panic!("unknown argument {other}"),
         }
     }
-    let guard_s = guard_s.expect("--guard");
+
+    let guard_addr = resolve_guard(guard_s.as_deref()).unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    });
     let secret = secret
         .or_else(|| std::env::var("AGENT_SECRET").ok())
         .expect("--agent-secret");
-    let guard: ScAddress = guard_s.parse().expect("guard address");
+    let guard: ScAddress = guard_addr.parse().expect("guard address");
     let args = Args {
         rpc: Rpc { url: rpc_url },
         passphrase,
@@ -750,6 +969,6 @@ fn main() {
         "heartbeat" => {
             run(&Call::Heartbeat, &args);
         }
-        other => panic!("unknown subcommand {other}"),
+        _ => unreachable!(),
     }
 }
