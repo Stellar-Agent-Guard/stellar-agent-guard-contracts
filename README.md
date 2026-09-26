@@ -5,6 +5,9 @@
 <a href="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/ci.yml">
 <img src="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/ci.yml/badge.svg" alt="CI"/>
 </a>
+<a href="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/host-watch.yml">
+  <img src="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/host-watch.yml/badge.svg" alt="Futurenet host watch"/>
+</a>
 <a href="LICENSE-MIT">
 <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"/>
 </a>
@@ -34,6 +37,14 @@ switch, and a dead-man switch (heartbeat with admin-attested reversal).
 Stellar testnet (protocol 28) with real contract IDs and transaction hashes — evidence is
 recorded in [`tests/fixtures/README.md`](tests/fixtures/README.md), and the deployed
 contract's read functions were cross-checked live during this README pass (below).
+
+The weekly [Futurenet host watch](.github/workflows/host-watch.yml) builds the contract, runs the
+hermetic suite, then deploys a fresh ephemeral account to Futurenet and exercises
+`initialize` → `set_policy` → an agent-signed `heartbeat` (the real `__check_auth` path) → read
+`check`/`status` simulations. It also reports the Futurenet protocol version. This is intentionally
+a compatibility signal, not a claim that Futurenet state is persistent; a failed run is visible
+in Actions and is not silently opened as an issue. The host behaviors this watch covers are
+listed in [SPEC §1.1](SPEC.md#11-sdk-and-host-surface-this-is-built-on-soroban-sdk-27).
 
 ## 🎯 What makes this different
 

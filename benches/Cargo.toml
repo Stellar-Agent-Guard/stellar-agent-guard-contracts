@@ -1,0 +1,13 @@
+[package]
+name = "stellar-agent-guard-benches"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+soroban-sdk = { version = "27", features = ["testutils"] }
+stellar-agent-guard-contracts = { path = "..", features = ["testutils"] }
+
+[[bin]]
+name = "denial_path_gas"
+path = "denial_path_gas.rs"

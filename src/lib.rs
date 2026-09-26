@@ -498,3 +498,16 @@ impl CustomAccountInterface for PolicyEngine {
         }
     }
 }
+
+// ── Test utilities (exposed via `testutils` feature) ──────────────────────
+#[cfg(feature = "testutils")]
+#[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
+pub mod testutils {
+    pub use crate::engine::{contains_addr, decide, parse_call, AccountState, Decision};
+    pub use crate::types::{
+        CheckResult, DataKey, Error, PolicyConfig, ProtocolRule, Status, WindowState,
+    };
+    pub use crate::window::Ledger;
+    pub use soroban_sdk::auth::{Context, ContractContext};
+    pub use soroban_sdk::{vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Val, Vec};
+}
