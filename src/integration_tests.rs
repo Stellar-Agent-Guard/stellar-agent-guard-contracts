@@ -17,7 +17,7 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{CheckResult, Error as GuardError, PolicyConfig};
+use crate::types::{CheckResult, Error as GuardError, PolicyConfig, ProtocolRule};
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -29,7 +29,10 @@ use soroban_sdk::xdr::{
     ScBytes, ScSymbol, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
     SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, WriteXdr,
 };
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val};
+use soroban_sdk::{
+    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val,
+};
+use std::format;
 
 const SIG_EXPIRATION_LEDGER: u32 = 6_000_000;
 
@@ -762,4 +765,69 @@ fn revoke_policy_is_instant_default_deny() {
     h.env.mock_all_auths();
     h.revoke_policy();
     h.transfer_expect_blocked(&recv, 5);
+}
+
+#[test]
+fn policy_config_debug_snapshot() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let asset_a = Address::generate(&env);
+    let asset_b = Address::generate(&env);
+    let proto_a = Address::generate(&env);
+    let proto_b = Address::generate(&env);
+    let recip_a = Address::generate(&env);
+    let recip_b = Address::generate(&env);
+
+    let config = PolicyConfig {
+        per_tx_cap: 1000,
+        window_secs: 86_400,
+        window_cap: 50_000,
+        assets: vec![&env, asset_a.clone(), asset_b],
+        protocols: vec![
+            &env,
+            ProtocolRule {
+                contract: proto_a,
+                fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+            },
+            ProtocolRule {
+                contract: proto_b,
+                fns: None,
+            },
+        ],
+        recipients: vec![&env, recip_a, recip_b],
+        allow_any_recipient: false,
+        active_from: 1_700_000_000,
+        active_until: 1_800_000_000,
+        paused: true,
+        dms_grace_secs: 3600,
+    };
+
+    let debug_output = format!("{config:?}");
+
+    let fields = [
+        "per_tx_cap",
+        "window_secs",
+        "window_cap",
+        "assets",
+        "protocols",
+        "recipients",
+        "allow_any_recipient",
+        "active_from",
+        "active_until",
+        "paused",
+        "dms_grace_secs",
+    ];
+
+    let mut last_pos = 0;
+    for field in fields {
+        let pos = debug_output
+            .find(field)
+            .unwrap_or_else(|| panic!("field {field} not found in debug output"));
+        assert!(
+            pos >= last_pos,
+            "field {field} appears before previous field (order: {fields:?})"
+        );
+        last_pos = pos;
+    }
 }

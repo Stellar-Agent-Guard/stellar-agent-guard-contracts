@@ -560,6 +560,23 @@ and a review approved for changes to merge.
 - [Telegram](https://t.me/+EzSusj-2vVhhNmI0)
 - [Discord](https://discord.gg/Z766vsgjg)
 
+## Which repository? — Decision table for cross-repo questions
+
+Stellar Agent Guard spans three repositories. Use this table to file issues in the right place.
+
+| Symptom / Question | Repository | Issue Template |
+|---|---|---|
+| My transfer is blocked unexpectedly / spend caps not working | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
+| Middleware/SDK throws wrong error / pre-flight check mismatch | [stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
+| Panic button won't confirm / dashboard UI issue | [stellar-agent-guard-dashboard](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
+| Policy encode/decode mismatch between contract and SDK | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) + [stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | File in both (link each other) |
+| Dead-man switch / heartbeat not firing as expected | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
+| Agent transaction signing / auth entry construction failing | [stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
+| Contract deployment / initialization / admin functions | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
+| Dashboard not showing correct policy state / events | [stellar-agent-guard-dashboard](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
+
+> **Note:** If unsure, file in **stellar-agent-guard-contracts** — maintainers will triage and redirect.
+
 ## Contact
 
 - GitHub issues: <https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues>
