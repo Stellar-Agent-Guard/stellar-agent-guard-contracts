@@ -17,8 +17,8 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{DataKey, Error as GuardError, PolicyConfig, WindowState};
-use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
+use crate::types::{CheckResult, Error as GuardError, PolicyConfig};
+use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
@@ -541,6 +541,65 @@ fn allowed_transaction_succeeds() {
     assert!(h.emitted_allowed_auth());
     let st = h.status();
     assert!(!st.heartbeat_expired);
+}
+
+#[test]
+fn detailed_check_reports_exact_headroom_and_effective_caps() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.per_tx_cap = 75;
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+    h.set_time(1_000);
+    let recv = h.recv.clone();
+    h.transfer(&recv, 40);
+
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 10)
+    });
+    assert_eq!(detail.result, CheckResult::Allowed);
+    assert_eq!(detail.remaining_window, Some(60));
+    assert_eq!(detail.per_tx_cap, Some(75));
+    assert_eq!(detail.effective_per_tx_cap, Some(75));
+    assert_eq!(detail.effective_window_cap, Some(100));
+}
+
+#[test]
+fn detailed_check_reports_none_for_disabled_caps() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), h.recv.clone(), 10)
+    });
+    assert_eq!(detail.result, CheckResult::Allowed);
+    assert_eq!(detail.remaining_window, None);
+    assert_eq!(detail.per_tx_cap, None);
+    assert_eq!(detail.effective_per_tx_cap, None);
+    assert_eq!(detail.effective_window_cap, None);
+}
+
+#[test]
+fn blocked_detailed_check_reports_headroom_without_writing_window() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+    h.set_time(1_000);
+    let recv = h.recv.clone();
+    h.transfer(&recv, 40);
+
+    let first = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 70)
+    });
+    assert_eq!(
+        first.result,
+        CheckResult::Blocked(Symbol::new(&h.env, "window_cap_exceeded"))
+    );
+    assert_eq!(first.remaining_window, Some(60));
+    let second = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 1)
+    });
+    assert_eq!(second.remaining_window, Some(60));
 }
 
 #[test]

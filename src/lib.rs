@@ -19,13 +19,14 @@ mod window;
 #[cfg(test)]
 mod integration_tests;
 
-use engine::{contains_addr, decide, AccountState, Decision};
+use engine::{cap_metrics, contains_addr, decide, AccountState, Decision};
 use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
 use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, TryFromVal, Val,
 };
-use types::{CheckResult, DataKey, Error, PolicyConfig, Status, WindowState};
+pub use types::{CheckDetail, Error, PolicyConfig};
+use types::{CheckResult, DataKey, Status, WindowState};
 use window::Ledger;
 
 // ── Contract events (SPEC §9). Each event is its own type; topic layout
@@ -430,14 +431,26 @@ impl PolicyEngine {
 
     /// Pure pre-flight of the asset-transfer decision path (no writes): lets
     /// agents/SDK simulate a transfer before signing. Emits the same
-    /// `auth_checked` events as an in-path decision.
+    /// `auth_checked` event as an in-path decision.
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult {
-        // Same single-load snapshot as `__check_auth`, so the pre-flight and
-        // the in-path decision can never disagree about account state.
-        let Some(snapshot) = AuthSnapshot::load(&env) else {
+        Self::check_detailed(env, asset, to, amount).result
+    }
+
+    /// Pre-flight decision plus current cap headroom for the targeted asset.
+    /// This path only reads storage, mutates a local ledger copy, and emits
+    /// exactly the same `auth_checked` event as `check`.
+    #[allow(clippy::must_use_candidate)] // public read surface
+    pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
+        let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
             emit_auth(&env, false, Some(Error::NoPolicy));
-            return CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason()));
+            return CheckDetail {
+                result: CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason())),
+                remaining_window: None,
+                per_tx_cap: None,
+                effective_per_tx_cap: None,
+                effective_window_cap: None,
+            };
         };
         let AuthSnapshot {
             policy,
@@ -448,8 +461,14 @@ impl PolicyEngine {
         } = snapshot;
         let now = env.ledger().timestamp();
         let self_addr = env.current_contract_address();
+        let mut ledger = load_ledger(&env);
+        if cfg.window_cap > 0 {
+            ledger.prune(now, cfg.window_secs);
+        }
+        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&cfg, &ledger);
+        let effective_per_tx_cap = per_tx_cap;
         let call = transfer_context(&env, &asset, &to, amount);
-        match decide(
+        let result = match decide(
             &env,
             &self_addr,
             Some(&policy),
@@ -469,6 +488,13 @@ impl PolicyEngine {
                 emit_auth(&env, false, Some(e));
                 CheckResult::Blocked(Symbol::new(&env, e.reason()))
             }
+        };
+        CheckDetail {
+            result,
+            remaining_window,
+            per_tx_cap,
+            effective_per_tx_cap,
+            effective_window_cap,
         }
     }
 }
@@ -564,4 +590,17 @@ impl CustomAccountInterface for PolicyEngine {
             }
         }
     }
+}
+
+// ── Test utilities (exposed via `testutils` feature) ──────────────────────
+#[cfg(feature = "testutils")]
+#[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
+pub mod testutils {
+    pub use crate::engine::{contains_addr, decide, parse_call, AccountState, Decision};
+    pub use crate::types::{
+        CheckResult, DataKey, Error, PolicyConfig, ProtocolRule, Status, WindowState,
+    };
+    pub use crate::window::Ledger;
+    pub use soroban_sdk::auth::{Context, ContractContext};
+    pub use soroban_sdk::{vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Val, Vec};
 }
