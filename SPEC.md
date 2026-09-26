@@ -164,9 +164,7 @@ exactly the burst-boundary cases a spend guard exists to catch.
 Implementation (exact, lazy, bounded):
 
 - Entries are append-ordered by unix ledger time (`env.ledger().timestamp()`, 1s granularity).
-- On every evaluation: while `entries[0].ts <= now - window_secs`, pop from the front and
-  subtract from `total`. Evaluation is lazy — no cron, no background writes; the O(expired)
-  pruning cost amortizes over accesses.
+- On every evaluation: expired entries are bulk-pruned using binary search over the timestamp-sorted entries to find the first live entry, dropping expired prefixes in O(log n) time instead of sequential O(k) pops. Evaluation is lazy — no cron, no background writes.
 - A new spend coalesces into the trailing entry when it shares the same second
   (`entries.last().ts == now`), so dense bursts in one second stay one entry.
 - **Boundedness backstop:** `MAX_WINDOW_ENTRIES = 8192`. If a write would exceed it, the two

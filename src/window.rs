@@ -60,12 +60,46 @@ impl Ledger {
         if window_secs == 0 {
             return;
         }
-        while let Some(front) = self.entries.first() {
-            if front.ts.saturating_add(window_secs) <= now {
-                self.total = self.total.saturating_sub(front.amount);
-                self.entries.pop_front();
+        let n = self.entries.len();
+        if n == 0 {
+            return;
+        }
+
+        // Binary search for the first live entry (ts + window_secs > now).
+        // Since entries are chronologically sorted by ts, we can find the split point in O(log n).
+        let mut low = 0usize;
+        let mut high = n as usize;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if let Ok(mid_u32) = u32::try_from(mid) {
+                if let Some(entry) = self.entries.get(mid_u32) {
+                    if entry.ts.saturating_add(window_secs) <= now {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                } else {
+                    break;
+                }
             } else {
                 break;
+            }
+        }
+
+        // If all entries are expired, prune them all
+        if low >= n as usize {
+            self.total = 0;
+            while !self.entries.is_empty() {
+                self.entries.pop_front();
+            }
+            return;
+        }
+
+        // Otherwise, pop all expired entries up to index `low` and subtract their amounts from total
+        for _ in 0..low {
+            if let Some(front) = self.entries.first() {
+                self.total = self.total.saturating_sub(front.amount);
+                self.entries.pop_front();
             }
         }
     }
@@ -209,5 +243,38 @@ mod tests {
             SpendEntry { ts: 1, amount: 5 },
         ];
         assert_eq!(Ledger::from_entries(&env, v).total, 15);
+    }
+
+    #[test]
+    fn bulk_prune_equivalence_with_sequential() {
+        let env = Env::default();
+        let mut l_bulk = Ledger::empty(&env);
+        let mut l_seq = Ledger::empty(&env);
+
+        // Populate 100 entries with varying timestamps
+        for i in 0..100 {
+            l_bulk.admit(i * 10, 1);
+            l_seq.admit(i * 10, 1);
+        }
+
+        // Prune at now = 500 with window_secs = 200 (cutoff 300)
+        l_bulk.prune(500, 200);
+
+        // Sequential manual pop simulation for verification
+        l_seq.total = 100;
+        while let Some(e) = l_seq.entries.first() {
+            if e.ts.saturating_add(200) <= 500 {
+                l_seq.total = l_seq.total.saturating_sub(e.amount);
+                l_seq.entries.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        assert_eq!(l_bulk.total, l_seq.total);
+        assert_eq!(l_bulk.len(), l_seq.len());
+        for i in 0..l_bulk.len() {
+            assert_eq!(l_bulk.entries.get(i), l_seq.entries.get(i));
+        }
     }
 }
