@@ -61,10 +61,12 @@ pub struct ContractContext {
 
 The host invokes `__check_auth` once per authorization the account must approve, supplying the
 contexts of the calls being authorized. `type Signature = BytesN<64>` (single registered agent
-Ed25519 key; a `Vec` of keys / threshold signatures is a v2 item). Signature verification:
+Ed25519 key; a `Vec` of keys / threshold signatures is a v2 item — see [Multi-Sig Threshold Models](docs/research/multi-sig-threshold-models.md)). Signature verification:
 `env.crypto().ed25519_verify(registered_pubkey, signature_payload (32B), presented_sig)`, then
 policy evaluation. CAP-71 delegation (`env.custom_account().get_delegated_signers()` /
 `delegate_auth`) is available but **out of v1 scope**.
+
+**Research note (v2):** Verifiable off-chain policy attestation is explored in [Policy Attestation](docs/research/policy-attestation.md) — admin signs `policy_hash()` output; agent verifies before bootstrap. Current conclusion: deferral (direct chain read is stronger for typical deployments).
 
 ---
 
@@ -98,6 +100,8 @@ This boundary is an inherent property of the platform (an independent current co
 OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer contexts and
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
 states the same scope in the same terms.
+
+**Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol parsers, rate limiting, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Recommended direction: protocol rate limiting (count-based) as core deliverable; opt-in protocol parsers as secondary.
 
 ---
 
@@ -339,6 +343,8 @@ impl CustomAccountInterface for PolicyEngine {
 ```
 
 `Status` / `CheckResult` / reasons:
+
+**Wire format:** Exact JSON serialization for non-Rust consumers (SDK, dashboard) is documented in [Wire Format](docs/research/wire-format.md) — includes field names, enum tagging convention (`Allowed` bare vs `{"Blocked":"reason"}`), and decoder-breakage warning.
 
 ```rust
 #[contracttype]
