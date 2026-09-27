@@ -454,6 +454,7 @@ disabled; v1 has no per-asset overrides, so effective caps equal configured caps
 - All amounts `>= 0`; `window_secs` and `dms_grace_secs` are `u64` (no negatives possible).
 - `window_cap != 0` requires `window_secs != 0`.
 - `active_until == 0 || active_until > active_from`.
+- Policies may be installed with an `active_until` already elapsed or an `active_from` far in the past; this is allowed as a feature to park accounts in a dormant/pre-active state (subsequent transfers evaluate to `OutsideActiveWindow` until ledger time falls within the active window).
 - Assets, protocols, recipients, and per-protocol fn lists must be non-empty for their
   respective vectors to matter (empty `assets` = no SAC transfer is ever allowed; empty
   `recipients` with `allow_any_recipient == false` = no recipient allowed).
