@@ -16,6 +16,8 @@ doctest = false
 testutils = []
 
 [dependencies]
+# SPEC §1.1 verified against soroban-sdk 27.0.6 (CustomAccountInterface, Context, ContractContext)
+# Bumping soroban-sdk requires re-verifying SPEC §1.1 quotes against new version source.
 soroban-sdk = "27.0.6"
 
 [dev-dependencies]

@@ -410,6 +410,7 @@ pub enum Error {            // values stable; see tests/fixtures
     AssetNotAllowed = 20, RecipientNotAllowed = 21, PerTxCapExceeded = 22,
     WindowCapExceeded = 23, ProtocolNotAllowed = 24, FunctionNotAllowed = 25,
     UnknownContract = 26, SelfFunctionNotAllowed = 27,
+    CreateContractNotAllowed = 28,
 }
 ```
 
@@ -459,8 +460,16 @@ filtering by the SDK listener.
 | `heartbeat` | — | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `frozen` / `unfrozen` | — | `by: Address` | admin freeze / unfreeze |
 | `policy_set` / `policy_revoked` | — | `by: Address` | admin policy changes |
+| `agent_rotated` | — | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
 
 Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
+
+**Key fingerprints (`agent_rotated`).** A fingerprint is `sha256(pubkey)[0..8]` — the first
+8 bytes of the SHA-256 digest of the agent public key, rendered as 16 lowercase hex characters
+off-chain. Rotations record both endpoints (outgoing and incoming) so an auditor can reconstruct
+"when did key K stop being authoritative" from the append-only event log; the full public key is
+never repeated in event data (it is already public at `initialize`). SDK/dashboard decoders must
+render the `BytesN<8>` data fields as hex — a cross-repo follow-up tracked in those repositories.
 
 ---
 

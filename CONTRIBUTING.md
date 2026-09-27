@@ -60,6 +60,9 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    or blocks should add a unit/integration test **and**, where it is a user-
    visible enforcement change, be recorded in the testnet proof plan
    (`tests/fixtures/README.md`) per the Phase-1 exit-criteria pattern.
+7. **Denial-reason messages:** `docs/reason-glossary.md` is the canonical
+   message-content source for SDK/UI work — map new user-facing denial text to
+   its agent/operator/auditor columns instead of inventing new phrasing.
 
 ## Commit Discipline (strict)
 
@@ -105,3 +108,10 @@ Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the
 [issue tracker](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues);
 each carries one `complexity: trivial|small|medium|large` label. Good first
 tasks for the Drips Stellar Wave contributor sprints.
+
+## Dependency drift check
+
+When bumping `soroban-sdk` version in `Cargo.toml`, you **must** re-verify
+SPEC §1.1 quotes against the new SDK source (`src/auth.rs`, `src/custom_account.rs`).
+Update the version comment in `Cargo.toml` and the SPEC §1.1 header accordingly.
+This is the mechanical ratchet preventing silent auth-semantics drift.
