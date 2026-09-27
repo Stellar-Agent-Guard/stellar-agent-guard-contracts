@@ -471,7 +471,7 @@ impl PolicyEngine {
     /// exactly the same `auth_checked` event as `check`.
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
-        let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+        let Some(snapshot) = AuthSnapshot::load(&env) else {
             emit_auth(&env, false, Some(Error::NoPolicy));
             return CheckDetail {
                 result: CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason())),
@@ -490,11 +490,10 @@ impl PolicyEngine {
         } = snapshot;
         let now = env.ledger().timestamp();
         let self_addr = env.current_contract_address();
-        let mut ledger = load_ledger(&env);
-        if cfg.window_cap > 0 {
-            ledger.prune(now, cfg.window_secs);
+        if policy.window_cap > 0 {
+            ledger.prune(now, policy.window_secs);
         }
-        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&cfg, &ledger);
+        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&policy, &ledger);
         let effective_per_tx_cap = per_tx_cap;
         let call = transfer_context(&env, &asset, &to, amount);
         let result = match decide(

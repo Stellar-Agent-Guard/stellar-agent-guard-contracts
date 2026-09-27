@@ -17,8 +17,10 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{CheckResult, Error as GuardError, PolicyConfig, ProtocolRule};
-use crate::{PolicyEngine, PolicyEngineClient};
+use crate::types::{
+    CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule, WindowState,
+};
+use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
@@ -29,9 +31,6 @@ use soroban_sdk::xdr::{
     Limited, Limits, ScBytes, ScSymbol, ScVal, SorobanAddressCredentials,
     SorobanAuthorizationEntry, SorobanAuthorizedFunction, SorobanAuthorizedInvocation,
     SorobanCredentials, WriteXdr,
-};
-use soroban_sdk::{
-    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val,
 };
 use soroban_sdk::{
     contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val,
@@ -524,6 +523,8 @@ impl Harness {
             .host()
             .get_detailed_last_invocation_resources()
             .map_or(0, |d| d.resources.memory_read_entries)
+    }
+
     /// The `(old, new)` key fingerprints carried by the most recent
     /// `agent_rotated` event (SPEC §9), as raw `ScVal`s. Panics if the event
     /// is absent or malformed.
@@ -1126,7 +1127,13 @@ fn authorization_touches_storage_only_through_the_snapshot() {
     // path may reach storage only through `AuthSnapshot::load`. This is the
     // mechanical form of the comment on `AuthSnapshot`, and it is what keeps a
     // future edit from adding an inline read back.
-    for fn_name in ["__check_auth", "check"] {
+    let check = lib_fn_body("check");
+    assert!(
+        check.contains("Self::check_detailed"),
+        "fn check must delegate to check_detailed\n{check}"
+    );
+
+    for fn_name in ["__check_auth", "check_detailed"] {
         let body = lib_fn_body(fn_name);
 
         let snapshots = body.matches("AuthSnapshot::load").count();
@@ -1204,6 +1211,9 @@ fn authorization_touches_storage_only_through_the_snapshot() {
         1,
         "load_window must reference DataKey::Window exactly once\n{load_window}"
     );
+}
+
+#[test]
 fn policy_config_debug_snapshot() {
     let env = Env::default();
     env.mock_all_auths();
