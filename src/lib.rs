@@ -383,6 +383,17 @@ impl PolicyEngine {
         persist_get(&env, &DataKey::Policy)
     }
 
+    /// Evaluates dead-man switch health (`Ok`, `Warn` at ≥80% elapsed, or `Expired`).
+    #[allow(clippy::must_use_candidate)] // public read surface
+    pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus {
+        let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+            return crate::types::DmsHealthStatus::Ok;
+        };
+        let last = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let now = env.ledger().timestamp();
+        engine::dms_health(now, last, &cfg)
+    }
+
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn status(env: Env) -> Status {
         let has_policy = persist_get::<PolicyConfig>(&env, &DataKey::Policy).is_some();

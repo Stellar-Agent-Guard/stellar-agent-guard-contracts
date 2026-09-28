@@ -852,6 +852,63 @@ fn error_and_block_reason_round_trip() {
 }
 
 #[test]
+fn agent_runtime_lifecycle_simulation_continuous_heartbeat_loop_and_spends() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_secs = 100;
+    policy.window_cap = 100;
+    policy.dms_grace_secs = 50;
+
+    let mut now = 1_000_000u64;
+    h.set_time(now);
+    h.install_policy(&policy);
+
+    // Span ≥3 window periods and ≥5 heartbeats
+    // Window is 100s, so 3 windows = 300s. Let's run for 350s with heartbeats every 40s (total 9 heartbeats).
+    for _i in 0..9 {
+        h.set_time(now);
+        h.heartbeat();
+
+        // Spend some budget within caps (e.g. 20 per heartbeat)
+        h.set_time(now + 5);
+        h.transfer(&recv, 20);
+
+        now += 40;
+    }
+
+    // Verify budget recovery across rolled-out windows: windows have rolled, so we can spend again despite prior cumulative totals.
+    h.set_time(now);
+    h.heartbeat();
+    h.set_time(now + 5);
+    h.transfer(&recv, 30);
+
+    // Stop heartbeats and assert freeze at grace expiry
+    // Last heartbeat was at roughly now - 40. Grace is 50s. Advancing time by 60s should expire grace.
+    now += 60;
+    h.set_time(now);
+    let st = h.status();
+    assert!(
+        st.heartbeat_expired,
+        "heartbeat should have expired after grace"
+    );
+
+    // Assert transfers and heartbeats are frozen
+    h.transfer_expect_blocked(&recv, 10);
+    h.heartbeat_expect_blocked();
+
+    // Unfreeze
+    h.unfreeze();
+    let st_after = h.status();
+    assert!(!st_after.heartbeat_expired, "guard should be unfreezed");
+
+    // Resume normal ops
+    h.set_time(now + 10);
+    h.heartbeat();
+    h.transfer(&recv, 10);
+}
+
+#[test]
 fn policy_config_debug_snapshot() {
     let env = Env::default();
     env.mock_all_auths();

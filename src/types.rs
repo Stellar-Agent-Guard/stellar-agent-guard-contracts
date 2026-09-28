@@ -3,6 +3,18 @@
 
 use soroban_sdk::{contracterror, contracttype, Address, Symbol, Vec};
 
+/// Warning threshold percentage for dead-man switch health evaluation (80%).
+pub const DMS_WARN_THRESHOLD_PERCENT: u64 = 80;
+
+/// Dead-man switch health status returned by `dms_health`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DmsHealthStatus {
+    Ok,
+    Warn,
+    Expired,
+}
+
 /// Hard bound on rolling-window entries. Above this, the engine merges the two
 /// oldest entries forward (conservative over-count) — see SPEC §3.1.
 pub const MAX_WINDOW_ENTRIES: usize = 8192;

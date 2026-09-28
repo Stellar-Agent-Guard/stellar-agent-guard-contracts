@@ -386,6 +386,7 @@ pub fn unfreeze(env: Env)    // require_auth(Admin); clears AdminFrozen, LastHea
 // ── Read / advisory (no auth — safe reads only, nothing confidential) ─────
 pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
 pub fn status(env: Env) -> Status                     // frozen? admin_frozen? last_heartbeat? now?
+pub fn dms_health(env: Env) -> DmsHealth                  // ok, warn (>=80%), or expired
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // Pure pre-flight replica of the §6.2 decision path (same code, no writes):
     // lets agents/SDK simulate an asset transfer before signing. Emits the same
@@ -414,6 +415,17 @@ impl CustomAccountInterface for PolicyEngine {
 pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
                    pub last_heartbeat: u64, pub now: u64, pub has_policy: bool,
                    pub policy_revision: u64 }
+
+#[contracttype]
+pub enum DmsHealthStatus { Ok, Warn, Expired }
+
+#[contracttype]
+pub struct DmsHealth {
+    pub status: DmsHealthStatus,
+    pub elapsed_secs: u64,
+    pub grace_secs: u64,
+    pub threshold_secs: u64,
+}
 
 #[contracttype]
 pub enum CheckResult { Allowed, Blocked(BlockReason) }
@@ -482,11 +494,12 @@ filtering by the SDK listener.
 
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
-| `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | — | every `__check_auth` / `check` decision |
-| `heartbeat` | — | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
-| `frozen` / `unfrozen` | — | `by: Address` | admin freeze / unfreeze |
-| `policy_set` / `policy_revoked` | — | `by: Address` | admin policy changes |
-| `agent_rotated` | — | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
+| `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | (none) | every `__check_auth` / `check` decision |
+| `heartbeat` | (none) | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
+| `initialized` | (none) | `by: Address` | contract initialization |
+| `frozen` / `unfrozen` | (none) | `by: Address` | admin freeze / unfreeze |
+| `policy_set` / `policy_revoked` | (none) | `by: Address` | admin policy changes |
+| `agent_rotated` | (none) | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
 
 Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
 

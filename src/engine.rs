@@ -32,6 +32,33 @@ pub fn cap_metrics(
     (remaining, per_tx_cap, window_cap)
 }
 
+/// Evaluate dead-man switch health given current timestamp, last heartbeat, and policy config.
+pub fn dms_health(
+    now: u64,
+    last_heartbeat: u64,
+    policy: &PolicyConfig,
+) -> crate::types::DmsHealthStatus {
+    if policy.dms_grace_secs == 0 {
+        return crate::types::DmsHealthStatus::Ok;
+    }
+    if last_heartbeat == 0 {
+        return crate::types::DmsHealthStatus::Expired;
+    }
+    let elapsed = now.saturating_sub(last_heartbeat);
+    if elapsed > policy.dms_grace_secs {
+        return crate::types::DmsHealthStatus::Expired;
+    }
+    let warn_threshold = policy
+        .dms_grace_secs
+        .saturating_mul(crate::types::DMS_WARN_THRESHOLD_PERCENT)
+        / 100;
+    if elapsed >= warn_threshold {
+        crate::types::DmsHealthStatus::Warn
+    } else {
+        crate::types::DmsHealthStatus::Ok
+    }
+}
+
 // ── Small contains helpers (soroban Vec has no `contains`) ───────────────
 
 #[allow(clippy::must_use_candidate)]
