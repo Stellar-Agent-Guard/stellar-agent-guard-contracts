@@ -1,0 +1,15 @@
+# Maintainer call (recorded): blank issues are disabled so that incoming
+# issues arrive in the Summary / Acceptance Criteria / Tech Stack shape
+# promised by README/CONTRIBUTING, and community channels are linked below
+# per the README Community/Socials sections.
+blank_issues_enabled: false
+contact_links:
+  - name: Community chat (Telegram)
+    url: https://t.me/+EzSusj-2vVhhNmI0
+    about: Stellar Agent Guard community group for quick questions and discussion.
+  - name: Community chat (Discord)
+    url: https://discord.gg/Z766vsgjg
+    about: Stellar Agent Guard community server for quick questions and discussion.
+  - name: Security disclosure
+    url: https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md
+    about: Do not file public issues for vulnerabilities. See SECURITY.md first.

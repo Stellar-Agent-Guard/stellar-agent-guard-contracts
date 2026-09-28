@@ -118,3 +118,12 @@ When bumping `soroban-sdk` version in `Cargo.toml`, you **must** re-verify
 SPEC §1.1 quotes against the new SDK source (`src/auth.rs`, `src/custom_account.rs`).
 Update the version comment in `Cargo.toml` and the SPEC §1.1 header accordingly.
 This is the mechanical ratchet preventing silent auth-semantics drift.
+
+## Dependency automation (Dependabot)
+
+`.github/dependabot.yml` runs weekly for `cargo` and `github-actions`,
+targeting `main` (max 5 open PRs). `soroban-sdk` / `stellar-*` minor and patch
+updates are grouped; majors arrive as separate PRs because they can break ABI.
+Dependabot PRs get no fast lane: they must pass the full `ci` gate
+(fmt, clippy, tests, both builds) like any other change — branch protection
+already enforces this, so a red Dependabot PR simply does not merge.

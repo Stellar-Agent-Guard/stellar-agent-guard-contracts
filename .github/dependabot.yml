@@ -1,0 +1,53 @@
+# Dependabot update automation (issue #72). Weekly, targeting `main`, with a
+# sane open-PR cap so review load stays bounded. Pairs with the cargo-audit
+# gate: Dependabot keeps the RUSTSEC surface fresh and Actions pins current,
+# the audit gate catches what is already known-bad.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    # Covers the root contract manifest and tools/agent-tx (single lockfile
+    # graph per manifest; dependabot discovers all Cargo manifests from "/").
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    target-branch: "main"
+    open-pull-requests-limit: 5
+    groups:
+      # NOTE: soroban-sdk / stellar-* MAJORS are deliberately excluded from
+      # this group (minor + patch only). A soroban-sdk major can break ABI and
+      # change auth semantics, so majors must arrive as separate, individually
+      # reviewable PRs — and every soroban-sdk bump (any severity) requires
+      # re-verifying SPEC §1.1 quotes against the new SDK source
+      # (`src/auth.rs`, `src/custom_account.rs`) per CONTRIBUTING.md.
+      soroban-stack:
+        patterns:
+          - "soroban-*"
+          - "stellar-*"
+        update-types:
+          - "minor"
+          - "patch"
+      # Everything else in the Cargo graph (signing, hashing, serialization,
+      # HTTP, CLI helpers) batches into one weekly PR.
+      dev-tooling:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "soroban-*"
+          - "stellar-*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    target-branch: "main"
+    open-pull-requests-limit: 5
+    groups:
+      # All Actions (actions/*, dtolnay/rust-toolchain, softprops/*,
+      # stellar/stellar-cli) batch into one weekly PR. Note: a stellar-cli
+      # major bump can change Futurenet/testnet behavior the host-watch relies
+      # on — treat that file's diff with extra care in review.
+      actions:
+        patterns:
+          - "*"
