@@ -64,12 +64,18 @@ cargo cyclonedx --format json --describe binaries --target wasm32v1-none
 
 To verify what a deployment contains:
 
-1. Download `sbom.cdx.json` from the release that matches the deployed WASM
-   (compare the WASM SHA-256 if the release publishes one).
+1. Download `sbom.cdx.json` and `checksums.txt` from the release that matches
+   the deployed WASM; the checksum file is the canonical provenance record for
+   downstream repos that deploy or display the contract artifact.
 2. Regenerate the SBOM from that tag's source and diff the component lists.
 3. Check those component versions against an advisory database (e.g.
    `cargo audit` / `cargo deny check advisories`). The SBOM is the inventory
    artifact; the advisory scan is a separate gate.
+
+The release notes must also announce the new WASM SHA-256 to sibling repos
+(such as the dashboard) so they can update their deployment pins from the
+published provenance instead of a stale single hardcoded hash. This is a
+release-workflow requirement for `#90` and the cross-repo dashboard issue.
 
 ## Security Considerations
 

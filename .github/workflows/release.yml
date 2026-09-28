@@ -58,6 +58,9 @@ jobs:
           # `--describe binaries` emits one SBOM per binary target; this crate
           # has exactly one (the shipped cdylib), renamed to a stable asset name.
           cp ./*-cdylib.cdx.json dist/sbom.cdx.json
+          # Downstream repos (dashboard / SDK / deploy automation) must consume
+          # the release's artifact provenance rather than one hardcoded hash.
+          sha256sum dist/*.wasm dist/sbom.cdx.json > dist/checksums.txt
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
@@ -65,4 +68,5 @@ jobs:
           files: |
             dist/*.wasm
             dist/sbom.cdx.json
+            dist/checksums.txt
           generate_release_notes: true

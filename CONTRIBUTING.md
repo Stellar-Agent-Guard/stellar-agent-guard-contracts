@@ -87,6 +87,10 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
 3. Describe the *why* in the PR body: what was broken/wrong, what the fix does,
    and — for enforcement changes — how it was verified (tests, and testnet
    evidence where applicable).
+4. For release / supply-chain changes, mention the downstream provenance impact
+   in the PR body and include the release artifact hash or checksum manifest in
+   the release notes so sibling repos can consume the new contract artifact
+   without a stale hardcoded pin.
 
 ## Project Structure
 

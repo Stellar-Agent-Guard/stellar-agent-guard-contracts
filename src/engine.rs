@@ -181,14 +181,13 @@ pub fn decide(
     now: u64,
     contexts: soroban_sdk::Vec<Context>,
 ) -> Decision {
-    let Some(cfg) = policy else {
-        return Decision::Blocked(Error::NoPolicy);
-    };
-
     // ── Account-level gates (SPEC §4, rules 1-5) ─────────────────────────
     if state.admin_frozen {
         return Decision::Blocked(Error::AdminFrozen);
     }
+    let Some(cfg) = policy else {
+        return Decision::Blocked(Error::NoPolicy);
+    };
     if cfg.dms_grace_secs > 0
         && state.last_heartbeat != 0
         && now.saturating_sub(state.last_heartbeat) > cfg.dms_grace_secs
@@ -594,6 +593,23 @@ mod tests {
         assert!(matches!(
             decide(&env, &sa, Some(&p), &fresh, &mut l, 700, hb.clone()),
             Decision::Allowed
+        ));
+    }
+
+    #[test]
+    fn admin_frozen_wins_before_no_policy() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, transfer_ctx(&env, 1, 2, 1)];
+
+        let frozen = AccountState {
+            admin_frozen: true,
+            last_heartbeat: 0,
+        };
+        assert!(matches!(
+            decide(&env, &sa, None, &frozen, &mut l, 1000, ctx.clone()),
+            Decision::Blocked(Error::AdminFrozen)
         ));
     }
 
