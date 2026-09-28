@@ -112,6 +112,24 @@ Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the
 each carries one `complexity: trivial|small|medium|large` label. Good first
 tasks for the Drips Stellar Wave contributor sprints.
 
+## GitHub Actions pinning
+
+Every `uses:` in `.github/workflows/*.yml` is pinned to a **full 40-character
+commit SHA** with a trailing version comment, e.g.:
+
+```yaml
+- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+```
+
+Mutable refs (`@v4`, `@stable`, `@main`) are deliberately avoided: a
+rewritten tag would silently change the code CI and releases run.
+
+**Update SHAs via Dependabot `github-actions` PRs only — never by hand.**
+Dependabot reads the version comment to know which release the SHA
+corresponds to, so keep that comment accurate when a pin changes. A
+hand-edited SHA (or a dropped/rewritten comment) is a review-blocking
+change.
+
 ## Dependency drift check
 
 When bumping `soroban-sdk` version in `Cargo.toml`, you **must** re-verify
