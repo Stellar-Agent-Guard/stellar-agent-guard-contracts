@@ -4,7 +4,7 @@ This page states the exact enforcement boundary for v1. This is not a gap to clo
 
 ## The confirmed scope
 
-**Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces window and pause state, but per-call amount/recipient limits are not yet enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered.**
+Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls, per-call amount/recipient limits are not yet enforced — full statement: [SPEC §2](../SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing), the canonical scope wording. The rest of this page elaborates that statement; it does not restate it.
 
 This boundary is an inherent property of the platform (the auth context does not expose arbitrary call arguments generically), not a gap this project hides or overclaims.
 
@@ -68,7 +68,9 @@ Extending fine-grained enforcement to arbitrary Soroban calls is tracked as a v2
 
 ## Framing rules
 
-This documentation (and the project's README and SPEC) follows these framing rules:
+The canonical scope wording lives in SPEC §2; this page, like the README,
+quotes it briefly and links there (CONTRIBUTING rule 2). When writing about
+scope, follow these framing rules:
 
 - **Do not** write unqualified claims like "enforces spend limits on any Soroban call" or "protocol-level enforcement for all contract interactions" — these overclaim what v1 actually does.
 - **Do not** undersell it either (e.g., burying the limitation in a footnote after a headline claim that reads as unconditional) — the limitation belongs in the same paragraph as the capability claim.
