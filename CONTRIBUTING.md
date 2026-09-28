@@ -130,6 +130,28 @@ corresponds to, so keep that comment accurate when a pin changes. A
 hand-edited SHA (or a dropped/rewritten comment) is a review-blocking
 change.
 
+## Dependabot
+
+[`.github/dependabot.yml`](.github/dependabot.yml) checks for version updates
+weekly (Mondays) against `main`, in two ecosystems kept as separate PR streams
+so crate bumps and workflow pin bumps never share a pull request:
+
+- **`cargo`** — the root manifest and `tools/agent-tx`. Groups:
+  `soroban-sdk-majors` (isolated on purpose: a major SDK bump can break the
+  contract ABI, so it gets its own PR), `soroban-sdk` (minor/patch), and
+  `cargo-minor-patch` (everything else, minor/patch only). A major bump of any
+  other crate is deliberately left ungrouped so it is reviewed alone.
+- **`github-actions`** — all workflow pin bumps in a single PR, which is the
+  sanctioned path described in *GitHub Actions pinning* above.
+
+Open version-update PRs are capped at 5 per ecosystem.
+
+**Dependabot PRs must pass the full `ci` job like any other PR** —
+`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+`cargo test`, plus the wasm32 and `tools/agent-tx` release builds. Branch
+protection already enforces this; there is no Dependabot exemption. If a bump
+breaks the gate, fix or revert it in that PR rather than weakening the gate.
+
 ## Dependency drift check
 
 When bumping `soroban-sdk` version in `Cargo.toml`, you **must** re-verify
