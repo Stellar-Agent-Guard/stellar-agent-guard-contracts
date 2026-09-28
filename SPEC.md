@@ -91,10 +91,6 @@ engine still enforces window and pause state, but per-call amount/recipient limi
 enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not
 implied as already covered.**
 
-*Canonical statement: the paragraph above is the single source of truth for the scope
-wording. The README and `docs/enforcement-scope.md` carry short excerpts that link back
-here; scope-wording edits touch this section only (CONTRIBUTING rule 2).*
-
 What "window and pause state" means for non-SAC calls is made exact in §6.4: the account is a
 **default-deny** environment — every call must match the protocol allowlist (contract, and
 optionally function) — and the active-window / pause / dead-man-freeze checks gate every context
@@ -105,7 +101,7 @@ trustworthy way.
 This boundary is an inherent property of the platform (an independent current confirmation:
 OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer contexts and
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
-and `docs/enforcement-scope.md` quote this section briefly and link here as canonical.
+states the same scope in the same terms.
 
 **Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol parsers, rate limiting, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Recommended direction: protocol rate limiting (count-based) as core deliverable; opt-in protocol parsers as secondary.
 
