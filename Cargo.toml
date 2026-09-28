@@ -26,6 +26,9 @@ soroban-sdk = { version = "27.0.6", features = ["testutils"] }
 # contract-level integration tests (SPEC §11).
 ed25519-dalek = "2"
 sha2 = "0.10"
+# Parses tests/fixtures/index.json in the fixtures drift test (issue #92);
+# dev-only, never linked into the contract.
+serde_json = "1"
 
 [profile.release]
 opt-level = "z"

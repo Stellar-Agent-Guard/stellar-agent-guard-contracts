@@ -490,7 +490,10 @@ Stellar Agent Guard operates across three dedicated repositories:
 - `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat
   cadence formula (`interval ≤ grace / 3`), pre-flight `check()`, blocked-reason
   handling table, and stop conditions, with tested `agent-tx` commands.
-- `tests/fixtures/README.md` — the real testnet evidence for the five scenarios.
+- `tests/fixtures/README.md` — the real testnet evidence for the five scenarios,
+  with a machine-readable scenario index in
+  [`tests/fixtures/index.json`](tests/fixtures/index.json) (scenario → tx hash →
+  ledger → expected reason → contract ID) that CI keeps consistent with the prose.
 - `SPEC.md` — the full architecture specification.
 
 ## ✅ Verified against live testnet

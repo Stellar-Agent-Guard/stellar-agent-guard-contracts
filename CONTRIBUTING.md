@@ -59,7 +59,10 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
 6. **Testnet-proof pattern:** behavior that changes what `__check_auth` admits
    or blocks should add a unit/integration test **and**, where it is a user-
    visible enforcement change, be recorded in the testnet proof plan
-   (`tests/fixtures/README.md`) per the Phase-1 exit-criteria pattern.
+   (`tests/fixtures/README.md` **and** its machine-readable twin
+   `tests/fixtures/index.json`) per the Phase-1 exit-criteria pattern. The two
+   files are cross-checked by `tests/fixtures_index.rs`, so editing one without
+   the other fails `cargo test`.
 7. **Denial-reason messages:** `docs/reason-glossary.md` is the canonical
    message-content source for SDK/UI work — map new user-facing denial text to
    its agent/operator/auditor columns instead of inventing new phrasing.
