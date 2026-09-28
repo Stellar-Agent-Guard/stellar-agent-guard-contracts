@@ -215,6 +215,119 @@ effective cap for that transfer. Per-recipient overrides maintain the same invar
 `RecipientWindowState`; recipients without an override use the global cap. Both the global cap
 and any matching per-recipient cap must be satisfied.
 
+### 3.2 Exact ScVal encoding of `PolicyConfig` (for non-TypeScript consumers)
+
+The SDK's `policyToScVal` is currently the only reference encoder, and it is TypeScript. This
+section pins the on-wire `ScVal` layout so Go/Python/Rust integrators (or a future CLI) can
+implement encoders without reverse-engineering TS source. The layout below was derived from the
+soroban-sdk 27 `#[contracttype]` derives (the host is the ultimate referee) and is locked by
+`tests/policyconfig_scval_encoding.rs`, which fails `cargo test` if a field, the key order, or a
+primitive's `ScVal` variant changes.
+
+**Top level:** `ScVal::Map` with exactly **13 entries**, one per field. The map keys are the
+field names as `ScVal::Symbol`.
+
+**Sort order is mandatory.** The entries below are listed in **ascending symbol-key order**
+(ASCII), which is the order the wire map must use. soroban-sdk generates struct decoders that
+read map entries positionally against the sorted field list — a decoder is **order-sensitive**:
+an encoder that emits declaration order instead of sorted order will silently misbind fields
+(e.g. `window_cap` decoded as `window_secs`) rather than fail loudly. Emit keys sorted; never
+rely on the struct's declaration order. The contract itself does not re-validate key order —
+§8 validates policy *semantics* — so sorted emission is entirely the encoder's responsibility.
+
+| # | Symbol key | Rust type | ScVal type | Notes |
+|----|--------------------|--------------------|------------|-------|
+| 1 | `active_from` | `u64` | `U64` | 0 = unrestricted |
+| 2 | `active_until` | `u64` | `U64` | 0 = unrestricted |
+| 3 | `allow_any_recipient` | `bool` | `Bool` | |
+| 4 | `assets` | `Vec<Address>` | `Vec` | elements are `ScVal::Address`; SAC token contracts are contract addresses |
+| 5 | `blocked_recipients` | `Vec<Address>` | `Vec` | denied destinations (checked first); account or contract addresses |
+| 6 | `dms_grace_secs` | `u64` | `U64` | 0 = DMS disabled |
+| 7 | `paused` | `bool` | `Bool` | |
+| 8 | `per_tx_cap` | `i128` | `I128` | `Int128Parts { hi: i64, lo: u64 }`, two's complement |
+| 9 | `protocols` | `Vec<ProtocolRule>` | `Vec` | elements are 2-entry maps, see below |
+| 10 | `recipient_window_caps` | `Vec<RecipientCap>` | `Vec` | elements are 2-entry maps, see below |
+| 11 | `recipients` | `Vec<Address>` | `Vec` | account addresses |
+| 12 | `window_cap` | `i128` | `I128` | 0 = disabled |
+| 13 | `window_secs` | `u64` | `U64` | |
+
+**`ProtocolRule` sub-encoding:** each element of `protocols` is itself a `ScVal::Map` with
+exactly 2 entries, keys sorted:
+
+| # | Symbol key | Rust type | ScVal type | Notes |
+|---|-----------|--------------------|------------|-------|
+| 1 | `contract` | `Address` | `Address` | contract address |
+| 2 | `fns` | `Option<Vec<Symbol>>` | `Vec` or `Void` | `Some(list)` → `ScVal::Vec` of `ScVal::Symbol`; `None` → `ScVal::Void` |
+
+**`RecipientCap` sub-encoding:** each element of `recipient_window_caps` is itself a
+`ScVal::Map` with exactly 2 entries, keys sorted:
+
+| # | Symbol key | Rust type | ScVal type | Notes |
+|---|-----------|------------|------------|-------|
+| 1 | `cap` | `i128` | `I128` | rolling cap within `window_secs`; 0 = disabled / fall back to global |
+| 2 | `recipient` | `Address` | `Address` | account address |
+
+**Primitive rules (apply everywhere, including nested values):**
+
+- `u64` → `ScVal::U64`. There are no unsigned-32 fields in `PolicyConfig`.
+- `i128` → `ScVal::I128(Int128Parts { hi, lo })` — the 128-bit two's-complement value split into
+  a signed 64-bit high word and unsigned 64-bit low word. Example: `-1234567` encodes as
+  `hi: -1, lo: 18446744073708317049` (= 2⁶⁴ − 1234567). Non-negative values always have
+  `hi: 0`. §8 validation rejects negative caps, but integrators must still encode them
+  correctly to receive meaningful decode errors rather than garbage.
+- `Vec<T>` → `ScVal::Vec(Some(ScVec))`. An **empty vec stays an empty vec** — it must NOT be
+  encoded as `Void`.
+- `Option<T>` → `Some(v)` encodes as `v`; `None` encodes as **`ScVal::Void`** (this is why
+  `ProtocolRule.fns` is `Void` when any function is allowed). Do not confuse the two: an empty
+  `Vec` is a list with zero elements, `None` is the absence of the value.
+- `bool` → `ScVal::Bool`.
+- `Address` → `ScVal::Address` — `ScAddress::Contract(ContractId(Hash))` for contract IDs
+  (assets, protocol contracts) and `ScAddress::Account(AccountId(PublicKey::KeyTypeEd25519
+  (Uint256)))` for account IDs (recipients).
+- Serializing the tree above with Stellar XDR is deterministic (fixed-width big-endian fields,
+  `VecM` length prefixes), so byte equality is a valid equality test for policies.
+
+**Worked example — the Phase-1 fixture policy** (same values as the example in
+`docs/functions/set-policy.md`):
+
+JSON accepted by the CLI (`per_tx_cap`/`window_cap` quoted because they are `i128`):
+
+```json
+{
+  "active_from": 0, "active_until": 0, "allow_any_recipient": false,
+  "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
+  "blocked_recipients": [],
+  "dms_grace_secs": 60, "paused": false, "per_tx_cap": "1000",
+  "protocols": [], "recipient_window_caps": [],
+  "recipients": ["GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"],
+  "window_cap": "150", "window_secs": 60
+}
+```
+
+The same policy as a structural `ScVal` tree (keys in mandatory sorted order):
+
+```text
+ScVal::Map(Some(vec![
+  ("active_from",         U64(0)),
+  ("active_until",        U64(0)),
+  ("allow_any_recipient", Bool(false)),
+  ("assets",              Vec([Address(Contract(CBLQ…JC7))])),      // 1 element
+  ("blocked_recipients",  Vec([])),                                  // empty vec, NOT Void
+  ("dms_grace_secs",      U64(60)),
+  ("paused",              Bool(false)),
+  ("per_tx_cap",          I128(Int128Parts { hi: 0, lo: 1000 })),
+  ("protocols",           Vec([])),                                  // empty vec, NOT Void
+  ("recipient_window_caps", Vec([])),                            // empty vec, NOT Void
+  ("recipients",          Vec([Address(Account(GDUY…RRX))])),        // 1 element
+  ("window_cap",          I128(Int128Parts { hi: 0, lo: 150 })),
+  ("window_secs",         U64(60)),
+]))
+```
+
+Note the two address shapes: `assets` holds contract (C…) addresses →
+`ScAddress::Contract`, while `recipients` holds account (G…) addresses →
+`ScAddress::Account`.
+
 ---
 
 ## 4. Policy semantics — decision table

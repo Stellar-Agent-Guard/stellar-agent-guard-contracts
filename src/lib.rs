@@ -30,7 +30,9 @@ use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, TryFromVal, Val,
 };
-pub use types::{CheckDetail, Error, PolicyConfig, RecipientCap, RecipientWindowState};
+pub use types::{
+    CheckDetail, Error, PolicyConfig, ProtocolRule, RecipientCap, RecipientWindowState,
+};
 use types::{CheckResult, DataKey, Status, WindowState, MAX_RECIPIENT_ENTRIES};
 use window::Ledger;
 
