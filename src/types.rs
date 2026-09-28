@@ -128,6 +128,45 @@ pub enum CheckResult {
     Blocked(Symbol),
 }
 
+impl Error {
+    /// Convert an `Error` variant into its corresponding `BlockReason` symbol (as used in `CheckResult::Blocked`).
+    #[allow(clippy::must_use_candidate)]
+    pub fn to_block_reason(self) -> Symbol {
+        // Uses the existing reason() string which matches SPEC §7 / reason glossary.
+        Symbol::new(&soroban_sdk::Env::default(), self.reason())
+    }
+
+    /// Attempt to convert a `BlockReason` symbol back to an `Error` variant.
+    #[allow(clippy::must_use_candidate)]
+    pub fn from_block_reason(symbol: &Symbol) -> Option<Self> {
+        let env = soroban_sdk::Env::default();
+        let all_errors = [
+            Self::Unauthorized,
+            Self::AlreadyInitialized,
+            Self::NotInitialized,
+            Self::InvalidConfig,
+            Self::InvalidAmount,
+            Self::AdminFrozen,
+            Self::HeartbeatExpired,
+            Self::NoPolicy,
+            Self::Paused,
+            Self::OutsideActiveWindow,
+            Self::AssetNotAllowed,
+            Self::RecipientNotAllowed,
+            Self::PerTxCapExceeded,
+            Self::WindowCapExceeded,
+            Self::ProtocolNotAllowed,
+            Self::FunctionNotAllowed,
+            Self::UnknownContract,
+            Self::SelfFunctionNotAllowed,
+            Self::CreateContractNotAllowed,
+        ];
+        all_errors
+            .into_iter()
+            .find(|&err| symbol == &Symbol::new(&env, err.reason()))
+    }
+}
+
 /// Advisory result for a targeted asset transfer. All fields are calculated
 /// from the current policy and window snapshot; this type never represents a
 /// storage mutation.

@@ -339,6 +339,32 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
     // require_auth(admin). Exactly once (AlreadyInitialized otherwise). Stores
     // Admin and AgentPubkey; no policy yet -> account is default-deny until set_policy.
 
+### 7.1 Error code ↔ CheckResult variant ↔ reason symbol mapping
+
+To close the CheckResult/Error duality gap, every contract `Error` variant maps 1:1 to a `BlockReason` symbol emitted in `CheckResult::Blocked` and `auth_checked` events. The table below records the complete correspondence, including auth-only or admin-only variants that are unreachable via `check()` pre-flight reads and their rationale.
+
+| Error Code | Error Variant | Reason Symbol (`CheckResult::Blocked`) | Reachable via `check()`? | Rationale for Unreachable Direction |
+|---|---|---|---|---|
+| 1 | `Unauthorized` | `unauthorized` | No | Auth-path only: signature validation or admin auth failure traps before policy check. |
+| 2 | `AlreadyInitialized` | `already_initialized` | No | Admin lifecycle op: initialize is run once during deployment setup, not a check parameter. |
+| 3 | `NotInitialized` | `not_initialized` | Yes | Pre-activation guard check. |
+| 4 | `InvalidConfig` | `invalid_config` | No | Admin op: `set_policy` validation error; policies are not passed into `check()`. |
+| 5 | `InvalidAmount` | `invalid_amount` | Yes | Checked directly in `check()` input arguments. |
+| 10 | `AdminFrozen` | `admin_frozen` | Yes | Account-level gate evaluated in `check()`. |
+| 11 | `HeartbeatExpired` | `heartbeat_expired` | Yes | Account-level dead-man switch gate evaluated in `check()`. |
+| 12 | `NoPolicy` | `no_policy` | Yes | Account-level gate evaluated in `check()`. |
+| 13 | `Paused` | `paused` | Yes | Account-level gate evaluated in `check()`. |
+| 14 | `OutsideActiveWindow` | `outside_active_window` | Yes | Account-level gate evaluated in `check()`. |
+| 20 | `AssetNotAllowed` | `asset_not_allowed` | Yes | Evaluated in `check()` asset parameter validation. |
+| 21 | `RecipientNotAllowed` | `recipient_not_allowed` | Yes | Evaluated in `check()` recipient parameter validation. |
+| 22 | `PerTxCapExceeded` | `per_tx_cap_exceeded` | Yes | Evaluated against `check()` amount parameter. |
+| 23 | `WindowCapExceeded` | `window_cap_exceeded` | Yes | Evaluated against rolling window ledger in `check()`. |
+| 24 | `ProtocolNotAllowed` | `protocol_not_allowed` | No | Auth-path only: non-SAC protocol calls do not use `check()`. |
+| 25 | `FunctionNotAllowed` | `function_not_allowed` | No | Auth-path only: restricted functions apply to auth contexts, not `check()`. |
+| 26 | `UnknownContract` | `unknown_contract` | No | Auth-path only: unlisted contracts are encountered in auth contexts. |
+| 27 | `SelfFunctionNotAllowed` | `self_function_not_allowed` | No | Auth-path only: self-calls are part of `__check_auth` context dispatch. |
+| 28 | `CreateContractNotAllowed` | `create_contract_not_allowed` | No | Auth-path only: contract creation host functions occur in auth contexts.
+
 // ── Policy management (admin only) ────────────────────────────────────────
 pub fn set_policy(env: Env, config: PolicyConfig)
     // require_auth(Admin). Validates config (§8). Replaces Policy and resets

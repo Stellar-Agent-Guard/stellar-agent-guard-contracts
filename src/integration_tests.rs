@@ -817,6 +817,41 @@ fn self_address_rejected_in_every_list() {
 }
 
 #[test]
+fn error_and_block_reason_round_trip() {
+    let all_errors = [
+        GuardError::Unauthorized,
+        GuardError::AlreadyInitialized,
+        GuardError::NotInitialized,
+        GuardError::InvalidConfig,
+        GuardError::InvalidAmount,
+        GuardError::AdminFrozen,
+        GuardError::HeartbeatExpired,
+        GuardError::NoPolicy,
+        GuardError::Paused,
+        GuardError::OutsideActiveWindow,
+        GuardError::AssetNotAllowed,
+        GuardError::RecipientNotAllowed,
+        GuardError::PerTxCapExceeded,
+        GuardError::WindowCapExceeded,
+        GuardError::ProtocolNotAllowed,
+        GuardError::FunctionNotAllowed,
+        GuardError::UnknownContract,
+        GuardError::SelfFunctionNotAllowed,
+        GuardError::CreateContractNotAllowed,
+    ];
+
+    for err in all_errors {
+        let reason = err.to_block_reason();
+        let round_tripped = GuardError::from_block_reason(&reason);
+        assert_eq!(
+            Some(err),
+            round_tripped,
+            "failed round trip for error {err:?} with symbol {reason:?}"
+        );
+    }
+}
+
+#[test]
 fn policy_config_debug_snapshot() {
     let env = Env::default();
     env.mock_all_auths();

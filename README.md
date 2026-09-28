@@ -324,6 +324,17 @@ host invokes it automatically on every authorization the account must approve. S
 
 See [How it works](#how-it-works) below for the full flow through `parse_call`/`decide`.
 
+## Troubleshooting — Submission Errors
+
+When submitting transactions via `agent-tx` (run `agent-tx --help` for usage and troubleshooting reference) or the RPC, submission failures are mapped to actionable operator guidance. Common submission error classes and their exact fixes:
+
+| Error Class / Code | What Happened | Exact Flag / Remediation | SPEC Ref / Notes |
+|---|---|---|---|
+| `tx_insufficient_fee` / `insufficient` | The transaction inclusion fee or resource fee was lower than the network minimum or insufficient to cover the footprint. | Resubmit with a higher fee or use `--fee-multiplier <VAL>` (or bump resource fee / inclusion fee) to satisfy network pricing. | Stellar Core transaction pre-check |
+| `tx_bad_seq` / `seq` | Sequence number collision or mismatch. The source account sequence has advanced or needs a refresh. | Fetch the latest account sequence from RPC (`agent-tx` fetches this automatically on run) and resubmit with the correct sequence. | Stellar Core sequence check |
+| `tx_too_early` | Transaction precondition ledger bounds are not yet met (ledger time is before `min_ledger`). | Wait for the next ledger or check node time synchronization. | Preconditions check |
+| `tx_late_expiration` | Transaction or signature expiration ledger has passed (`max_ledger` or `signature_expiration_ledger`). | Increase the signature expiration ledger delta (`--sig-expiration-ledgers <VAL>`) and resubmit. | Signature expiration check |
+
 ## Installation
 
 ### Prerequisites

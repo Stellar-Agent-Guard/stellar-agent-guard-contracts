@@ -632,7 +632,19 @@ fn run(call: &Call, args: &Args) {
     if std::env::var_os("AGENT_TX_DEBUG").is_some() {
         eprintln!("send response: {sent}");
     }
-    let hash = sent["hash"].as_str().expect("tx hash").to_string();
+    if let Some(err) = sent.get("error") {
+        let err_str = err.to_string();
+        let human = map_submission_error(&err_str);
+        eprintln!("Error: {human}");
+        std::process::exit(1);
+    }
+    let hash = sent["hash"].as_str().unwrap_or_default().to_string();
+    if hash.is_empty() {
+        let err_str = sent.to_string();
+        let human = map_submission_error(&err_str);
+        eprintln!("Error: {human}");
+        std::process::exit(1);
+    }
     let status = sent["status"].as_str().unwrap_or("?").to_string();
     println!("submitted: hash={hash} status={status}");
 
@@ -672,7 +684,6 @@ fn run(call: &Call, args: &Args) {
 ///   "default": "prod"
 /// }
 /// ```
-
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -725,7 +736,9 @@ fn now_ts() -> u64 {
 }
 
 fn verify_guard(rpc: &Rpc, guard_addr: &str, _passphrase: &str) -> Result<(), String> {
-    let guard: ScAddress = guard_addr.parse().map_err(|e| format!("invalid guard address: {e}"))?;
+    let guard: ScAddress = guard_addr
+        .parse()
+        .map_err(|e| format!("invalid guard address: {e}"))?;
     let env = guard_footprint(&guard);
     let keys = env.read_write.iter().cloned().collect::<Vec<_>>();
     let fp = LedgerFootprint {
@@ -750,7 +763,10 @@ fn verify_guard(rpc: &Rpc, guard_addr: &str, _passphrase: &str) -> Result<(), St
             ext: SorobanTransactionDataExt::V0,
         }),
     };
-    let env = TransactionEnvelope::Tx(TransactionV1Envelope { tx, signatures: VecM::default() });
+    let env = TransactionEnvelope::Tx(TransactionV1Envelope {
+        tx,
+        signatures: VecM::default(),
+    });
     let sim = rpc.simulate(&b64_encode_xdr(&env));
     if let Some(err) = sim.get("error") {
         let msg = err["message"].as_str().unwrap_or("unknown error");
@@ -764,7 +780,9 @@ fn cmd_guards_add<I: Iterator<Item = String>>(args: &mut I) -> Result<(), String
     let address = args.next().ok_or("missing address")?;
     let admin = args.next().ok_or("missing admin")?;
     let rpc_url = args.next().unwrap_or_else(|| DEFAULT_RPC.to_string());
-    let passphrase = args.next().unwrap_or_else(|| DEFAULT_PASSPHRASE.to_string());
+    let passphrase = args
+        .next()
+        .unwrap_or_else(|| DEFAULT_PASSPHRASE.to_string());
 
     let rpc = Rpc { url: rpc_url };
     verify_guard(&rpc, &address, &passphrase)?;
@@ -774,7 +792,9 @@ fn cmd_guards_add<I: Iterator<Item = String>>(args: &mut I) -> Result<(), String
         return Err(format!("alias '{alias}' already exists"));
     }
     if reg.guards.iter().any(|g| g.address == address) {
-        return Err(format!("address '{address}' already registered under another alias"));
+        return Err(format!(
+            "address '{address}' already registered under another alias"
+        ));
     }
     reg.guards.push(GuardEntry {
         alias: alias.clone(),
@@ -786,7 +806,10 @@ fn cmd_guards_add<I: Iterator<Item = String>>(args: &mut I) -> Result<(), String
         reg.default = Some(alias.clone());
     }
     save_registry(&reg);
-    println!("Added guard '{alias}' (default: {})", reg.default.as_deref().unwrap_or("none"));
+    println!(
+        "Added guard '{alias}' (default: {})",
+        reg.default.as_deref().unwrap_or("none")
+    );
     Ok(())
 }
 
@@ -798,15 +821,26 @@ fn cmd_guards_list() {
     }
     println!("Registered guards:");
     for g in &reg.guards {
-        let default_mark = if reg.default.as_ref() == Some(&g.alias) { " (default)" } else { "" };
-        println!("  {} -> {} [admin: {}]{}", g.alias, g.address, g.admin, default_mark);
+        let default_mark = if reg.default.as_ref() == Some(&g.alias) {
+            " (default)"
+        } else {
+            ""
+        };
+        println!(
+            "  {} -> {} [admin: {}]{}",
+            g.alias, g.address, g.admin, default_mark
+        );
     }
 }
 
 fn cmd_guards_remove<I: Iterator<Item = String>>(args: &mut I) -> Result<(), String> {
     let alias = args.next().ok_or("missing alias")?;
     let mut reg = load_registry();
-    let idx = reg.guards.iter().position(|g| g.alias == alias).ok_or("alias not found")?;
+    let idx = reg
+        .guards
+        .iter()
+        .position(|g| g.alias == alias)
+        .ok_or("alias not found")?;
     reg.guards.remove(idx);
     if reg.default.as_ref() == Some(&alias) {
         reg.default = reg.guards.first().map(|g| g.alias.clone());
@@ -843,7 +877,8 @@ fn resolve_guard(guard_arg: Option<&str>) -> Result<String, String> {
     }
     Err(format!(
         "no guard specified and no default set. Registered guards:\n{}",
-        reg.guards.iter()
+        reg.guards
+            .iter()
             .map(|g| format!("  {} -> {}", g.alias, g.address))
             .collect::<Vec<_>>()
             .join("\n")
@@ -879,6 +914,15 @@ mod tests {
     }
 
     #[test]
+    fn test_map_submission_error_failures() {
+        assert!(map_submission_error("tx_insufficient_fee").contains("insufficient fee"));
+        assert!(map_submission_error("tx_bad_seq").contains("sequence number collision"));
+        assert!(map_submission_error("tx_too_early").contains("too early"));
+        assert!(map_submission_error("tx_late_expiration").contains("expiration passed"));
+        assert!(map_submission_error("unknown_err").contains("README.md Troubleshooting"));
+    }
+
+    #[test]
     fn guard_contract_address_roundtrip() {
         let guard: ScAddress = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
             .parse()
@@ -895,16 +939,51 @@ mod tests {
     }
 }
 
+fn map_submission_error(err_str: &str) -> String {
+    if err_str.contains("tx_insufficient_fee") || err_str.contains("insufficient") {
+        "Submission failed due to insufficient fee (tx_insufficient_fee). Fix: Resubmit with a higher fee or use --fee-multiplier <VAL> (see README.md Troubleshooting).".into()
+    } else if err_str.contains("tx_bad_seq") || err_str.contains("seq") {
+        "Submission failed due to sequence number collision/mismatch (tx_bad_seq). Fix: Ensure account sequence is up-to-date and resubmit (see README.md Troubleshooting).".into()
+    } else if err_str.contains("tx_too_early") {
+        "Submission failed because transaction is too early (tx_too_early). Fix: Wait for the next ledger or check node time sync (see README.md Troubleshooting).".into()
+    } else if err_str.contains("tx_late_expiration") {
+        "Submission failed because transaction/signature expiration passed (tx_late_expiration). Fix: Increase signature expiration ledger delta --sig-expiration-ledgers <VAL> (see README.md Troubleshooting).".into()
+    } else {
+        format!("Submission failed: {err_str}. Refer to README.md Troubleshooting section for exact remediation flags.")
+    }
+}
+
+fn print_help() {
+    println!("agent-tx — sign and submit Soroban transactions for Stellar Agent Guard");
+    println!("Usage:");
+    println!("  agent-tx transfer --guard <C...> --token <C...> --to <G...> --amount <N> --agent-secret <S...>");
+    println!("  agent-tx heartbeat --guard <C...> --agent-secret <S...>");
+    println!("  agent-tx guards <add|list|remove|set-default> ...");
+    println!("Troubleshooting: See README.md 'Troubleshooting — Submission Errors' table for error mapping and concrete fix flags (--fee-multiplier, etc.).");
+}
+
 fn main() {
     let mut it = std::env::args().skip(1);
-    let cmd = it.next().expect("subcommand: transfer | heartbeat | guards");
+    let Some(cmd) = it.next() else {
+        print_help();
+        std::process::exit(1);
+    };
+    if cmd == "--help" || cmd == "-h" {
+        print_help();
+        return;
+    }
 
     match cmd.as_str() {
         "guards" => {
-            let subcmd = it.next().expect("guards subcommand: add | list | remove | set-default");
+            let subcmd = it
+                .next()
+                .expect("guards subcommand: add | list | remove | set-default");
             let result = match subcmd.as_str() {
                 "add" => cmd_guards_add(&mut it),
-                "list" => { cmd_guards_list(); Ok(()) }
+                "list" => {
+                    cmd_guards_list();
+                    Ok(())
+                }
                 "remove" => cmd_guards_remove(&mut it),
                 "set-default" => cmd_guards_set_default(&mut it),
                 other => Err(format!("unknown guards subcommand: {other}")),
