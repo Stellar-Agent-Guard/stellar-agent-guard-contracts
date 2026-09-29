@@ -98,8 +98,24 @@ fn memcmp_charges(env: &Env) -> i64 {
         .expect("MemCmp charges fit in i64")
 }
 
+/// One persistent read plus the same TTL refresh performed by `persist_get`.
+/// Kept inline in the test reference so the cost comparison includes all host
+/// work associated with reading a present key.
+fn reference_persist_get<T: soroban_sdk::TryFromVal<Env, Val>>(
+    env: &Env,
+    key: &DataKey,
+) -> Option<T> {
+    let value = env.storage().persistent().get(key)?;
+    let max_ttl = env.storage().max_ttl();
+    env.storage()
+        .persistent()
+        .extend_ttl(key, max_ttl / 2, max_ttl);
+    Some(value)
+}
+
 /// `MemCmp` charges consumed by the four persistent keys an authorization
-/// reads, read inline — the exact reference for `AuthSnapshot::load`.
+/// reads, with the same TTL refresh semantics — the exact reference for
+/// `AuthSnapshot::load`.
 ///
 /// Deliberately *not* `load_ledger`-style shared code: this is an independent
 /// restatement of the audited read set, so the test comparing the two detects
@@ -107,10 +123,10 @@ fn memcmp_charges(env: &Env) -> i64 {
 fn reference_snapshot_reads(env: &Env, guard: &Address) -> i64 {
     env.as_contract(guard, || {
         let before = memcmp_charges(env);
-        let _: Option<PolicyConfig> = env.storage().persistent().get(&DataKey::Policy);
-        let _: Option<bool> = env.storage().persistent().get(&DataKey::AdminFrozen);
-        let _: Option<u64> = env.storage().persistent().get(&DataKey::LastHeartbeat);
-        let _: Option<WindowState> = env.storage().persistent().get(&DataKey::Window);
+        let _: Option<PolicyConfig> = reference_persist_get(env, &DataKey::Policy);
+        let _: Option<bool> = reference_persist_get(env, &DataKey::AdminFrozen);
+        let _: Option<u64> = reference_persist_get(env, &DataKey::LastHeartbeat);
+        let _: Option<WindowState> = reference_persist_get(env, &DataKey::Window);
         memcmp_charges(env) - before
     })
 }
