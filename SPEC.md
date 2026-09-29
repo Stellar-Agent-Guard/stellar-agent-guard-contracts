@@ -578,11 +578,12 @@ pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
 pub fn status(env: Env) -> Status                     // frozen? admin_frozen? last_heartbeat? now?
 pub fn dms_health(env: Env) -> DmsHealth                  // ok, warn (>=80%), or expired
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
-    // Pure pre-flight replica of the §6.2 decision path: it does not change
+    // Preflight / simulate a transfer (doc alias; ABI frozen as `check`):
+    // pure pre-flight replica of the §6.2 decision path: it does not change
     // spend accounting, but a submitted call may refresh TTLs under §9.5.
     // Simulation before signing does not persist those rent bumps.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
-  // Same pre-flight, with remaining_window and effective cap metrics.
+  // Same preflight / simulate path, with remaining_window and effective cap metrics.
   // `remaining_window` reflects the effective cap for the queried recipient
   // (per-recipient override if configured, otherwise global cap).
 
@@ -654,6 +655,26 @@ window cap applies to the queried recipient (no global `window_cap` and no
 per-recipient override). The configured and effective caps are `None` when
 disabled; v1 has no per-asset overrides, so the effective per-transaction cap
 equals the configured cap.
+
+### 7.2 Preflight / simulate a transfer (doc alias for `check`)
+
+`check(asset, to, amount)` is the permissionless **preflight** / **simulate**
+entrypoint: a pure pre-flight replica of the §6.2 SAC-transfer decision path
+for agents and SDKs to call before signing. Search for "preflight",
+"simulate", or `simulate_transfer` to find it.
+
+These are documentation aliases only: the on-chain ABI is frozen as `check`
+(and `check_detailed`); there is no `simulate_transfer` function to invoke,
+and no contract change ships with this alias. Canonical behavior is the §6.2
+path above; the live testnet invocation mirrored in the `check` rustdoc is:
+
+```text
+stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+  --network testnet --source-account guard_admin --send=no -- \
+  check --asset CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7 \
+  --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX --amount 50
+# → {"Blocked":"heartbeat_expired"}
+```
 
 ---
 

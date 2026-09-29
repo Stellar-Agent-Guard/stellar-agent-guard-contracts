@@ -325,10 +325,15 @@ Note the deployed account now reads `heartbeat_expired: true` — the 60s DMS gr
 after the Phase-1 fixture runs, exactly as the design specifies: a silent account freezes
 itself with zero transactions.
 
-### `check` (read / pre-flight)
+### `check` — Preflight / simulate a transfer (read, permissionless)
 ```rust
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
 ```
+> **SDK discoverability alias:** `check` is the permissionless **preflight** /
+> **simulate** entrypoint — search for "preflight", "simulate", or
+> `simulate_transfer` to find this section. These are documentation aliases
+> only: the on-chain ABI is frozen as `check` (and `check_detailed`); there is
+> no `simulate_transfer` function to invoke.
 No auth. A pre-flight replica of the SAC-transfer decision path: lets agents/SDKs simulate a
 transfer *before* signing, emitting the same `auth_checked` events as an in-path decision so
 telemetry sees one vocabulary. Submitting it on-ledger may extend persistent-entry TTLs and

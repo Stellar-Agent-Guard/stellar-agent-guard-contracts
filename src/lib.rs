@@ -506,16 +506,42 @@ impl PolicyEngine {
         }
     }
 
-    /// Pre-flight of the asset-transfer decision path: lets agents/SDK
-    /// simulate a transfer before signing. A submitted call may refresh
-    /// persistent TTLs; simulation does not persist those rent bumps. Emits
-    /// the same `auth_checked` event as an in-path decision.
+    /// Preflight / simulate a transfer (`check`): permissionless pre-flight
+    /// of the asset-transfer decision path.
+    ///
+    /// Search aliases for SDK discoverability: "preflight", "simulate",
+    /// "simulate_transfer", "simulate-transfer". These are documentation
+    /// aliases only — the on-chain ABI is frozen as `check` (and
+    /// `check_detailed`); there is no `simulate_transfer` entrypoint.
+    ///
+    /// Lets agents/SDKs simulate a transfer before signing. A submitted call
+    /// may refresh persistent TTLs; simulation does not persist those rent
+    /// bumps. Emits the same `auth_checked` event as an in-path decision.
+    ///
+    /// # Example
+    ///
+    /// Mirrors the live Phase-1 testnet invocation (permissionless read,
+    /// simulation only; this account is DMS-frozen, so the honest answer
+    /// today is blocked):
+    ///
+    /// ```text
+    /// stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+    ///   --network testnet --source-account guard_admin --send=no -- \
+    ///   check --asset CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7 \
+    ///   --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX --amount 50
+    /// # → {"Blocked":"heartbeat_expired"}
+    /// ```
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult {
         Self::check_detailed(env, asset, to, amount).result
     }
 
-    /// Pre-flight decision plus current cap headroom for the targeted asset.
+    /// Preflight / simulate a transfer with headroom (`check_detailed`):
+    /// pre-flight decision plus current cap headroom for the targeted asset.
+    /// Part of the `check` preflight / simulate alias family (documentation
+    /// aliases only; the ABI is frozen — there is no `simulate_transfer`
+    /// entrypoint).
+    ///
     /// This path does not change spend accounting: it mutates a local ledger
     /// copy and emits exactly the same `auth_checked` event as `check`. A
     /// submitted call may refresh persistent TTLs; simulation does not persist
