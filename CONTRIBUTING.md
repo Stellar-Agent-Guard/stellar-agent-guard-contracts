@@ -29,6 +29,11 @@ cargo build --release --target wasm32v1-none
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
 
+The `stellar` CLI cannot sign Soroban authorization entries whose address is a
+contract. Heartbeat testing uses the guard contract's own address, so the CLI
+cannot submit a heartbeat; use `agent-tx` for this path. See the
+[`agent-tx` usage guide](tools/agent-tx/README.md) for commands and options.
+
 ## Clean Build Artifacts
 
 ```bash
