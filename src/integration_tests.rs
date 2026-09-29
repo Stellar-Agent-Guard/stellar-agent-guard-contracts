@@ -17,11 +17,11 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
+use crate::types::{CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule};
 use crate::types::{
     CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule, WindowState,
 };
 use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
-use crate::types::{CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule};
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
