@@ -77,7 +77,7 @@ fn alive() -> AccountState {
 /// Measure CPU instructions for a single `decide` call
 fn measure_decide<F>(env: &Env, name: &str, mut f: F) -> u64
 where
-    F: FnMut() -> Decision,
+    F: FnMut() -> std::vec::Vec<Decision>,
 {
     // Warm up
     for _ in 0..10 {

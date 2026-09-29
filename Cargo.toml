@@ -18,7 +18,12 @@ testutils = []
 [dependencies]
 # SPEC §1.1 verified against soroban-sdk 27.0.6 (CustomAccountInterface, Context, ContractContext)
 # Bumping soroban-sdk requires re-verifying SPEC §1.1 quotes against new version source.
-soroban-sdk = "27.0.6"
+#
+# `alloc`: the engine returns one verdict per auth context via `alloc::vec::Vec`,
+# which needs a global allocator in the wasm guest. The SDK's `alloc` feature
+# registers a bump-pointer global allocator for wasm targets (no effect on host
+# builds/tests); see soroban-sdk `src/alloc`.
+soroban-sdk = { version = "27.0.6", features = ["alloc"] }
 
 [dev-dependencies]
 soroban-sdk = { version = "27.0.6", features = ["testutils"] }
