@@ -614,7 +614,8 @@ impl PolicyEngine {
             ledger.prune(now, policy.window_secs);
         }
 
-        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&policy, &ledger, &to);
+        let (remaining_window, per_tx_cap, effective_window_cap) =
+            cap_metrics(&policy, &ledger, &to);
         let effective_per_tx_cap = per_tx_cap;
         let call = transfer_context(&env, &asset, &to, amount);
         let verdicts = decide(

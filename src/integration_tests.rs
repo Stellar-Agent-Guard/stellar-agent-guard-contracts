@@ -21,13 +21,13 @@ use crate::types::{
     CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule, WindowState,
 };
 use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
+use crate::types::{CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule};
+use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
-use crate::types::{CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule};
-use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
