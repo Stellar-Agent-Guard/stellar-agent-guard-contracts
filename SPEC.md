@@ -98,8 +98,10 @@ here; scope-wording edits touch this section only (CONTRIBUTING rule 2).*
 What "window and pause state" means for non-SAC calls is made exact in §6.4: the account is a
 **default-deny** environment — every call must match the protocol allowlist (contract, and
 optionally function) — and the active-window / pause / dead-man-freeze checks gate every context
-equally, SAC or not. What is *not* applied to non-SAC calls is per-call amount capping and
-rolling-window spend accounting, because the amount is not available in the context in any
+equally, SAC or not. What *is* applied to non-SAC calls as of v1 is **call count rate limiting**
+(rolling-window cap on the number of protocol calls; see §6.3), which is fully observable and
+addresses runaway-loop attacks. What is *not* applied to non-SAC calls is per-call amount capping
+and rolling-window spend accounting, because the amount is not available in the context in any
 trustworthy way.
 
 This boundary is an inherent property of the platform (an independent current confirmation:
@@ -107,7 +109,7 @@ OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer con
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
 and `docs/enforcement-scope.md` quote this section briefly and link here as canonical.
 
-**Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol parsers, rate limiting, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Recommended direction: protocol rate limiting (count-based) as core deliverable; opt-in protocol parsers as secondary.
+**Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol-specific parsers, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Count-based protocol call rate limiting (v1) is now implemented; opt-in protocol parsers remain a secondary track.
 
 ---
 
@@ -142,6 +144,7 @@ pub struct PolicyConfig {
     pub active_until: u64,                   // unix seconds; 0 = no restriction
     pub paused: bool,                        // admin kill switch
     pub dms_grace_secs: u64,                 // dead-man switch grace; 0 = disabled
+    pub protocol_calls_per_window: u32,      // max protocol calls per rolling window; 0 = disabled
 }
 
 #[contracttype]
@@ -161,6 +164,7 @@ pub struct WindowState {
     pub total: i128,                      // cached rolling global total
     pub entries: Vec<SpendEntry>,         // chronological global spend entries; pruned lazily on access
     pub recipients: Vec<RecipientWindowState>, // per-recipient rolling ledgers for recipients with override caps
+    pub protocol_call_entries: Vec<ProtocolCallEntry>, // rolling protocol call count entries; pruned lazily
 }
 
 #[contracttype]
@@ -172,6 +176,9 @@ pub struct RecipientWindowState {
 
 #[contracttype]
 pub struct SpendEntry { pub ts: u64, pub amount: i128 }
+
+#[contracttype]
+pub struct ProtocolCallEntry { pub ts: u64, pub count: u32 }  // coalesced call count per second
 ```
 
 ### 3.1 The window is genuinely rolling — not a fixed bucket
@@ -477,9 +484,15 @@ the "we know what we're enforcing" promise exact.
 ### 6.3 Protocol calls — allowlist only (window/pause state still enforced)
 
 `contract ∈ policy.protocols` (each with optional per-function allowlist). Allowed calls are
-authorized; per-call amount/recipient limits do **not** apply because the arguments of an
-arbitrary protocol are not interpretable (§2). Functions not in a rule's `fns` allowlist (when
-present) are blocked `FunctionNotAllowed`.
+authorized; per-call amount/recipient limits do **not** apply to individual call values because
+the arguments of an arbitrary protocol are not interpretable (§2). However, the **count of
+protocol calls is fully observable** — the engine loops over contexts and can meter them — so
+a rolling-window rate limit on call count (`policy.protocol_calls_per_window`; 0 = disabled)
+is enforced: if the cumulative count of protocol contexts within `window_secs` would exceed the
+cap, the call is blocked with `ProtocolCallRateExceeded`. This count-based throttling is
+defensible v1 enforcement that does not overclaim — it directly addresses runaway loops
+(the threat case this project exists to stop) within what the host actually exposes. Functions
+not in a rule's `fns` allowlist (when present) are blocked `FunctionNotAllowed`.
 
 ### 6.4 Anything else — blocked
 

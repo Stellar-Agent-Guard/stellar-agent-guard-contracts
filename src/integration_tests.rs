@@ -179,6 +179,7 @@ impl Harness {
             active_until: 0,
             paused: false,
             dms_grace_secs: 0,
+            protocol_calls_per_window: 0,
         }
     }
 
@@ -1248,6 +1249,7 @@ fn policy_config_debug_snapshot() {
         active_until: 1_800_000_000,
         paused: true,
         dms_grace_secs: 3600,
+        protocol_calls_per_window: 0,
     };
 
     let debug_output = format!("{config:?}");

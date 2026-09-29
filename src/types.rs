@@ -24,7 +24,7 @@ pub const MAX_WINDOW_ENTRIES: usize = 8192;
 /// bounded and predictable (SPEC §3 / §8).
 pub const MAX_RECIPIENT_ENTRIES: usize = 256;
 
-/// Per-policy rolling spend ledger for SAC asset transfers.
+/// Per-policy rolling spend ledger for SAC asset transfers and protocol call counts.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowState {
@@ -34,6 +34,8 @@ pub struct WindowState {
     pub entries: Vec<SpendEntry>,
     /// Per-recipient rolling spend ledgers for recipients with an override cap.
     pub recipients: Vec<RecipientWindowState>,
+    /// Protocol call count entries (for rate limiting).
+    pub protocol_call_entries: Vec<ProtocolCallEntry>,
 }
 
 /// Rolling spend ledger for a single recipient.
@@ -52,6 +54,14 @@ pub struct RecipientWindowState {
 pub struct SpendEntry {
     pub ts: u64,
     pub amount: i128,
+}
+
+/// A protocol call entry in the rolling-window counter (for rate limiting).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtocolCallEntry {
+    pub ts: u64,
+    pub count: u32,
 }
 
 /// Per-recipient rolling-window cap override.
@@ -95,6 +105,8 @@ pub struct PolicyConfig {
     pub paused: bool,
     /// Dead-man switch grace (seconds); 0 = disabled.
     pub dms_grace_secs: u64,
+    /// Maximum protocol (non-SAC allowlisted) calls per rolling window; 0 = disabled.
+    pub protocol_calls_per_window: u32,
 }
 
 /// Manual `Debug` implementation for `PolicyConfig` with stable field order.
@@ -121,6 +133,7 @@ impl core::fmt::Debug for PolicyConfig {
             .field("active_until", &self.active_until)
             .field("paused", &self.paused)
             .field("dms_grace_secs", &self.dms_grace_secs)
+            .field("protocol_calls_per_window", &self.protocol_calls_per_window)
             .finish()
     }
 }
@@ -208,6 +221,7 @@ impl Error {
             Self::UnknownContract,
             Self::SelfFunctionNotAllowed,
             Self::CreateContractNotAllowed,
+            Self::ProtocolCallRateExceeded,
         ];
         all_errors
             .into_iter()
@@ -280,6 +294,7 @@ pub enum Error {
     SelfFunctionNotAllowed = 27,
     CreateContractNotAllowed = 28,
     RecipientBlocked = 29,
+    ProtocolCallRateExceeded = 30,
 }
 
 impl Error {
@@ -307,6 +322,7 @@ impl Error {
             Self::UnknownContract => "unknown_contract",
             Self::SelfFunctionNotAllowed => "self_function_not_allowed",
             Self::CreateContractNotAllowed => "create_contract_not_allowed",
+            Self::ProtocolCallRateExceeded => "protocol_call_rate_exceeded",
         }
     }
 }

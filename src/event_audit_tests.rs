@@ -331,6 +331,7 @@ fn audit_event_payloads_and_topics() {
         active_until: 0,
         paused: false,
         dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
     };
     h.set_policy(&dummy_policy);
     let events = h.env.events().all().events();

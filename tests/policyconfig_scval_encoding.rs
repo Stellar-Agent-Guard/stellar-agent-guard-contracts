@@ -25,7 +25,7 @@ fn to_scval(env: &Env, v: impl IntoVal<Env, Val>) -> ScVal {
 }
 
 /// The sorted symbol keys of `PolicyConfig` — SPEC §3.2 table column 2.
-const EXPECTED_KEYS: [&str; 13] = [
+const EXPECTED_KEYS: [&str; 14] = [
     "active_from",
     "active_until",
     "allow_any_recipient",
@@ -34,6 +34,7 @@ const EXPECTED_KEYS: [&str; 13] = [
     "dms_grace_secs",
     "paused",
     "per_tx_cap",
+    "protocol_calls_per_window",
     "protocols",
     "recipient_window_caps",
     "recipients",
@@ -116,6 +117,7 @@ fn sample_policy(env: &Env) -> PolicyConfig {
         active_until: 1_700_000_000u64,
         paused: false,
         dms_grace_secs: 604_800u64,
+        protocol_calls_per_window: 42u32,
     }
 }
 
