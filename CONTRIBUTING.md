@@ -27,6 +27,12 @@ cargo build --release --target wasm32v1-none
 
 # Build the agent-tx submission helper
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
+
+# Coverage (llvm-cov) — HTML report + line-coverage summary
+cargo install cargo-llvm-cov --locked   # one-time
+cargo llvm-cov --html
+# → target/llvm-cov/html/index.html; CI enforces a 90% line floor on the
+# enforcement core (src/engine.rs + src/window.rs) and uploads this report.
 ```
 
 The `stellar` CLI cannot sign Soroban authorization entries whose address is a

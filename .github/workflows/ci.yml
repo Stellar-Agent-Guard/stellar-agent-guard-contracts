@@ -42,3 +42,59 @@ jobs:
 
       - name: Agent submission tool build (tools/agent-tx)
         run: cargo build --release --manifest-path tools/agent-tx/Cargo.toml
+
+  # Coverage: llvm-cov report + artifact + enforced floor on the enforcement
+  # core (src/engine.rs + src/window.rs). The floor is a ratchet — it only ever
+  # moves up, never down — and was set from the measured coverage at the time
+  # of introduction (92.2% lines on the enforcement core; floor 90%).
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run tests with coverage (HTML report)
+        run: cargo llvm-cov --html --output-dir target/llvm-cov
+
+      - name: Enforce coverage floor on enforcement core (engine.rs + window.rs)
+        run: |
+          set -euo pipefail
+          cargo llvm-cov report | tee target/llvm-cov/report.txt
+          read -r E_LINES E_MISSED W_LINES W_MISSED < <(awk '
+            $1 == "engine.rs" { el = $8; em = $9 }
+            $1 == "window.rs"  { wl = $8; wm = $9 }
+            END { print el, em, wl, wm }
+          ' target/llvm-cov/report.txt)
+          TOTAL_LINES=$((E_LINES + W_LINES))
+          TOTAL_MISSED=$((E_MISSED + W_MISSED))
+          # Tenths of a percent so the comparison keeps one decimal place.
+          COVERAGE=$(( (TOTAL_LINES - TOTAL_MISSED) * 1000 / TOTAL_LINES ))
+          FLOOR=900 # 90.0% lines on src/engine.rs + src/window.rs
+          echo "enforcement core: $((TOTAL_LINES - TOTAL_MISSED))/$TOTAL_LINES lines covered = ${COVERAGE} tenths-of-a-percent (floor: ${FLOOR})"
+          if [ "$COVERAGE" -lt "$FLOOR" ]; then
+            echo "::error::enforcement core line coverage $((COVERAGE / 10)).$((COVERAGE % 10))% is below the 90% floor — ratchet up coverage, never down the floor"
+            exit 1
+          fi
+
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-cov-html
+          path: target/llvm-cov/html
+          retention-days: 14
