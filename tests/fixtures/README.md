@@ -183,6 +183,57 @@ agent-tx transfer … --amount 10
 
 Horizon: `successful: true`, ledger 4566327, created 08:13:42Z.
 
+## Machine-readable index (`index.json`)
+
+[`index.json`](index.json) is the same evidence in a stable shape — **scenario →
+tx hash → ledger → expected reason → contract ID** — so tooling never has to
+scrape this prose. This README stays the human narrative; the index is the
+machine contract, and `schema_version` is what a consumer checks first.
+
+### Schema (`schema_version: 1`)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | int | Breaking-change marker. Bumped only when a field changes meaning or disappears; consumers must reject versions they don't know. |
+| `network` | object | `name`, `protocol`, `passphrase`, `rpc`, `horizon`, `recorded_on`, `ledger_range_note` — the chain this evidence was captured on. |
+| `contracts` | object | `guard` (the deployed custom-account address) and `token` (the SAC address) from the table above. |
+| `accounts[]` | array | `role`, `address`, `key_alias` for each fixture account. |
+| `setup_transactions[]` | array | The Phase 1 setup table: `step` (stable key), `label` (prose), `tx`, and `ledger` (`null` — setup ledgers were not recorded individually). |
+| `scenarios[]` | array | Exactly five entries with `id` 1–5 matching the headings below. |
+| `scenarios[].outcome` | `"allowed"` \| `"blocked"` | Verdict of the recorded run. |
+| `scenarios[].expected_reason` | string | `allowed` when admitted, otherwise the block reason symbol (`per_tx_cap_exceeded`, `window_cap_exceeded`, `recipient_not_allowed`, `heartbeat_expired`) — the same vocabulary as [`docs/reason-glossary.md`](../../docs/reason-glossary.md). |
+| `scenarios[].guard` / `.token` / `.policy_tx` | string | Contract IDs the scenario ran against, plus the `set_policy` transaction that armed the policy in effect. |
+| `scenarios[].recipient` / `.amount` | string \| null / int | Transfer shape as recorded; `recipient` is `null` where the command above elided it. |
+| `scenarios[].tx` | string \| null | Confirmed transaction hash, or `null` — blocked scenarios are caught pre-broadcast and have no hash. |
+| `scenarios[].ledger` | int \| null | Ledger index of `tx`; `null` when blocked or not recorded. |
+| `scenarios[].recorded_utc` | string \| null | Horizon `created_at` time of `tx`, when recorded. |
+| `scenarios[].event_topics` | array | Exact `auth_checked` topics: `[event_auth_checked, allowed]` or `[event_auth_checked, blocked, <expected_reason>]`. |
+| `scenarios[].notes[]` | array | The caveats the prose carries for that scenario. |
+| `scenarios[4].reversal` | object | DMS reversal: `action`, `by` (admin address), `tx`, `ledger`, `event_topics` (`[event_unfrozen]`). |
+| `scenarios[4].post_reversal` | object | The transfer that succeeded after `unfreeze()`: `outcome`, `expected_reason`, `amount`, `tx`, `ledger`, `recorded_utc`, `notes`. |
+| `supplemental_transactions[]` | array | Hashes recorded in prose outside the setup table and the five scenarios (the debug-era transfer), with `canonical_scenario: null` for non-canonical runs. |
+
+### Consistency guarantee
+
+[`tests/fixtures_index.rs`](../fixtures_index.rs) runs as part of `cargo test`,
+so it is part of the required `ci` check. It fails the build when the two files
+drift:
+
+- every 64-digit transaction hash in this README must appear in `index.json`
+  **and** every hash in `index.json` must appear in this README;
+- every truncated hash reference in this README (e.g. `6f17c570…`) must
+  resolve to a hash that `index.json` records;
+- the setup table must keep one row per `setup_transactions` entry;
+- the scenario list must stay ids 1–5 with coherent `outcome`,
+  `expected_reason`, `tx`, `ledger`, and `event_topics`.
+
+> **Companion note for `stellar-agent-guard-sdk`:** consume `index.json`
+> instead of scraping this markdown — parse `schema_version` first and treat an
+> unknown version as "do not trust". Its `scripts/check-enforcement-evidence.ts`
+> gate does not read this README today (it only checks which files a PR
+> touched), so there is no scraper to migrate yet; file the follow-up in that
+> repository if fixture evidence is ever wired into that gate.
+
 ## How to re-run
 
 1. `cargo build --release --target wasm32v1-none` (contract) and

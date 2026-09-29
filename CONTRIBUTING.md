@@ -48,9 +48,15 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    authorization path must be deliberate `panic_with_error!` calls that surface
    as stable `Error` reasons (SPEC §7), never accidental traps.
 2. **Every policy change must update SPEC.md and the tests together** — the
-   decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2 /
-   README) must stay word-for-word consistent with the code; that consistency is
-   a review requirement, not a nicety.
+   decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2)
+   must stay word-for-word consistent with the code; that consistency is
+   a review requirement, not a nicety. Scope *wording* itself is single-sourced:
+   edit the canonical paragraph in SPEC §2 only — the README and
+   `docs/enforcement-scope.md` carry short excerpts plus a
+   `full statement: SPEC §2` link that auto-follows (re-sync an excerpt only if
+   the quoted sentence itself changes). Copies in sibling repositories
+   (`stellar-agent-guard-sdk`, `stellar-agent-guard-dashboard`) are out of scope
+   here; they are tracked in their own issue trackers.
 3. **`clippy::all` and `clippy::pedantic` clean** — enforced in CI with
    `-D warnings`.
 4. **`cargo fmt` clean** — enforced in CI.
@@ -59,7 +65,10 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
 6. **Testnet-proof pattern:** behavior that changes what `__check_auth` admits
    or blocks should add a unit/integration test **and**, where it is a user-
    visible enforcement change, be recorded in the testnet proof plan
-   (`tests/fixtures/README.md`) per the Phase-1 exit-criteria pattern.
+   (`tests/fixtures/README.md` **and** its machine-readable twin
+   `tests/fixtures/index.json`) per the Phase-1 exit-criteria pattern. The two
+   files are cross-checked by `tests/fixtures_index.rs`, so editing one without
+   the other fails `cargo test`.
 7. **Denial-reason messages:** `docs/reason-glossary.md` is the canonical
    message-content source for SDK/UI work — map new user-facing denial text to
    its agent/operator/auditor columns instead of inventing new phrasing.

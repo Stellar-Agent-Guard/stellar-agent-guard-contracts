@@ -63,10 +63,16 @@ struct EventFrozen {
     by: Address,
 }
 
+/// Admin unfreeze: data `by` (the admin address that acted) plus
+/// `rearmed_dms: bool` — whether the call also re-armed the dead-man-switch
+/// clock by changing `LastHeartbeat` (SPEC §5: the admin's signature is the
+/// liveness attestation, so an unfreeze of a DMS-expired account silently
+/// restarts the grace window; the flag makes that side effect auditable).
 #[contractevent]
 #[derive(Clone)]
 struct EventUnfrozen {
     by: Address,
+    rearmed_dms: bool,
 }
 
 #[contractevent]
@@ -94,18 +100,32 @@ struct EventAgentRotated {
 
 // ── Persistent-storage helpers (SPEC §3) ────────────────────────────────
 // Admin / AgentPubkey / Initialized live in instance storage (auto-TTL on
-// every invocation); the rest live in persistent storage with explicit TTL
-// extension on every write.
+// every invocation); persistent values are extended on writes and refreshed
+// on reads when their remaining TTL falls below the safety threshold.
+
+fn extend_persistent_ttl(env: &Env, key: &DataKey, threshold: u32) {
+    // `extend_ttl` takes a TTL duration relative to the current ledger, not an
+    // absolute ledger sequence. Passing max_ttl directly also keeps the target
+    // valid at nonzero ledger sequences.
+    let max_ttl = env.storage().max_ttl();
+    env.storage()
+        .persistent()
+        .extend_ttl(key, threshold, max_ttl);
+}
 
 fn persist_set(env: &Env, key: &DataKey, val: &impl soroban_sdk::IntoVal<Env, Val>) {
-    let seq = env.ledger().sequence();
-    let target = seq.saturating_add(env.storage().max_ttl());
     env.storage().persistent().set(key, val);
-    env.storage().persistent().extend_ttl(key, target, target);
+    let max_ttl = env.storage().max_ttl();
+    extend_persistent_ttl(env, key, max_ttl);
 }
 
 fn persist_get<T: soroban_sdk::TryFromVal<Env, Val>>(env: &Env, key: &DataKey) -> Option<T> {
-    env.storage().persistent().get(key)
+    let value = env.storage().persistent().get(key)?;
+    // Refresh active and automatically restored entries before returning
+    // them. The half-life threshold avoids paying for a rent extension on
+    // every read while retaining at least half of max_ttl between accesses.
+    extend_persistent_ttl(env, key, env.storage().max_ttl() / 2);
+    Some(value)
 }
 
 fn load_ledger(env: &Env) -> Ledger {
@@ -229,8 +249,12 @@ fn emit_initialized(env: &Env, by: &Address) {
 fn emit_frozen(env: &Env, by: &Address) {
     EventFrozen { by: by.clone() }.publish(env);
 }
-fn emit_unfrozen(env: &Env, by: &Address) {
-    EventUnfrozen { by: by.clone() }.publish(env);
+fn emit_unfrozen(env: &Env, by: &Address, rearmed_dms: bool) {
+    EventUnfrozen {
+        by: by.clone(),
+        rearmed_dms,
+    }
+    .publish(env);
 }
 fn emit_policy_set(env: &Env, by: &Address) {
     EventPolicySet { by: by.clone() }.publish(env);
@@ -367,16 +391,23 @@ impl PolicyEngine {
     }
 
     /// Admin liveness attestation: clears the admin freeze and restarts the
-    /// heartbeat clock.
+    /// heartbeat clock. One call, two jobs (SPEC §5 recorded decision): the
+    /// brake release and the liveness attestation are combined on purpose —
+    /// when the DMS grace was already elapsed, this re-arms the liveness clock
+    /// on the admin's authority, and the emitted event carries
+    /// `rearmed_dms: bool` so telemetry can surface exactly that side effect
+    /// (`true` = `LastHeartbeat` changed, `false` = it was already `now`).
     pub fn unfreeze(env: Env) {
         let admin = Self::admin_or_panic(&env);
         persist_set(&env, &DataKey::AdminFrozen, &false);
         let now = env.ledger().timestamp();
+        let last = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let rearmed_dms = last != now;
         persist_set(&env, &DataKey::LastHeartbeat, &now);
-        emit_unfrozen(&env, &admin);
+        emit_unfrozen(&env, &admin, rearmed_dms);
     }
 
-    // ── Read / advisory (no auth — safe reads only, nothing confidential) ─
+    // ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ─
 
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn policy(env: Env) -> Option<PolicyConfig> {
@@ -415,17 +446,20 @@ impl PolicyEngine {
         }
     }
 
-    /// Pure pre-flight of the asset-transfer decision path (no writes): lets
-    /// agents/SDK simulate a transfer before signing. Emits the same
-    /// `auth_checked` event as an in-path decision.
+    /// Pre-flight of the asset-transfer decision path: lets agents/SDK
+    /// simulate a transfer before signing. A submitted call may refresh
+    /// persistent TTLs; simulation does not persist those rent bumps. Emits
+    /// the same `auth_checked` event as an in-path decision.
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult {
         Self::check_detailed(env, asset, to, amount).result
     }
 
     /// Pre-flight decision plus current cap headroom for the targeted asset.
-    /// This path only reads storage, mutates a local ledger copy, and emits
-    /// exactly the same `auth_checked` event as `check`.
+    /// This path does not change spend accounting: it mutates a local ledger
+    /// copy and emits exactly the same `auth_checked` event as `check`. A
+    /// submitted call may refresh persistent TTLs; simulation does not persist
+    /// those rent bumps.
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
         let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {

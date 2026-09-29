@@ -194,7 +194,8 @@ pub struct CheckDetail {
 
 // Storage layout (SPEC §3). `Initialized`/`Admin`/`AgentPubkey` live in
 // instance storage (auto-TTL on every invocation); the rest live in
-// persistent storage with explicit TTL extension on every write.
+// persistent storage with TTL extensions on writes and thresholded refreshes
+// on reads.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum DataKey {

@@ -299,10 +299,18 @@ fn audit_event_payloads_and_topics() {
     );
     match &unfrozen_v0.data {
         ScVal::Map(Some(map)) => {
-            assert_eq!(map.0.len(), 1);
+            assert_eq!(map.0.len(), 2);
             assert_eq!(
                 map.0[0].key,
                 ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("by")).unwrap())
+            );
+            assert_eq!(
+                map.0[1].key,
+                ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("rearmed_dms")).unwrap())
+            );
+            assert!(
+                matches!(map.0[1].val, ScVal::Bool(_)),
+                "event_unfrozen rearmed_dms must be a Bool"
             );
         }
         _ => panic!("event_unfrozen data must be a Map"),

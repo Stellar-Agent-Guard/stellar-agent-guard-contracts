@@ -91,6 +91,10 @@ engine still enforces window and pause state, but per-call amount/recipient limi
 enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not
 implied as already covered.**
 
+*Canonical statement: the paragraph above is the single source of truth for the scope
+wording. The README and `docs/enforcement-scope.md` carry short excerpts that link back
+here; scope-wording edits touch this section only (CONTRIBUTING rule 2).*
+
 What "window and pause state" means for non-SAC calls is made exact in §6.4: the account is a
 **default-deny** environment — every call must match the protocol allowlist (contract, and
 optionally function) — and the active-window / pause / dead-man-freeze checks gate every context
@@ -101,7 +105,7 @@ trustworthy way.
 This boundary is an inherent property of the platform (an independent current confirmation:
 OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer contexts and
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
-states the same scope in the same terms.
+and `docs/enforcement-scope.md` quote this section briefly and link here as canonical.
 
 **Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol parsers, rate limiting, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Recommended direction: protocol rate limiting (count-based) as core deliverable; opt-in protocol parsers as secondary.
 
@@ -267,6 +271,29 @@ For comparison, an **allowed** transfer with window pruning costs ~14,800 instru
   account; a subsequently-heartbeating agent keeps it alive from there. Admin freeze and
   heartbeat-expiry are separate conditions; `unfreeze` clears the former, rule #2 keeps
   evaluating the latter.
+- **Recorded decision (dual semantics kept, event enriched).** `unfreeze` performs two distinct
+  jobs in one call — the admin brake release and the liveness attestation — and this is
+  intentional: when the DMS grace had already elapsed, an operator unfreezing an admin-frozen
+  account silently re-arms the liveness clock on the admin's authority. Splitting the call into
+  `unfreeze` plus an explicit heartbeat-equivalent was considered and rejected: it changes the
+  deployed ABI, complicates the reversal runbook (a two-call sequence risks the operator issuing
+  only the brake release and leaving the account DMS-frozen — the worst possible post-reversal
+  state), and buys no additional safety since the semantics below are already auditable.
+  Rationale: deployed ABI stability matters more than purity, so the semantics stay and the
+  behavior is made louder:
+  - **Event:** `event_unfrozen` data gains `rearmed_dms: bool` — `true` when the call changed
+    `LastHeartbeat` (the DMS clock was re-armed; the typical DMS-expired reversal), `false` when
+    `LastHeartbeat` already equaled `now` (DMS fresh; only the brake was released). Telemetry
+    (SDK/dashboard) can therefore surface exactly when an admin action extended the grace window.
+  - **Docs:** the README freeze/unfreeze section and
+    `docs/functions/freeze-unfreeze.md` state the re-arm behavior explicitly, so an operator
+    cannot be surprised by it.
+  - **Tests:** both paths are asserted — `dead_man_switch_freeze_and_admin_reversal` covers the
+    DMS-expired unfreeze (`rearmed_dms: true`) and
+    `unfreeze_while_dms_fresh_emits_rearmed_dms_false` covers the DMS-fresh unfreeze
+    (`rearmed_dms: false`).
+  - **No API change:** `unfreeze`'s signature, storage writes, and authorization are unchanged;
+    this is purely additive event data (see §9).
 
 ---
 
@@ -287,6 +314,8 @@ calls whose semantics and arguments are known:
 
 - `transfer` args: `(from, to, amount)` — the account is `from`; recipient = args[1], amount = args[2].
 - `transfer_from` args: `(from, spender, to, amount)` — the account is `from`; recipient = args[2], amount = args[3].
+
+**Exact arity required; extra args deny -- we do not partially parse.** A call whose argument list does not match the SAC schema exactly (`transfer` = 3, `transfer_from` = 4) is rejected with `UnknownContract` and never reaches the cap/allowlist evaluation. We only enforce what we fully understand; a context carrying extra trailing values is treated as a call we cannot reason about (conservative default-deny).
 
 Rules applied:
 
@@ -383,16 +412,16 @@ pub fn heartbeat(env: Env)
 pub fn freeze(env: Env)      // require_auth(Admin); sets AdminFrozen = true
 pub fn unfreeze(env: Env)    // require_auth(Admin); clears AdminFrozen, LastHeartbeat = now
 
-// ── Read / advisory (no auth — safe reads only, nothing confidential) ─────
+// ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ──
 pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
 pub fn status(env: Env) -> Status                     // frozen? admin_frozen? last_heartbeat? now?
 pub fn dms_health(env: Env) -> DmsHealth                  // ok, warn (>=80%), or expired
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
-    // Pure pre-flight replica of the §6.2 decision path (same code, no writes):
-    // lets agents/SDK simulate an asset transfer before signing. Emits the same
-    // events as an in-path decision so telemetry sees one vocabulary.
+    // Pure pre-flight replica of the §6.2 decision path: it does not change
+    // spend accounting, but a submitted call may refresh TTLs under §9.5.
+    // Simulation before signing does not persist those rent bumps.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
-  // Same zero-write pre-flight, with remaining_window and effective cap metrics.
+  // Same pre-flight, with remaining_window and effective cap metrics.
 
 // ── Enforcement (host-invoked; not callable by anyone) ────────────────────
 impl CustomAccountInterface for PolicyEngine {
@@ -402,7 +431,7 @@ impl CustomAccountInterface for PolicyEngine {
                     auth_contexts: Vec<Context>) -> Result<(), Error>;
     // 1. ed25519_verify(AgentPubkey, signature_payload, signatures) or Unauthorized.
     // 2. Decision table §4 + classification §6 over every context.
-    // 3. Events (§9) + storage writes only on admission.
+    // 3. Events (§9) + TTL refreshes (§9.5); spend-accounting writes only on admission.
 }
 ```
 
@@ -452,8 +481,9 @@ pub enum Error {            // values stable; see tests/fixtures
 }
 ```
 
-`check_detailed` loads and prunes only an in-memory copy of the rolling ledger.
-It writes no ledger state and emits the same `auth_checked` event, with the same
+`check_detailed` loads and prunes only an in-memory copy of the rolling ledger;
+it does not change spend accounting. A submitted invocation may refresh persistent
+entry TTLs under §9.5 and emits the same `auth_checked` event, with the same
 `allowed`/`blocked` result and reason, as `check`. `remaining_window` is the
 capacity available before the requested transfer; it is `None` when the rolling
 window cap is disabled. The configured and effective caps are `None` when
@@ -497,7 +527,8 @@ filtering by the SDK listener.
 | `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | (none) | every `__check_auth` / `check` decision |
 | `heartbeat` | (none) | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
-| `frozen` / `unfrozen` | (none) | `by: Address` | admin freeze / unfreeze |
+| `frozen` | (none) | `by: Address` | admin freeze |
+| `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
 | `policy_set` / `policy_revoked` | (none) | `by: Address` | admin policy changes |
 | `agent_rotated` | (none) | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
 
@@ -509,6 +540,34 @@ off-chain. Rotations record both endpoints (outgoing and incoming) so an auditor
 "when did key K stop being authoritative" from the append-only event log; the full public key is
 never repeated in event data (it is already public at `initialize`). SDK/dashboard decoders must
 render the `BytesN<8>` data fields as hex — a cross-repo follow-up tracked in those repositories.
+
+### 9.5 Persistent storage TTL liveness
+
+`Policy`, `Window`, `LastHeartbeat`, `AdminFrozen`, and `PolicyRevision` are persistent ledger
+entries. A successful write extends its entry to `env.storage().max_ttl()` ledgers. A successful
+read refreshes the accessed entry to that same TTL when its remaining TTL is below half of
+`max_ttl()`. The extension target is a TTL duration relative to the current ledger sequence, not
+an absolute sequence number. This thresholded read refresh avoids paying rent on every read while
+keeping frequently accessed guard state away from archival. Because of this refresh, submitting a
+read call such as `policy`, `status`, or `check` can write TTL metadata and charge rent when the
+threshold is crossed; an RPC simulation (`send=no`) does not persist that change. A rejected
+authorization transaction rolls back its TTL updates along with its other state changes.
+
+This is an activity-based liveness policy, not a promise that untouched state never expires. If
+an entry is left untouched for its full maximum TTL, Soroban archives it. A transaction that
+accesses archived persistent data must restore that entry in its footprint before contract
+execution; RPC simulation normally supplies the restore footprint. If restoration is not
+included or its rent cannot be funded, the transaction fails before a guard decision can approve
+the spend. Once restored, a successful read refreshes the entry. Operators requiring liveness
+through inactivity longer than the maximum TTL must arrange a keeper/restore transaction before
+expiry; the contract cannot run a background extension itself.
+
+The executable TTL regression test shortens the test ledger's persistent TTL, advances ledger
+sequence past expiry, and verifies that archived `Policy`, `Window`, `LastHeartbeat`, and
+`AdminFrozen` entries restore with their original values. It also checks that a pre-expiry spend
+still counts against `window_cap` after restoration and that an expired dead-man clock remains
+expired. See [issue #43](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/43)
+and the operator [rent/TTL guide](docs/rent-and-ttl.md).
 
 ---
 
