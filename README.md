@@ -481,6 +481,8 @@ Instance keys auto-refresh TTL on every invocation; persistent keys are extended
 maximum TTL on every write (`persist_set`). The `Window` ledger is bounded at
 `MAX_WINDOW_ENTRIES = 8192` — beyond that, the two oldest entries merge *forward*
 (conservative over-count), so the `window_cap` ceiling is never exceeded (SPEC §3.1).
+See [Storage rent and TTL cost model](docs/rent-and-ttl.md) for approximate XLM costs,
+who pays extension rent, and the underfunded-expiry failure mode.
 
 ## Architecture
 
