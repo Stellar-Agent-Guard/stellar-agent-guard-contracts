@@ -510,7 +510,7 @@ impl PolicyEngine {
     /// of the asset-transfer decision path.
     ///
     /// Search aliases for SDK discoverability: "preflight", "simulate",
-    /// "simulate_transfer", "simulate-transfer". These are documentation
+    /// `simulate_transfer`, `simulate-transfer`. These are documentation
     /// aliases only — the on-chain ABI is frozen as `check` (and
     /// `check_detailed`); there is no `simulate_transfer` entrypoint.
     ///
