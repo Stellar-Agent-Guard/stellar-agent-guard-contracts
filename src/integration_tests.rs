@@ -929,6 +929,15 @@ fn self_address_rejected_in_every_list() {
 
     // Every case must fail `set_policy` with `InvalidConfig` (fail-closed:
     // the previously installed policy, if any, stays unchanged).
+    //
+    // `set_policy` returns `()` and signals rejection by panicking through
+    // `panic_with_error!`, so the SDK generates no `try_set_policy` client
+    // method to assert on; `catch_unwind` + `AssertUnwindSafe` is this crate's
+    // established way to assert a rejected call (same as
+    // `transfer_expect_blocked` / `heartbeat_expect_blocked`). Asserting only
+    // "it panicked" would also pass for an unrelated panic, so each case
+    // additionally asserts the fail-closed invariant: the rejected policy was
+    // never written to storage.
     let expect_invalid = |cfg: &PolicyConfig, list: &str| {
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.set_policy(cfg);
@@ -936,6 +945,10 @@ fn self_address_rejected_in_every_list() {
         assert!(
             res.is_err(),
             "self-address in `{list}` must fail set_policy with InvalidConfig"
+        );
+        assert!(
+            client.policy().is_none(),
+            "self-address in `{list}` must leave the policy uninstalled (fail-closed)"
         );
     };
 
