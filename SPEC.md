@@ -135,6 +135,7 @@ pub struct PolicyConfig {
     pub assets: Vec<Address>,                // SAC token contracts whose transfers get parsed/enforced
     pub protocols: Vec<ProtocolRule>,        // allowlisted non-asset contracts the account may call
     pub recipients: Vec<Address>,            // allowed SAC transfer destinations
+    pub asset_caps: Vec<AssetCap>,           // per-asset cap overrides; empty = global behavior unchanged
     pub recipient_window_caps: Vec<RecipientCap>, // per-recipient rolling cap overrides; 0 = fall back to global
     pub allow_any_recipient: bool,           // escape hatch: skip recipient allowlist (still capped)
     pub active_from: u64,                    // unix seconds; 0 = no restriction
@@ -147,6 +148,13 @@ pub struct PolicyConfig {
 pub struct ProtocolRule {
     pub contract: Address,
     pub fns: Option<Vec<Symbol>>,         // None = any function; Some = function allowlist
+}
+
+#[contracttype]
+pub struct AssetCap {
+    pub asset: Address,                   // must be a member of `assets`; unknown-asset overrides rejected
+    pub per_tx_cap: i128,                 // per-asset per-tx cap; 0 = fall back to global per_tx_cap
+    pub window_cap: i128,                 // per-asset rolling cap; 0 = fall back to global window_cap
 }
 
 #[contracttype]
@@ -197,6 +205,15 @@ Implementation (exact, lazy, bounded):
   `window_secs` span") is preserved in all cases; in the pathological region of ≥8192 distinct
   spend seconds within one window the engine is conservative until density drops. This is
   documented here and in the README, not hidden.
+
+**Per-asset windows (v1 decision).** Per-asset overrides change the *cap* compared against,
+not the window ledger. There remains exactly one global rolling ledger (`WindowState.total` /
+`entries`); a transfer's effective per-tx cap and effective window cap are resolved from
+`asset_caps` (matching the transfer's asset) with fallback to the global `per_tx_cap` /
+`window_cap`. Full per-asset rolling ledgers (independent windows per asset) are explicitly
+out of scope for v1 and tracked as a separate issue if demanded. This keeps the window
+invariant (§3.1) unchanged: the global `total` is still the sum of all admitted asset spends
+in the window, and admission requires `total + amount <= effective_window_cap(asset)`.
 - **Measured worst case (single lazy prune burst):** the real bench measurement for the pathological
   case of 8192 stale entries being pruned in one authorization is `worst_case_prune_cpu_cost=86925434`
   CPU instructions (`cargo test prune_worst_case_measured_cost -- --nocapture`). That is a
@@ -213,6 +230,11 @@ is admitted only if the running total (plus amounts already staged in the same r
 effective cap for that transfer. Per-recipient overrides maintain the same invariant in their own
 `RecipientWindowState`; recipients without an override use the global cap. Both the global cap
 and any matching per-recipient cap must be satisfied.
+
+Per-asset overrides resolve the effective per-tx and window caps for the transfer's asset
+(`asset_caps` entry if present, else global); the same single global ledger is used, so the
+per-asset cap is a ceiling on that asset's contribution to the shared window total. Both the
+effective per-asset cap and any matching per-recipient cap must be satisfied.
 
 ---
 
@@ -340,10 +362,14 @@ Rules applied:
 
 1. **Recipient allowlist:** if `allow_any_recipient == false`, `recipient ∈ policy.recipients`
    or block `RecipientNotAllowed`.
-2. **Per-tx cap:** if `per_tx_cap != 0`, `amount <= per_tx_cap` or block `PerTxCapExceeded`.
+2. **Per-tx cap:** resolve the effective per-tx cap for the transfer's asset — the matching
+   `asset_caps` entry's `per_tx_cap` when non-zero, otherwise the global `per_tx_cap`. If the
+   effective cap is non-zero, `amount <= effective_per_tx_cap` or block `PerTxCapExceeded`.
 3. **Rolling window (§3.1):**
-   - Global window: if `window_cap != 0`, prune expired entries, then
-     `total + amount <= window_cap` or block `WindowCapExceeded`.
+   - Global window: resolve the effective window cap for the transfer's asset — the matching
+     `asset_caps` entry's `window_cap` when non-zero, otherwise the global `window_cap`. If the
+     effective cap is non-zero, prune expired entries, then
+     `total + amount <= effective_window_cap` or block `WindowCapExceeded`.
    - Per-recipient window: if `recipient` has an entry in `policy.recipient_window_caps` with
      `cap > 0`, use that cap against the recipient's own rolling ledger; otherwise fall back to
      the global window cap. If the effective cap is exceeded, block `WindowCapExceeded`.
@@ -533,8 +559,9 @@ entry TTLs under §9.5 and emits the same `auth_checked` event, with the same
 capacity available before the requested transfer; it is `None` when no effective
 window cap applies to the queried recipient (no global `window_cap` and no
 per-recipient override). The configured and effective caps are `None` when
-disabled; v1 has no per-asset overrides, so the effective per-transaction cap
-equals the configured cap.
+disabled. `effective_per_tx_cap` and `effective_window_cap` reflect the resolved
+per-asset override for the queried asset when one is configured, otherwise they
+equal the configured global caps.
 
 ---
 
@@ -555,6 +582,10 @@ equals the configured cap.
   `recipients` with `allow_any_recipient == false` = no recipient allowed).
 - Duplicate addresses within a list are rejected (`assets`, `recipients`, `protocols`).
 - Duplicate recipients within `recipient_window_caps` are rejected.
+- Duplicate assets within `asset_caps` are rejected.
+- Every `asset_caps[i].asset` must appear in `assets`; an override for an asset not in
+  `assets` is rejected (`InvalidConfig`) rather than silently ignored.
+- Every `asset_caps[i].per_tx_cap >= 0` and `asset_caps[i].window_cap >= 0`.
 - `recipients` and `recipient_window_caps` are each bounded to `MAX_RECIPIENT_ENTRIES` (256)
   entries to keep allowlist scans and per-recipient storage predictable.
 - The contract's own address may not appear in **any** of the three address lists:
@@ -567,6 +598,8 @@ equals the configured cap.
     mis-pasted recipient address look like a deliberate policy. Rejected (recommended:
     catches typos) rather than allowed-with-documentation. The same rule applies to
     `recipient_window_caps` entries.
+  - `asset_caps` — same reasoning: a self-entry cannot be a valid SAC asset override and is
+    rejected.
   The self-address is known pre-`initialize` (`env.current_contract_address()` is a
   deployment-time constant), and `set_policy` can only run post-initialize, so the check
   always compares against the real deployed contract ID.

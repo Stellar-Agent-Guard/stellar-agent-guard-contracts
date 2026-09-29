@@ -17,7 +17,7 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule};
+use crate::types::{AssetCap, CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule};
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -173,6 +173,7 @@ impl Harness {
             protocols: soroban_sdk::Vec::new(&self.env),
             recipients: soroban_sdk::vec![&self.env, self.recv.clone()],
             recipient_window_caps: soroban_sdk::Vec::new(&self.env),
+            asset_caps: soroban_sdk::Vec::new(&self.env),
             allow_any_recipient: false,
             active_from: 0,
             active_until: 0,
@@ -1107,6 +1108,13 @@ fn policy_config_debug_snapshot() {
                 cap: 10_000,
             },
         ],
+        asset_caps: vec![
+            &env,
+            AssetCap {
+                asset: asset_a.clone(),
+                per_tx_cap: 500,
+            },
+        ],
         allow_any_recipient: false,
         active_from: 1_700_000_000,
         active_until: 1_800_000_000,
@@ -1124,6 +1132,7 @@ fn policy_config_debug_snapshot() {
         "protocols",
         "recipients",
         "recipient_window_caps",
+        "asset_caps",
         "allow_any_recipient",
         "active_from",
         "active_until",
@@ -1398,4 +1407,171 @@ fn detailed_check_reports_per_recipient_headroom() {
     assert_eq!(detail.result, crate::types::CheckResult::Allowed);
     assert_eq!(detail.remaining_window, Some(60)); // 100 cap - 40 already admitted
     assert_eq!(detail.effective_window_cap, Some(100));
+}
+
+#[test]
+fn per_asset_cap_override_wins_over_global() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 10,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Under the asset override: allowed.
+    h.transfer(&recv, 10);
+    // Above the asset override but below the global cap: must be blocked by
+    // the override (proves the override wins, not the global).
+    h.transfer_expect_blocked(&recv, 50);
+}
+
+#[test]
+fn per_asset_cap_falls_back_to_global_when_absent() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    // No asset_caps entry for h.asset: global per_tx_cap applies.
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    h.transfer(&recv, 100);
+    h.transfer_expect_blocked(&recv, 101);
+}
+
+#[test]
+fn per_asset_cap_zero_override_disables_cap_for_that_asset() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 0,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // per_tx_cap = 0 means "no cap" for this asset, overriding the global 100.
+    h.transfer(&recv, 1_000_000);
+}
+
+#[test]
+fn per_asset_cap_window_still_uses_global_window() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 1_000;
+    p.window_cap = 100;
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 50,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Per-tx override allows up to 50 per tx; window still caps total at 100.
+    h.transfer(&recv, 50);
+    h.transfer(&recv, 50);
+    h.transfer_expect_blocked(&recv, 1); // window full
+}
+
+#[test]
+fn invalid_negative_per_asset_cap_rejected() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: -1,
+        },
+    ];
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(res.is_err(), "negative per-asset cap must be rejected");
+}
+
+#[test]
+fn invalid_unknown_asset_override_rejected() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    // `other` is not in `assets`; an override for it must be rejected rather
+    // than silently ignored.
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.other.clone(),
+            per_tx_cap: 10,
+        },
+    ];
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(
+        res.is_err(),
+        "override for an asset not in `assets` must be rejected"
+    );
+}
+
+#[test]
+fn invalid_duplicate_per_asset_cap_rejected() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 10,
+        },
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 20,
+        },
+    ];
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(res.is_err(), "duplicate per-asset cap must be rejected");
+}
+
+#[test]
+fn detailed_check_reports_effective_per_asset_cap() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 25,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 10)
+    });
+    assert_eq!(detail.result, CheckResult::Allowed);
+    assert_eq!(detail.per_tx_cap, Some(100));
+    assert_eq!(detail.effective_per_tx_cap, Some(25));
 }

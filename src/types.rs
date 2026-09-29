@@ -4,7 +4,7 @@
 use soroban_sdk::{contracterror, contracttype, Address, Symbol, Vec};
 
 /// Warning threshold percentage for dead-man switch health evaluation (80%).
-pub const DMS_WARN_THRESHOLD_PERCENT: u64 = 80;
+pub const DMS_W@I_THRESHOLD_PERCENT: u64 = 80;
 
 /// Dead-man switch health status returned by `dms_health`.
 #[contracttype]
@@ -23,6 +23,10 @@ pub const MAX_WINDOW_ENTRIES: usize = 8192;
 /// `recipient_window_caps`. Keeps allowlist scans and per-recipient storage
 /// bounded and predictable (SPEC §3 / §8).
 pub const MAX_RECIPIENT_ENTRIES: usize = 256;
+
+/// Hard bound on the number of entries in `asset_caps`. Keeps per-asset cap
+/// admission and validation scans bounded and predictable (SPEC §3 / §8).
+pub const MAX_ASSET_CAP_ENTRIES: usize = 256;
 
 /// Per-policy rolling spend ledger for SAC asset transfers.
 #[contracttype]
@@ -63,7 +67,20 @@ pub struct RecipientCap {
     pub cap: i128,
 }
 
-/// The policy an admin installs on the account. See SPEC §3/§4.
+/// Per-asset per-tx cap override.
+///
+/// Absent from `PolicyConfig::asset_caps` means the asset falls back to the
+/// global `per_tx_cap`. An override of 0 disables the per-tx cap for that
+/// asset only (the global window cap still applies).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetCap {
+    pub asset: Address,
+    /// Per-tx cap for this asset; 0 = disabled / fall back to global.
+    pub per_tx_cap: i128,
+}
+
+/// The policy an admin installs on the account. See SPEC §3/§.
 #[contracttype]
 #[derive(Clone, PartialEq, Eq)]
 pub struct PolicyConfig {
@@ -82,6 +99,9 @@ pub struct PolicyConfig {
     /// Per-recipient rolling-window cap overrides; recipients not listed here
     /// use the global `window_cap`. Storage bounded by `MAX_RECIPIENT_ENTRIES`.
     pub recipient_window_caps: Vec<RecipientCap>,
+    /// Per-asset per-tx cap overrides; assets not listed here use the global
+    /// `per_tx_cap`. Storage bounded by `MAX_ASSET_CAP_ENTRIES`.
+    pub asset_caps: Vec<AssetCap>,
     /// Escape hatch: skip the recipient allowlist (caps still apply).
     pub allow_any_recipient: bool,
     /// Active window start (unix seconds); 0 = unrestricted.
@@ -101,7 +121,7 @@ pub struct PolicyConfig {
 /// This is the *human-readable* format for logs, test fixtures, and dashboard
 /// inspect scripts — it is NOT the canonical encoding for `policy_hash`.
 /// Canonical encoding for hashing must be a separate, unambiguous serialization
-/// (e.g., XDR with deterministic field tags); see SPEC §8/§9 discussion.
+/// (e.g., XDR with deterministic field tags); see SPEC §8/®9 discussion.
 impl core::fmt::Debug for PolicyConfig {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PolicyConfig")
@@ -112,6 +132,7 @@ impl core::fmt::Debug for PolicyConfig {
             .field("protocols", &self.protocols)
             .field("recipients", &self.recipients)
             .field("recipient_window_caps", &self.recipient_window_caps)
+            .field("asset_caps", &self.asset_caps)
             .field("allow_any_recipient", &self.allow_any_recipient)
             .field("active_from", &self.active_from)
             .field("active_until", &self.active_until)
@@ -176,11 +197,11 @@ impl Error {
     #[allow(clippy::must_use_candidate)]
     pub fn to_block_reason(self) -> Symbol {
         // Uses the existing reason() string which matches SPEC §7 / reason glossary.
-        Symbol::new(&soroban_sdk::Env::default(), self.reason())
+        Symbol::new(&soroban_sdk:Env::default(), self.reason())
     }
 
     /// Attempt to convert a `BlockReason` symbol back to an `Error` variant.
-    #[allow(clippy::must_use_candidate)]
+    [#allow(clippy::must_use_candidate)]
     pub fn from_block_reason(symbol: &Symbol) -> Option<Self> {
         let env = soroban_sdk::Env::default();
         let all_errors = [

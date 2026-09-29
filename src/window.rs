@@ -10,6 +10,12 @@
 //! The ledger now holds a global rolling window plus per-recipient rolling
 //! windows for recipients that carry a cap override in the active policy.
 //!
+//! Per-asset spend caps (SPEC §3.1/§6.2) are enforced by the engine against
+//! the *effective* per-tx cap for the asset being spent. Window accounting
+//! remains a single global rolling window: each asset's spend is admitted to
+//! the same window and compared against that asset's effective cap. Full
+//! per-asset windows are out of scope (see issue).
+//!
 //! Persistent `WindowState` TTL management belongs to the storage boundary in
 //! `lib.rs` (`persist_get`/`save_ledger`); this module transforms only the
 //! in-memory snapshot after storage has loaded it.
@@ -17,6 +23,7 @@
 use crate::types::{RecipientWindowState, SpendEntry, WindowState, MAX_WINDOW_ENTRIES};
 use soroban_sdk::{contracttype, Address, Env};
 
+/// Per-recipient rolling ledger used when a recipient carries a cap override.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecipientLedger {
@@ -26,6 +33,7 @@ pub struct RecipientLedger {
 }
 
 impl RecipientLedger {
+    /// Create an empty ledger for `recipient`.
     #[allow(clippy::must_use_candidate)]
     fn empty(env: &Env, recipient: Address) -> Self {
         Self {
@@ -36,6 +44,7 @@ impl RecipientLedger {
     }
 }
 
+/// In-memory rolling-window snapshot: global window plus per-recipient windows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ledger {
     pub total: i128,
@@ -47,6 +56,7 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    /// Create an empty ledger with no entries and no per-recipient windows.
     #[allow(clippy::must_use_candidate)]
     pub fn empty(env: &Env) -> Self {
         Self {
@@ -101,6 +111,7 @@ impl Ledger {
         }
     }
 
+    /// Number of entries in the global window.
     #[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
     pub fn len(&self) -> u32 {
         self.entries.len()
@@ -125,6 +136,7 @@ impl Ledger {
     }
 
     /// Record a spend against the global window at `now`.
+    /// Record a spend against the global window at `now`.
     pub fn admit(&mut self, now: u64, amount: i128) {
         admit_to_ledger(&mut self.total, &mut self.entries, now, amount);
     }
@@ -143,6 +155,7 @@ impl Ledger {
         0
     }
 
+    /// Record a spend for `recipient` against that recipient's per-recipient
     /// Record a spend for `recipient` against that recipient's per-recipient
     /// window. If this is the first spend for the recipient, a fresh ledger is
     /// created. Callers must ensure the recipient is meant to be tracked (i.e.,
@@ -181,12 +194,14 @@ fn ledger_from_entries(env: &Env, mut entries: soroban_sdk::Vec<SpendEntry>) -> 
     }
 }
 
+/// Internal single-window accumulator used while rebuilding totals.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SingleLedger {
     total: i128,
     entries: soroban_sdk::Vec<SpendEntry>,
 }
 
+/// Drop fully-expired entries from a single window and update its total.
 fn prune_entries(
     total: &mut i128,
     entries: &mut soroban_sdk::Vec<SpendEntry>,
@@ -206,6 +221,7 @@ fn prune_entries(
     }
 }
 
+/// Admit `amount` into a single window at `now`, coalescing same-second spends.
 fn admit_to_ledger(
     total: &mut i128,
     entries: &mut soroban_sdk::Vec<SpendEntry>,
@@ -246,11 +262,13 @@ fn admit_to_ledger(
     }
 }
 
+/// Unit tests for the rolling-window ledger.
 #[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::{vec, Address, Env};
 
+    /// Build a `SingleLedger` from a slice of `(ts, amount)` pairs.
     fn led(env: &Env, entries: &[(u64, i128)]) -> SingleLedger {
         let mut v: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(env);
         for (ts, amount) in entries {
@@ -262,6 +280,7 @@ mod tests {
         ledger_from_entries(env, v)
     }
 
+    /// Deterministic test address derived from a single byte.
     fn addr(env: &Env, n: u8) -> Address {
         use soroban_sdk::xdr::{ContractId, Hash, ScAddress};
         use soroban_sdk::TryFromVal;
@@ -269,6 +288,7 @@ mod tests {
         Address::try_from_val(env, &sc).unwrap()
     }
 
+    /// Pruning drops only entries whose window has fully elapsed.
     #[test]
     fn prune_drops_only_expired() {
         let env = Env::default();
@@ -279,6 +299,7 @@ mod tests {
         assert_eq!(l.entries.get(0).unwrap().ts, 200);
     }
 
+    /// Same-second admissions coalesce into a single entry.
     #[test]
     fn admit_coalesces_same_second() {
         let env = Env::default();
@@ -293,6 +314,7 @@ mod tests {
         assert_eq!(total, 12);
     }
 
+    /// The window is genuinely rolling, not bucket-aligned.
     #[test]
     fn window_is_genuinely_rolling() {
         let env = Env::default();
@@ -306,6 +328,7 @@ mod tests {
         assert_eq!(total, 50);
     }
 
+    /// Entry at `ts + window_secs == now` is exactly expired.
     #[test]
     fn exact_boundary_semantics() {
         let env = Env::default();
@@ -316,6 +339,7 @@ mod tests {
         assert_eq!(total, 0);
     }
 
+    /// Regression: low-timestamp entries must not be wrongly expired.
     #[test]
     fn prune_keeps_recent_entries_at_low_timestamps() {
         // Regression: `now.saturating_sub(window_secs)` clips to 0 at low
@@ -330,6 +354,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
     }
 
+    /// Backstop merge is conservative (over-counts) and bounded in size.
     #[test]
     fn backstop_merge_is_conservative_and_bounded() {
         let env = Env::default();
@@ -343,6 +368,7 @@ mod tests {
         assert_eq!(total, (MAX_WINDOW_ENTRIES + 10) as i128);
     }
 
+    /// Rebuilding from entries recomputes the total from scratch.
     #[test]
     fn from_entries_recomputes_total() {
         let env = Env::default();
@@ -354,6 +380,7 @@ mod tests {
         assert_eq!(ledger_from_entries(&env, v).total, 15);
     }
 
+    /// Ledger round-trips through persisted `WindowState`.
     #[test]
     fn ledger_round_trips_through_state() {
         let env = Env::default();
@@ -372,6 +399,7 @@ mod tests {
         assert_eq!(restored.recipients.len(), 2);
     }
 
+    /// Per-recipient ledgers prune in lockstep with the global window.
     #[test]
     fn recipient_ledger_prunes_with_global() {
         let env = Env::default();
@@ -387,6 +415,7 @@ mod tests {
         assert_eq!(ledger.recipient_total(&r), 5);
     }
 
+    /// Per-recipient admissions coalesce same-second spends.
     #[test]
     fn recipient_admit_coalesces_same_second() {
         let env = Env::default();

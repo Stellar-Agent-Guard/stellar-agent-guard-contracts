@@ -152,6 +152,7 @@ starts the dead-man-switch clock at install time (a fresh policy gets full grace
 | Field | Type | Meaning |
 |---|---|---|
 | `per_tx_cap` | `i128` | per asset-transfer call cap; `0` = disabled |
+| `per_asset_caps` | `Vec<AssetCap>` | optional per-asset `per_tx_cap` overrides (asset + cap); unlisted assets fall back to the global `per_tx_cap` |
 | `window_secs` | `u64` | rolling window width in seconds (default 86_400) |
 | `window_cap` | `i128` | rolling cap within `window_secs`; `0` = disabled |
 | `assets` | `Vec<Address>` | SAC token contracts whose transfers get parsed and enforced |
@@ -183,6 +184,15 @@ assets/recipients/protocol contracts, duplicate recipients in
 `recipient_window_caps`, more than 256 recipients or per-recipient cap entries,
 empty per-protocol fn lists, or the self-address in
 `assets`/`protocols`/`recipients` all fail with `InvalidConfig`.
+
+Per-asset caps are additive: an absent `per_asset_caps` entry (or an empty
+vector) leaves the global `per_tx_cap` in force for every asset, so existing
+policies encode byte-identically. A `per_asset_caps` entry whose asset is not
+listed in `assets` is rejected with `InvalidConfig` rather than silently
+ignored, and every per-asset cap must be `>= 0`. Window accounting stays a
+single rolling window: an admitted transfer is compared against the asset's
+*effective* per-tx cap (override if present, else the global `per_tx_cap`),
+and the shared `window_cap` still bounds total spend across assets.
 
 **Not sure where to start?** Copy-paste presets for common operator personas —
 day-trader agent, payments bot, watch-only + heartbeat, max security — each with
@@ -599,6 +609,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 |---|---|
 | Custom-account `__check_auth` enforcement | ✅ |
 | Per-transaction spend cap | ✅ |
+| Per-asset per-transaction spend caps (override global `per_tx_cap`) | ✅ |
 | Rolling window spend cap | ✅ |
 | Recipient allowlist (SAC transfers) | ✅ |
 | Protocol/function allowlist (any call) | ✅ |
