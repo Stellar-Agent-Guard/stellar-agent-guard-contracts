@@ -271,6 +271,29 @@ For comparison, an **allowed** transfer with window pruning costs ~14,800 instru
   account; a subsequently-heartbeating agent keeps it alive from there. Admin freeze and
   heartbeat-expiry are separate conditions; `unfreeze` clears the former, rule #2 keeps
   evaluating the latter.
+- **Recorded decision (dual semantics kept, event enriched).** `unfreeze` performs two distinct
+  jobs in one call — the admin brake release and the liveness attestation — and this is
+  intentional: when the DMS grace had already elapsed, an operator unfreezing an admin-frozen
+  account silently re-arms the liveness clock on the admin's authority. Splitting the call into
+  `unfreeze` plus an explicit heartbeat-equivalent was considered and rejected: it changes the
+  deployed ABI, complicates the reversal runbook (a two-call sequence risks the operator issuing
+  only the brake release and leaving the account DMS-frozen — the worst possible post-reversal
+  state), and buys no additional safety since the semantics below are already auditable.
+  Rationale: deployed ABI stability matters more than purity, so the semantics stay and the
+  behavior is made louder:
+  - **Event:** `event_unfrozen` data gains `rearmed_dms: bool` — `true` when the call changed
+    `LastHeartbeat` (the DMS clock was re-armed; the typical DMS-expired reversal), `false` when
+    `LastHeartbeat` already equaled `now` (DMS fresh; only the brake was released). Telemetry
+    (SDK/dashboard) can therefore surface exactly when an admin action extended the grace window.
+  - **Docs:** the README freeze/unfreeze section and
+    `docs/functions/freeze-unfreeze.md` state the re-arm behavior explicitly, so an operator
+    cannot be surprised by it.
+  - **Tests:** both paths are asserted — `dead_man_switch_freeze_and_admin_reversal` covers the
+    DMS-expired unfreeze (`rearmed_dms: true`) and
+    `unfreeze_while_dms_fresh_emits_rearmed_dms_false` covers the DMS-fresh unfreeze
+    (`rearmed_dms: false`).
+  - **No API change:** `unfreeze`'s signature, storage writes, and authorization are unchanged;
+    this is purely additive event data (see §9).
 
 ---
 
@@ -490,7 +513,8 @@ filtering by the SDK listener.
 | `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | (none) | every `__check_auth` / `check` decision |
 | `heartbeat` | (none) | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
-| `frozen` / `unfrozen` | (none) | `by: Address` | admin freeze / unfreeze |
+| `frozen` | (none) | `by: Address` | admin freeze |
+| `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
 | `policy_set` / `policy_revoked` | (none) | `by: Address` | admin policy changes |
 | `agent_rotated` | (none) | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
 

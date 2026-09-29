@@ -580,10 +580,69 @@ fn dead_man_switch_freeze_and_admin_reversal() {
     h.transfer_expect_blocked(&recv, 5);
     h.heartbeat_expect_blocked(); // silence cannot self-revive (SPEC §5)
 
-    // Admin unfreeze is the reversal path (SPEC §5).
+    // Admin unfreeze is the reversal path (SPEC §5). The DMS grace had
+    // elapsed, so the admin's signature re-arms the liveness clock — the
+    // event must carry `rearmed_dms: true` to make that side effect
+    // auditable (SPEC §5 recorded decision).
     h.unfreeze(); // sets LastHeartbeat = now (1_000_100)
+    assert_unfrozen_event_rearmed(&h.env, true);
     h.heartbeat(); // a subsequently-heartbeating agent keeps it alive
     h.transfer(&recv, 5); // revived
+}
+
+/// Reads the most recent `event_unfrozen` data map and asserts the value of
+/// its `rearmed_dms` field (SPEC §5 / §9).
+fn assert_unfrozen_event_rearmed(env: &Env, expected: bool) {
+    let want = symbol_val("event_unfrozen");
+    let all = env.events().all();
+    let events = all.events();
+    let event = events
+        .iter()
+        .rfind(|e| {
+            matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&want))
+        })
+        .expect("event_unfrozen not found");
+    let xdr::ContractEventBody::V0(v0) = &event.body;
+    let ScVal::Map(Some(map)) = &v0.data else {
+        panic!("event_unfrozen data must be a Map");
+    };
+    let entry = map
+        .0
+        .iter()
+        .find(|entry| entry.key == symbol_val("rearmed_dms"))
+        .expect("event_unfrozen must carry rearmed_dms");
+    let rearmed = match &entry.val {
+        ScVal::Bool(b) => *b,
+        _ => panic!("event_unfrozen rearmed_dms must be a Bool"),
+    };
+    assert_eq!(
+        rearmed, expected,
+        "event_unfrozen rearmed_dms mismatch (LastHeartbeat side effect)"
+    );
+}
+
+/// The admin brake cycle while the agent is live: a fresh heartbeat, then
+/// `freeze` + `unfreeze` in the same ledger second. `LastHeartbeat` already
+/// equals `now` at unfreeze time, so the event must carry `rearmed_dms:
+/// false` — the flag distinguishes the two jobs `unfreeze` performs (SPEC §5).
+#[test]
+fn unfreeze_while_dms_fresh_emits_rearmed_dms_false() {
+    let mut h = Harness::new();
+    let mut p = h.base_policy();
+    p.dms_grace_secs = 60;
+    h.set_time(1_000_000);
+    h.install_policy(&p); // LastHeartbeat = 1_000_000
+    h.set_time(1_000_010);
+    h.heartbeat(); // agent live: LastHeartbeat = 1_000_010, DMS fresh
+
+    // Admin brake cycle in the same second as the heartbeat: unfreeze writes
+    // `LastHeartbeat = now` but the value is already `now` — no re-arm.
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    h.env.mock_all_auths();
+    client.freeze();
+    h.unfreeze();
+    assert_unfrozen_event_rearmed(&h.env, false);
+    assert_eq!(h.status().last_heartbeat, 1_000_010);
 }
 
 #[test]

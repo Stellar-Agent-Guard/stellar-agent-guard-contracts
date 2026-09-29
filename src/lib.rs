@@ -63,10 +63,16 @@ struct EventFrozen {
     by: Address,
 }
 
+/// Admin unfreeze: data `by` (the admin address that acted) plus
+/// `rearmed_dms: bool` — whether the call also re-armed the dead-man-switch
+/// clock by changing `LastHeartbeat` (SPEC §5: the admin's signature is the
+/// liveness attestation, so an unfreeze of a DMS-expired account silently
+/// restarts the grace window; the flag makes that side effect auditable).
 #[contractevent]
 #[derive(Clone)]
 struct EventUnfrozen {
     by: Address,
+    rearmed_dms: bool,
 }
 
 #[contractevent]
@@ -220,8 +226,12 @@ fn emit_initialized(env: &Env, by: &Address) {
 fn emit_frozen(env: &Env, by: &Address) {
     EventFrozen { by: by.clone() }.publish(env);
 }
-fn emit_unfrozen(env: &Env, by: &Address) {
-    EventUnfrozen { by: by.clone() }.publish(env);
+fn emit_unfrozen(env: &Env, by: &Address, rearmed_dms: bool) {
+    EventUnfrozen {
+        by: by.clone(),
+        rearmed_dms,
+    }
+    .publish(env);
 }
 fn emit_policy_set(env: &Env, by: &Address) {
     EventPolicySet { by: by.clone() }.publish(env);
@@ -358,13 +368,20 @@ impl PolicyEngine {
     }
 
     /// Admin liveness attestation: clears the admin freeze and restarts the
-    /// heartbeat clock.
+    /// heartbeat clock. One call, two jobs (SPEC §5 recorded decision): the
+    /// brake release and the liveness attestation are combined on purpose —
+    /// when the DMS grace was already elapsed, this re-arms the liveness clock
+    /// on the admin's authority, and the emitted event carries
+    /// `rearmed_dms: bool` so telemetry can surface exactly that side effect
+    /// (`true` = `LastHeartbeat` changed, `false` = it was already `now`).
     pub fn unfreeze(env: Env) {
         let admin = Self::admin_or_panic(&env);
         persist_set(&env, &DataKey::AdminFrozen, &false);
         let now = env.ledger().timestamp();
+        let last = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let rearmed_dms = last != now;
         persist_set(&env, &DataKey::LastHeartbeat, &now);
-        emit_unfrozen(&env, &admin);
+        emit_unfrozen(&env, &admin, rearmed_dms);
     }
 
     // ── Read / advisory (no auth — safe reads only, nothing confidential) ─
