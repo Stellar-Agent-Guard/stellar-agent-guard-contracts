@@ -13,7 +13,7 @@ We welcome contributions! Here's how to get started.
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
-# Run tests (30 unit + integration tests, no network needed)
+# Run tests (31 unit + integration tests, no network needed)
 cargo test
 
 # Lint (clippy all + pedantic are denied via [lints.clippy])
@@ -48,9 +48,15 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    authorization path must be deliberate `panic_with_error!` calls that surface
    as stable `Error` reasons (SPEC §7), never accidental traps.
 2. **Every policy change must update SPEC.md and the tests together** — the
-   decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2 /
-   README) must stay word-for-word consistent with the code; that consistency is
-   a review requirement, not a nicety.
+   decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2)
+   must stay word-for-word consistent with the code; that consistency is
+   a review requirement, not a nicety. Scope *wording* itself is single-sourced:
+   edit the canonical paragraph in SPEC §2 only — the README and
+   `docs/enforcement-scope.md` carry short excerpts plus a
+   `full statement: SPEC §2` link that auto-follows (re-sync an excerpt only if
+   the quoted sentence itself changes). Copies in sibling repositories
+   (`stellar-agent-guard-sdk`, `stellar-agent-guard-dashboard`) are out of scope
+   here; they are tracked in their own issue trackers.
 3. **`clippy::all` and `clippy::pedantic` clean** — enforced in CI with
    `-D warnings`.
 4. **`cargo fmt` clean** — enforced in CI.
@@ -102,7 +108,12 @@ src/
   types.rs           # Policy model, storage keys, errors, parsed-call enum
   integration_tests.rs # Host-routed tests incl. real Ed25519 auth signatures
 examples/
-  agent_pubkey.rs    # Derive raw Ed25519 pubkey from a Stellar secret key
+  agent_pubkey.rs    # Derive raw Ed25519 pubkey (hex) from a Stellar secret key,
+                     #   off-chain only: deterministic SEP-0023/RFC 8032
+                     #   derivation, but it does NOT prove the agent runtime
+                     #   signs with that key (see the file's trust-boundary docs)
+  agent-loop.md      # Narrative example of the 24/7 agent runtime loop
+                     #   (heartbeat, pre-flight, blocked-reason handling, DMS)
 tools/
   agent-tx/          # Sign+submit helper for the custom-account address
 tests/fixtures/      # Real testnet evidence (tx hashes, contract IDs, events)

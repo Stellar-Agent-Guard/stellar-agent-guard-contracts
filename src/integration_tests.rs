@@ -17,13 +17,13 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{CheckResult, Error as GuardError, PolicyConfig, ProtocolRule};
+use crate::types::{CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule};
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use soroban_sdk::auth::{Context, CustomAccountInterface};
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::testutils::{storage::Persistent as _, Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{
     self, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs, Limited, Limits,
     ScBytes, ScSymbol, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
@@ -33,8 +33,6 @@ use soroban_sdk::{
     contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val,
 };
 use std::format;
-
-const SIG_EXPIRATION_LEDGER: u32 = 6_000_000;
 
 /// A `ScVal::Symbol` built from a plain string (event names / map keys).
 fn symbol_val(s: &str) -> ScVal {
@@ -120,7 +118,19 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_env(Env::default())
+    }
+
+    fn with_short_persistent_ttl() -> Self {
         let env = Env::default();
+        env.ledger().set_min_persistent_entry_ttl(2);
+        env.ledger().set_max_entry_ttl(10);
+        // Exercise the host's max-TTL semantics away from ledger sequence 0.
+        env.ledger().set_sequence_number(1_000);
+        Self::with_env(env)
+    }
+
+    fn with_env(env: Env) -> Self {
         let agent = SigningKey::from_bytes(&[7u8; 32]);
         let admin = env.register(MockAdmin, ());
         let asset = env.register(MockAsset, ());
@@ -162,6 +172,8 @@ impl Harness {
             assets: soroban_sdk::vec![&self.env, self.asset.clone()],
             protocols: soroban_sdk::Vec::new(&self.env),
             recipients: soroban_sdk::vec![&self.env, self.recv.clone()],
+            recipient_window_caps: soroban_sdk::Vec::new(&self.env),
+            blocked_recipients: soroban_sdk::Vec::new(&self.env),
             allow_any_recipient: false,
             active_from: 0,
             active_until: 0,
@@ -227,11 +239,18 @@ impl Harness {
         self.invocation(&self.guard, "unfreeze", std::vec![])
     }
 
+    fn signature_expiration_ledger(&self) -> u32 {
+        self.env
+            .ledger()
+            .sequence()
+            .saturating_add(self.env.storage().max_ttl())
+    }
+
     fn payload(&self, nonce: i64, invocation: &SorobanAuthorizedInvocation) -> [u8; 32] {
         let preimage = HashIdPreimage::SorobanAuthorization(HashIdPreimageSorobanAuthorization {
             network_id: xdr::Hash(self.env.ledger().network_id().to_array()),
             nonce,
-            signature_expiration_ledger: SIG_EXPIRATION_LEDGER,
+            signature_expiration_ledger: self.signature_expiration_ledger(),
             invocation: invocation.clone(),
         });
         let mut buf: std::vec::Vec<u8> = std::vec::Vec::new();
@@ -248,11 +267,12 @@ impl Harness {
         self.guard_nonce += 1;
         let payload = self.payload(nonce, root);
         let sig = self.agent.sign(&payload).to_bytes();
+        let signature_expiration_ledger = self.signature_expiration_ledger();
         SorobanAuthorizationEntry {
             credentials: SorobanCredentials::Address(SorobanAddressCredentials {
                 address: xdr::ScAddress::from(&self.guard),
                 nonce,
-                signature_expiration_ledger: SIG_EXPIRATION_LEDGER,
+                signature_expiration_ledger,
                 signature: ScVal::Bytes(ScBytes::try_from(sig.to_vec()).unwrap()),
             }),
             root_invocation: root.clone(),
@@ -263,11 +283,12 @@ impl Harness {
     fn admin_entry(&mut self, root: &SorobanAuthorizedInvocation) -> SorobanAuthorizationEntry {
         let nonce = self.admin_nonce;
         self.admin_nonce += 1;
+        let signature_expiration_ledger = self.signature_expiration_ledger();
         SorobanAuthorizationEntry {
             credentials: SorobanCredentials::Address(SorobanAddressCredentials {
                 address: xdr::ScAddress::from(&self.admin),
                 nonce,
-                signature_expiration_ledger: SIG_EXPIRATION_LEDGER,
+                signature_expiration_ledger,
                 signature: ScVal::Void,
             }),
             root_invocation: root.clone(),
@@ -390,6 +411,75 @@ fn lifecycle_initialize_once_then_status() {
     assert!(!st.admin_frozen);
     assert!(!st.heartbeat_expired);
     assert_eq!(st.now, 0);
+}
+
+#[test]
+fn persistent_read_refreshes_ttl_below_half_life() {
+    let h = Harness::with_short_persistent_ttl();
+    h.set_time(1_000);
+    h.install_policy(&h.base_policy());
+
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let initial_sequence = h.env.ledger().sequence();
+    h.env.ledger().set_sequence_number(initial_sequence + 6);
+
+    assert!(client.policy().is_some());
+    let policy_ttl = h.env.as_contract(&h.guard, || {
+        h.env.storage().persistent().get_ttl(&DataKey::Policy)
+    });
+    assert_eq!(
+        policy_ttl, 10,
+        "a successful read should restore the TTL to max"
+    );
+}
+
+#[test]
+fn archived_policy_window_and_heartbeat_restore_without_resetting_limits() {
+    let mut h = Harness::with_short_persistent_ttl();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    policy.dms_grace_secs = 60;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+    h.set_time(1_010);
+    h.transfer(&recv, 80);
+
+    // Let Policy, Window, LastHeartbeat, and AdminFrozen all pass their
+    // deliberately short test TTL. Protocol 23+ restores archived persistent
+    // entries from the invocation's restore footprint before contract code.
+    let expired_sequence = h.env.ledger().sequence() + 11;
+    h.env.ledger().set_sequence_number(expired_sequence);
+
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(client.policy(), Some(policy));
+
+    // The check does not change spend accounting but succeeds as an invocation,
+    // so it commits TTL refreshes. The 80 units in Window must still block 30.
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 30)
+    });
+    assert_eq!(
+        detail.result,
+        CheckResult::Blocked(Symbol::new(&h.env, "window_cap_exceeded"))
+    );
+
+    let status = client.status();
+    assert!(!status.admin_frozen);
+    assert_eq!(status.last_heartbeat, 1_000);
+    h.set_time(1_100);
+    assert!(client.status().heartbeat_expired);
+
+    let ttls = h.env.as_contract(&h.guard, || {
+        let persistent = h.env.storage().persistent();
+        (
+            persistent.get_ttl(&DataKey::Policy),
+            persistent.get_ttl(&DataKey::Window),
+            persistent.get_ttl(&DataKey::LastHeartbeat),
+            persistent.get_ttl(&DataKey::AdminFrozen),
+        )
+    });
+    assert_eq!(ttls, (10, 10, 10, 10));
 }
 
 #[test]
@@ -546,6 +636,44 @@ fn recipient_allowlist_blocked() {
 }
 
 #[test]
+fn blocked_recipient_wins_over_escape_hatch() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    let mut p = h.base_policy();
+    // With the escape hatch on, any recipient would be allowed — except the
+    // explicit denylist. `other` is neither allowed nor in the blocklist by
+    // default, so it would pass under `allow_any_recipient`.
+    p.allow_any_recipient = true;
+    p.blocked_recipients = soroban_sdk::vec![&h.env, other.clone()];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Denylist beats the escape hatch.
+    h.transfer_expect_blocked(&other, 5);
+    // Non-blocked recipients still pass through the escape hatch.
+    h.transfer(&recv, 5);
+}
+
+#[test]
+fn blocked_recipients_contradiction_rejected_at_set_policy() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, h.recv.clone(), h.other.clone()];
+    p.blocked_recipients = soroban_sdk::vec![&h.env, h.other.clone()];
+
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.set_policy(&p);
+    }));
+    assert!(
+        res.is_err(),
+        "contradictory recipient config must be rejected"
+    );
+}
+
+#[test]
 fn allow_any_recipient_escape_hatch_still_capped() {
     let mut h = Harness::new();
     let other = h.other.clone();
@@ -580,10 +708,69 @@ fn dead_man_switch_freeze_and_admin_reversal() {
     h.transfer_expect_blocked(&recv, 5);
     h.heartbeat_expect_blocked(); // silence cannot self-revive (SPEC §5)
 
-    // Admin unfreeze is the reversal path (SPEC §5).
+    // Admin unfreeze is the reversal path (SPEC §5). The DMS grace had
+    // elapsed, so the admin's signature re-arms the liveness clock — the
+    // event must carry `rearmed_dms: true` to make that side effect
+    // auditable (SPEC §5 recorded decision).
     h.unfreeze(); // sets LastHeartbeat = now (1_000_100)
+    assert_unfrozen_event_rearmed(&h.env, true);
     h.heartbeat(); // a subsequently-heartbeating agent keeps it alive
     h.transfer(&recv, 5); // revived
+}
+
+/// Reads the most recent `event_unfrozen` data map and asserts the value of
+/// its `rearmed_dms` field (SPEC §5 / §9).
+fn assert_unfrozen_event_rearmed(env: &Env, expected: bool) {
+    let want = symbol_val("event_unfrozen");
+    let all = env.events().all();
+    let events = all.events();
+    let event = events
+        .iter()
+        .rfind(|e| {
+            matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&want))
+        })
+        .expect("event_unfrozen not found");
+    let xdr::ContractEventBody::V0(v0) = &event.body;
+    let ScVal::Map(Some(map)) = &v0.data else {
+        panic!("event_unfrozen data must be a Map");
+    };
+    let entry = map
+        .0
+        .iter()
+        .find(|entry| entry.key == symbol_val("rearmed_dms"))
+        .expect("event_unfrozen must carry rearmed_dms");
+    let rearmed = match &entry.val {
+        ScVal::Bool(b) => *b,
+        _ => panic!("event_unfrozen rearmed_dms must be a Bool"),
+    };
+    assert_eq!(
+        rearmed, expected,
+        "event_unfrozen rearmed_dms mismatch (LastHeartbeat side effect)"
+    );
+}
+
+/// The admin brake cycle while the agent is live: a fresh heartbeat, then
+/// `freeze` + `unfreeze` in the same ledger second. `LastHeartbeat` already
+/// equals `now` at unfreeze time, so the event must carry `rearmed_dms:
+/// false` — the flag distinguishes the two jobs `unfreeze` performs (SPEC §5).
+#[test]
+fn unfreeze_while_dms_fresh_emits_rearmed_dms_false() {
+    let mut h = Harness::new();
+    let mut p = h.base_policy();
+    p.dms_grace_secs = 60;
+    h.set_time(1_000_000);
+    h.install_policy(&p); // LastHeartbeat = 1_000_000
+    h.set_time(1_000_010);
+    h.heartbeat(); // agent live: LastHeartbeat = 1_000_010, DMS fresh
+
+    // Admin brake cycle in the same second as the heartbeat: unfreeze writes
+    // `LastHeartbeat = now` but the value is already `now` — no re-arm.
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    h.env.mock_all_auths();
+    client.freeze();
+    h.unfreeze();
+    assert_unfrozen_event_rearmed(&h.env, false);
+    assert_eq!(h.status().last_heartbeat, 1_000_010);
 }
 
 #[test]
@@ -627,11 +814,12 @@ fn wrong_signature_is_rejected_by_host_crypto() {
     h.guard_nonce += 1;
     let payload = h.payload(nonce, &root);
     let sig = wrong.sign(&payload).to_bytes();
+    let signature_expiration_ledger = h.signature_expiration_ledger();
     let entry = SorobanAuthorizationEntry {
         credentials: SorobanCredentials::Address(SorobanAddressCredentials {
             address: xdr::ScAddress::from(&h.guard),
             nonce,
-            signature_expiration_ledger: SIG_EXPIRATION_LEDGER,
+            signature_expiration_ledger,
             signature: ScVal::Bytes(ScBytes::try_from(sig.to_vec()).unwrap()),
         }),
         root_invocation: root,
@@ -687,11 +875,12 @@ fn rotated_agent_key_binds() {
     h.guard_nonce += 1;
     let old_payload = h.payload(old_nonce, &old_root);
     let old_sig = h.agent.sign(&old_payload).to_bytes();
+    let signature_expiration_ledger = h.signature_expiration_ledger();
     let old_entry = SorobanAuthorizationEntry {
         credentials: SorobanCredentials::Address(SorobanAddressCredentials {
             address: xdr::ScAddress::from(&h.guard),
             nonce: old_nonce,
-            signature_expiration_ledger: SIG_EXPIRATION_LEDGER,
+            signature_expiration_ledger,
             signature: ScVal::Bytes(ScBytes::try_from(old_sig.to_vec()).unwrap()),
         }),
         root_invocation: old_root,
@@ -767,6 +956,68 @@ fn revoke_policy_is_instant_default_deny() {
     h.transfer_expect_blocked(&recv, 5);
 }
 
+/// SPEC §8: the contract's own address is rejected in **all three** policy
+/// lists. An `assets`/`protocols` self-entry is a nonsensical allowlist (the
+/// account's self-calls are governed by the fixed §6.1 rule, not policy), and
+/// a `recipients` self-entry is a pay-itself no-op loop that almost certainly
+/// signals a mis-pasted address — rejected as `InvalidConfig` (fail-closed)
+/// rather than admitted as a meaningless allowlist entry.
+#[test]
+fn self_address_rejected_in_every_list() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // Every case must fail `set_policy` with `InvalidConfig` (fail-closed:
+    // the previously installed policy, if any, stays unchanged).
+    //
+    // `set_policy` returns `()` and signals rejection by panicking through
+    // `panic_with_error!`, so the SDK generates no `try_set_policy` client
+    // method to assert on; `catch_unwind` + `AssertUnwindSafe` is this crate's
+    // established way to assert a rejected call (same as
+    // `transfer_expect_blocked` / `heartbeat_expect_blocked`). Asserting only
+    // "it panicked" would also pass for an unrelated panic, so each case
+    // additionally asserts the fail-closed invariant: the rejected policy was
+    // never written to storage.
+    let expect_invalid = |cfg: &PolicyConfig, list: &str| {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_policy(cfg);
+        }));
+        assert!(
+            res.is_err(),
+            "self-address in `{list}` must fail set_policy with InvalidConfig"
+        );
+        assert!(
+            client.policy().is_none(),
+            "self-address in `{list}` must leave the policy uninstalled (fail-closed)"
+        );
+    };
+
+    // assets: the guard itself listed as an SAC token.
+    let mut p = h.base_policy();
+    p.assets = soroban_sdk::vec![&h.env, h.guard.clone()];
+    expect_invalid(&p, "assets");
+
+    // protocols: the guard itself listed as an allowlisted protocol contract.
+    let mut p = h.base_policy();
+    let rule = ProtocolRule {
+        contract: h.guard.clone(),
+        fns: None,
+    };
+    p.protocols = soroban_sdk::vec![&h.env, rule];
+    expect_invalid(&p, "protocols");
+
+    // recipients: the guard transferring to itself — a no-op loop.
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, h.guard.clone()];
+    expect_invalid(&p, "recipients");
+
+    // Sanity: the same env still installs a self-free policy cleanly, proving
+    // the rejections above came from the self-address rule and not from an
+    // unrelated validation defect in the harness.
+    client.set_policy(&h.base_policy());
+    assert!(client.policy().is_some());
+}
+
 #[test]
 fn error_and_block_reason_round_trip() {
     let all_errors = [
@@ -782,6 +1033,7 @@ fn error_and_block_reason_round_trip() {
         GuardError::OutsideActiveWindow,
         GuardError::AssetNotAllowed,
         GuardError::RecipientNotAllowed,
+        GuardError::RecipientBlocked,
         GuardError::PerTxCapExceeded,
         GuardError::WindowCapExceeded,
         GuardError::ProtocolNotAllowed,
@@ -887,7 +1139,15 @@ fn policy_config_debug_snapshot() {
                 fns: None,
             },
         ],
-        recipients: vec![&env, recip_a, recip_b],
+        recipients: vec![&env, recip_a.clone(), recip_b],
+        recipient_window_caps: vec![
+            &env,
+            crate::types::RecipientCap {
+                recipient: recip_a,
+                cap: 10_000,
+            },
+        ],
+        blocked_recipients: vec![&env],
         allow_any_recipient: false,
         active_from: 1_700_000_000,
         active_until: 1_800_000_000,
@@ -904,6 +1164,8 @@ fn policy_config_debug_snapshot() {
         "assets",
         "protocols",
         "recipients",
+        "recipient_window_caps",
+        "blocked_recipients",
         "allow_any_recipient",
         "active_from",
         "active_until",
@@ -922,4 +1184,260 @@ fn policy_config_debug_snapshot() {
         );
         last_pos = pos;
     }
+}
+
+#[test]
+fn batch_events_emit_in_order_with_context_index() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    p.window_cap = 0;
+    p.allow_any_recipient = true;
+    h.install_policy(&p);
+
+    let to = Address::generate(&h.env);
+
+    let ctx1 = soroban_sdk::auth::Context::Contract(soroban_sdk::auth::ContractContext {
+        contract: h.asset.clone(),
+        fn_name: Symbol::new(&h.env, "transfer"),
+        args: soroban_sdk::vec![
+            &h.env,
+            h.guard.into_val(&h.env),
+            to.into_val(&h.env),
+            50i128.into_val(&h.env),
+        ],
+    });
+
+    let ctx2 = soroban_sdk::auth::Context::Contract(soroban_sdk::auth::ContractContext {
+        contract: h.asset.clone(),
+        fn_name: Symbol::new(&h.env, "transfer"),
+        args: soroban_sdk::vec![
+            &h.env,
+            h.guard.into_val(&h.env),
+            to.into_val(&h.env),
+            200i128.into_val(&h.env),
+        ],
+    });
+
+    let ctx3 = soroban_sdk::auth::Context::Contract(soroban_sdk::auth::ContractContext {
+        contract: h.asset.clone(),
+        fn_name: Symbol::new(&h.env, "transfer"),
+        args: soroban_sdk::vec![
+            &h.env,
+            h.guard.into_val(&h.env),
+            to.into_val(&h.env),
+            10i128.into_val(&h.env),
+        ],
+    });
+
+    let contexts = soroban_sdk::vec![&h.env, ctx1, ctx2, ctx3];
+
+    let payload_bytes = [0u8; 32];
+    let payload = soroban_sdk::BytesN::from_array(&h.env, &payload_bytes);
+    let sig = h.agent.sign(&payload_bytes).to_bytes();
+    let signatures = soroban_sdk::BytesN::from_array(&h.env, &sig);
+
+    let res = h.env.as_contract(&h.guard, || {
+        <PolicyEngine as soroban_sdk::auth::CustomAccountInterface>::__check_auth(
+            h.env.clone(),
+            unsafe {
+                std::mem::transmute::<soroban_sdk::BytesN<32>, soroban_sdk::crypto::Hash<32>>(
+                    payload.clone(),
+                )
+            },
+            signatures.clone(),
+            contexts.clone(),
+        )
+    });
+    assert!(res.is_err());
+
+    // Verify events
+    let want_allowed = soroban_sdk::xdr::ScVal::Symbol(
+        soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("allowed")).unwrap(),
+    );
+    let want_blocked = soroban_sdk::xdr::ScVal::Symbol(
+        soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("blocked")).unwrap(),
+    );
+
+    let mut auth_events = std::vec::Vec::new();
+    for e in h.env.events().all().events() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &e.body;
+        if v0.topics.len() == 3 {
+            let res = v0.topics.get(1).unwrap();
+            if res == &want_allowed || res == &want_blocked {
+                auth_events.push((v0.topics.clone(), v0.data.clone()));
+            }
+        }
+    }
+
+    assert_eq!(auth_events.len(), 3);
+
+    let build_map = |idx: u32| {
+        let key = soroban_sdk::xdr::ScVal::Symbol(
+            soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("context_index")).unwrap(),
+        );
+        let val = soroban_sdk::xdr::ScVal::U32(idx);
+        soroban_sdk::xdr::ScVal::Map(Some(soroban_sdk::xdr::ScMap(
+            soroban_sdk::xdr::VecM::try_from(std::vec::Vec::from([soroban_sdk::xdr::ScMapEntry {
+                key,
+                val,
+            }]))
+            .unwrap(),
+        )))
+    };
+
+    // ctx1: allowed
+    assert_eq!(auth_events[0].0.get(1).unwrap(), &want_allowed);
+    assert_eq!(auth_events[0].1, build_map(0)); // context_index
+
+    // ctx2: blocked, PerTxCapExceeded
+    assert_eq!(auth_events[1].0.get(1).unwrap(), &want_blocked);
+    assert_eq!(auth_events[1].1, build_map(1));
+
+    // ctx3: allowed (even though the batch fails, decide evaluates all contexts and emits for all)
+    assert_eq!(auth_events[2].0.get(1).unwrap(), &want_allowed);
+    assert_eq!(auth_events[2].1, build_map(2));
+}
+
+#[test]
+fn per_recipient_window_cap_enforced_on_chain() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, recv.clone(), other.clone()];
+    p.window_cap = 1_000; // loose global cap
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: recv.clone(),
+            cap: 100,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Within the per-recipient cap.
+    h.transfer(&recv, 60);
+    // Second transfer to the same recipient exceeds its per-recipient cap.
+    h.transfer_expect_blocked(&recv, 50);
+    // A different recipient uses the global cap and is still allowed.
+    h.transfer(&other, 500);
+}
+
+#[test]
+fn per_recipient_window_cap_falls_back_to_global() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, recv.clone(), other.clone()];
+    p.window_cap = 100;
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: recv.clone(),
+            cap: 1_000,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // `recv` has a generous override but is still bound by the global cap.
+    h.transfer(&recv, 60);
+    h.transfer_expect_blocked(&recv, 50); // would exceed global 100
+                                          // `other` has no override and uses the global cap.
+    h.transfer_expect_blocked(&other, 101);
+    h.transfer(&other, 30);
+}
+
+#[test]
+fn per_recipient_window_cap_with_allow_any_recipient() {
+    let mut h = Harness::new();
+    let other = h.other.clone();
+    let mut p = h.base_policy();
+    p.allow_any_recipient = true;
+    p.window_cap = 1_000;
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: other.clone(),
+            cap: 50,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Unlisted recipient with an override cap.
+    h.transfer(&other, 30);
+    h.transfer_expect_blocked(&other, 25); // exceeds per-recipient 50
+
+    // Another unlisted recipient has no override, so it falls back to global.
+    let third = Address::generate(&h.env);
+    h.transfer(&third, 500);
+}
+
+#[test]
+fn invalid_recipient_window_cap_rejected() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: h.recv.clone(),
+            cap: -1,
+        },
+    ];
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(res.is_err(), "negative per-recipient cap must be rejected");
+}
+
+#[test]
+fn invalid_duplicate_recipient_window_cap_rejected() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: h.recv.clone(),
+            cap: 100,
+        },
+        crate::types::RecipientCap {
+            recipient: h.recv.clone(),
+            cap: 200,
+        },
+    ];
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(res.is_err(), "duplicate per-recipient cap must be rejected");
+}
+
+#[test]
+fn detailed_check_reports_per_recipient_headroom() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.window_cap = 1_000;
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: recv.clone(),
+            cap: 100,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+    h.transfer(&recv, 40);
+
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 10)
+    });
+    assert_eq!(detail.result, crate::types::CheckResult::Allowed);
+    assert_eq!(detail.remaining_window, Some(60)); // 100 cap - 40 already admitted
+    assert_eq!(detail.effective_window_cap, Some(100));
 }
