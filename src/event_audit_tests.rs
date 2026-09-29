@@ -324,11 +324,14 @@ fn audit_event_payloads_and_topics() {
         assets: vec![&h.env],
         protocols: vec![&h.env],
         recipients: vec![&h.env],
+        recipient_window_caps: vec![&h.env],
+        blocked_recipients: vec![&h.env],
         allow_any_recipient: false,
         active_from: 0,
         active_until: 0,
         paused: false,
         dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
     };
     h.set_policy(&dummy_policy);
     let events = h.env.events().all().events();

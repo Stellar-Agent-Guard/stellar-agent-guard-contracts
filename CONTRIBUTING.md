@@ -13,7 +13,7 @@ We welcome contributions! Here's how to get started.
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
-# Run tests (30 unit + integration tests, no network needed)
+# Run tests (31 unit + integration tests, no network needed)
 cargo test
 
 # Lint (clippy all + pedantic are denied via [lints.clippy])
@@ -99,6 +99,14 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    and — for enforcement changes — how it was verified (tests, and testnet
    evidence where applicable).
 
+## Keeping your PR mergeable
+
+This repo has a security-sensitive backlog and several PRs touching `engine.rs` in parallel; merge conflicts pile up fast. Keep your branch cheap to rebase:
+
+- **One logical unit per PR.** A bug fix, a doc change, a workflow --- each its own branch and PR. Small branches have a small conflict surface.
+- **Rebase onto `main` early and often**, not just once before opening the PR.
+- **Draft PRs get a nudge, not a close.** A draft that hasn't moved in 14 days gets a warning comment; if it's still stalled 7 days later it's closed (see `.github/workflows/stale.yml`). Issues are never auto-closed --- the backlog is curated by maintainers.
+
 ## Project Structure
 
 ```
@@ -109,7 +117,12 @@ src/
   types.rs           # Policy model, storage keys, errors, parsed-call enum
   integration_tests.rs # Host-routed tests incl. real Ed25519 auth signatures
 examples/
-  agent_pubkey.rs    # Derive raw Ed25519 pubkey from a Stellar secret key
+  agent_pubkey.rs    # Derive raw Ed25519 pubkey (hex) from a Stellar secret key,
+                     #   off-chain only: deterministic SEP-0023/RFC 8032
+                     #   derivation, but it does NOT prove the agent runtime
+                     #   signs with that key (see the file's trust-boundary docs)
+  agent-loop.md      # Narrative example of the 24/7 agent runtime loop
+                     #   (heartbeat, pre-flight, blocked-reason handling, DMS)
 tools/
   agent-tx/          # Sign+submit helper for the custom-account address
 tests/fixtures/      # Real testnet evidence (tx hashes, contract IDs, events)

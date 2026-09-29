@@ -19,10 +19,30 @@ pub enum DmsHealthStatus {
 /// oldest entries forward (conservative over-count) — see SPEC §3.1.
 pub const MAX_WINDOW_ENTRIES: usize = 8192;
 
-/// Per-policy rolling spend ledger for SAC asset transfers.
+/// Hard bound on the number of entries in `recipients` and
+/// `recipient_window_caps`. Keeps allowlist scans and per-recipient storage
+/// bounded and predictable (SPEC §3 / §8).
+pub const MAX_RECIPIENT_ENTRIES: usize = 256;
+
+/// Per-policy rolling spend ledger for SAC asset transfers and protocol call counts.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowState {
+    /// Cached rolling total (sum of non-expired entries).
+    pub total: i128,
+    /// Chronological spend entries (oldest first).
+    pub entries: Vec<SpendEntry>,
+    /// Per-recipient rolling spend ledgers for recipients with an override cap.
+    pub recipients: Vec<RecipientWindowState>,
+    /// Protocol call count entries (for rate limiting).
+    pub protocol_call_entries: Vec<ProtocolCallEntry>,
+}
+
+/// Rolling spend ledger for a single recipient.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecipientWindowState {
+    pub recipient: Address,
     /// Cached rolling total (sum of non-expired entries).
     pub total: i128,
     /// Chronological spend entries (oldest first).
@@ -34,6 +54,23 @@ pub struct WindowState {
 pub struct SpendEntry {
     pub ts: u64,
     pub amount: i128,
+}
+
+/// A protocol call entry in the rolling-window counter (for rate limiting).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtocolCallEntry {
+    pub ts: u64,
+    pub count: u32,
+}
+
+/// Per-recipient rolling-window cap override.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecipientCap {
+    pub recipient: Address,
+    /// Rolling cap for this recipient within `window_secs`; 0 = disabled / fall back to global.
+    pub cap: i128,
 }
 
 /// The policy an admin installs on the account. See SPEC §3/§4.
@@ -52,6 +89,12 @@ pub struct PolicyConfig {
     pub protocols: Vec<ProtocolRule>,
     /// Allowed SAC transfer destinations.
     pub recipients: Vec<Address>,
+    /// Per-recipient rolling-window cap overrides; recipients not listed here
+    /// use the global `window_cap`. Storage bounded by `MAX_RECIPIENT_ENTRIES`.
+    pub recipient_window_caps: Vec<RecipientCap>,
+    /// Denied SAC transfer destinations. Checked before the allowlist and
+    /// before `allow_any_recipient`; an empty list leaves behavior unchanged.
+    pub blocked_recipients: Vec<Address>,
     /// Escape hatch: skip the recipient allowlist (caps still apply).
     pub allow_any_recipient: bool,
     /// Active window start (unix seconds); 0 = unrestricted.
@@ -62,6 +105,8 @@ pub struct PolicyConfig {
     pub paused: bool,
     /// Dead-man switch grace (seconds); 0 = disabled.
     pub dms_grace_secs: u64,
+    /// Maximum protocol (non-SAC allowlisted) calls per rolling window; 0 = disabled.
+    pub protocol_calls_per_window: u32,
 }
 
 /// Manual `Debug` implementation for `PolicyConfig` with stable field order.
@@ -81,11 +126,14 @@ impl core::fmt::Debug for PolicyConfig {
             .field("assets", &self.assets)
             .field("protocols", &self.protocols)
             .field("recipients", &self.recipients)
+            .field("recipient_window_caps", &self.recipient_window_caps)
+            .field("blocked_recipients", &self.blocked_recipients)
             .field("allow_any_recipient", &self.allow_any_recipient)
             .field("active_from", &self.active_from)
             .field("active_until", &self.active_until)
             .field("paused", &self.paused)
             .field("dms_grace_secs", &self.dms_grace_secs)
+            .field("protocol_calls_per_window", &self.protocol_calls_per_window)
             .finish()
     }
 }
@@ -165,6 +213,7 @@ impl Error {
             Self::OutsideActiveWindow,
             Self::AssetNotAllowed,
             Self::RecipientNotAllowed,
+            Self::RecipientBlocked,
             Self::PerTxCapExceeded,
             Self::WindowCapExceeded,
             Self::ProtocolNotAllowed,
@@ -172,6 +221,7 @@ impl Error {
             Self::UnknownContract,
             Self::SelfFunctionNotAllowed,
             Self::CreateContractNotAllowed,
+            Self::ProtocolCallRateExceeded,
         ];
         all_errors
             .into_iter()
@@ -194,7 +244,8 @@ pub struct CheckDetail {
 
 // Storage layout (SPEC §3). `Initialized`/`Admin`/`AgentPubkey` live in
 // instance storage (auto-TTL on every invocation); the rest live in
-// persistent storage with explicit TTL extension on every write.
+// persistent storage with TTL extensions on writes and thresholded refreshes
+// on reads.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum DataKey {
@@ -242,6 +293,8 @@ pub enum Error {
     UnknownContract = 26,
     SelfFunctionNotAllowed = 27,
     CreateContractNotAllowed = 28,
+    RecipientBlocked = 29,
+    ProtocolCallRateExceeded = 30,
 }
 
 impl Error {
@@ -261,6 +314,7 @@ impl Error {
             Self::OutsideActiveWindow => "outside_active_window",
             Self::AssetNotAllowed => "asset_not_allowed",
             Self::RecipientNotAllowed => "recipient_not_allowed",
+            Self::RecipientBlocked => "recipient_blocked",
             Self::PerTxCapExceeded => "per_tx_cap_exceeded",
             Self::WindowCapExceeded => "window_cap_exceeded",
             Self::ProtocolNotAllowed => "protocol_not_allowed",
@@ -268,6 +322,7 @@ impl Error {
             Self::UnknownContract => "unknown_contract",
             Self::SelfFunctionNotAllowed => "self_function_not_allowed",
             Self::CreateContractNotAllowed => "create_contract_not_allowed",
+            Self::ProtocolCallRateExceeded => "protocol_call_rate_exceeded",
         }
     }
 }

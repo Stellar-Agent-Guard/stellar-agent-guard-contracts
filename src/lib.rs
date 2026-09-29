@@ -9,6 +9,8 @@
 //! verifies the Ed25519 signature presented over the transaction auth payload
 //! and then evaluates the policy (SPEC §4/§6/§7). No CAP-71 delegation in v1.
 
+extern crate alloc;
+
 #[cfg(test)]
 extern crate std;
 
@@ -19,14 +21,19 @@ mod window;
 #[cfg(test)]
 mod integration_tests;
 
+#[cfg(test)]
+mod policy_preset_tests;
+
 use engine::{cap_metrics, contains_addr, decide, AccountState, Decision};
 use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
 use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, TryFromVal, Val,
 };
-pub use types::{CheckDetail, Error, PolicyConfig};
-use types::{CheckResult, DataKey, Status, WindowState};
+pub use types::{
+    CheckDetail, Error, PolicyConfig, ProtocolRule, RecipientCap, RecipientWindowState,
+};
+use types::{CheckResult, DataKey, Status, WindowState, MAX_RECIPIENT_ENTRIES};
 use window::Ledger;
 
 // ── Contract events (SPEC §9). Each event is its own type; topic layout
@@ -41,6 +48,7 @@ struct EventAuthChecked {
     result: Symbol,
     #[topic]
     reason: Symbol,
+    context_index: u32,
 }
 
 /// Agent heartbeat: data `at` (unix seconds).
@@ -100,36 +108,43 @@ struct EventAgentRotated {
 
 // ── Persistent-storage helpers (SPEC §3) ────────────────────────────────
 // Admin / AgentPubkey / Initialized live in instance storage (auto-TTL on
-// every invocation); the rest live in persistent storage with explicit TTL
-// extension on every write.
+// every invocation); persistent values are extended on writes and refreshed
+// on reads when their remaining TTL falls below the safety threshold.
+
+fn extend_persistent_ttl(env: &Env, key: &DataKey, threshold: u32) {
+    // `extend_ttl` takes a TTL duration relative to the current ledger, not an
+    // absolute ledger sequence. Passing max_ttl directly also keeps the target
+    // valid at nonzero ledger sequences.
+    let max_ttl = env.storage().max_ttl();
+    env.storage()
+        .persistent()
+        .extend_ttl(key, threshold, max_ttl);
+}
 
 fn persist_set(env: &Env, key: &DataKey, val: &impl soroban_sdk::IntoVal<Env, Val>) {
-    let seq = env.ledger().sequence();
-    let target = seq.saturating_add(env.storage().max_ttl());
     env.storage().persistent().set(key, val);
-    env.storage().persistent().extend_ttl(key, target, target);
+    let max_ttl = env.storage().max_ttl();
+    extend_persistent_ttl(env, key, max_ttl);
 }
 
 fn persist_get<T: soroban_sdk::TryFromVal<Env, Val>>(env: &Env, key: &DataKey) -> Option<T> {
-    env.storage().persistent().get(key)
+    let value = env.storage().persistent().get(key)?;
+    // Refresh active and automatically restored entries before returning
+    // them. The half-life threshold avoids paying for a rent extension on
+    // every read while retaining at least half of max_ttl between accesses.
+    extend_persistent_ttl(env, key, env.storage().max_ttl() / 2);
+    Some(value)
 }
 
 fn load_ledger(env: &Env) -> Ledger {
     match persist_get::<WindowState>(env, &DataKey::Window) {
-        Some(state) => Ledger::from_entries(env, state.entries),
+        Some(state) => Ledger::from_state(env, state),
         None => Ledger::empty(env),
     }
 }
 
 fn save_ledger(env: &Env, ledger: &Ledger) {
-    persist_set(
-        env,
-        &DataKey::Window,
-        &WindowState {
-            total: ledger.total,
-            entries: ledger.entries.clone(),
-        },
-    );
+    persist_set(env, &DataKey::Window, &ledger.to_state(env));
 }
 
 fn increment_revision(env: &Env) -> u64 {
@@ -137,6 +152,18 @@ fn increment_revision(env: &Env) -> u64 {
     let next = rev.saturating_add(1);
     persist_set(env, &DataKey::PolicyRevision, &next);
     next
+}
+
+#[allow(clippy::must_use_candidate)]
+fn ledger_has_recipient_entries(ledger: &Ledger) -> bool {
+    for i in 0..ledger.recipients.len() {
+        if let Some(r) = ledger.recipients.get(i) {
+            if !r.entries.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ── Policy config validation (SPEC §8) ───────────────────────────────────
@@ -180,8 +207,63 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
             }
         }
     }
-    if has_dup(env, &cfg.assets) || has_dup(env, &cfg.recipients) {
+    // The deployed address is rejected in all three lists: an asset/protocol
+    // self-entry is a nonsensical allowlist (self-calls are governed by the
+    // fixed §6.1 rule, not policy), and a self-recipient is a no-op loop that
+    // almost certainly signals a mis-pasted address. `self_addr` is fixed at
+    // deployment (known before `initialize`), and `set_policy` can only run
+    // post-initialize, so this always compares against the real contract ID.
+    if contains_addr(&cfg.recipients, &self_addr)
+        || contains_addr(&cfg.blocked_recipients, &self_addr)
+    {
         return Err(Error::InvalidConfig);
+    }
+    if has_dup(env, &cfg.assets)
+        || has_dup(env, &cfg.recipients)
+        || has_dup(env, &cfg.blocked_recipients)
+    {
+        return Err(Error::InvalidConfig);
+    }
+    for i in 0..cfg.recipient_window_caps.len() {
+        for j in (i + 1)..cfg.recipient_window_caps.len() {
+            if let (Some(a), Some(b)) = (
+                cfg.recipient_window_caps.get(i),
+                cfg.recipient_window_caps.get(j),
+            ) {
+                if a.recipient == b.recipient {
+                    return Err(Error::InvalidConfig);
+                }
+            }
+        }
+    }
+    if (cfg.recipients.len() as usize) > MAX_RECIPIENT_ENTRIES
+        || (cfg.recipient_window_caps.len() as usize) > MAX_RECIPIENT_ENTRIES
+        || (cfg.blocked_recipients.len() as usize) > MAX_RECIPIENT_ENTRIES
+    {
+        return Err(Error::InvalidConfig);
+    }
+    for i in 0..cfg.recipient_window_caps.len() {
+        if let Some(rc) = cfg.recipient_window_caps.get(i) {
+            if rc.cap < 0 {
+                return Err(Error::InvalidConfig);
+            }
+            if rc.cap > 0 && cfg.window_secs == 0 {
+                return Err(Error::InvalidConfig);
+            }
+            // Same rule as `recipients`: a self-addressed cap entry is a
+            // meaningless no-op loop.
+            if rc.recipient == self_addr {
+                return Err(Error::InvalidConfig);
+            }
+        }
+    }
+    // A recipient cannot be both explicitly allowed and explicitly denied.
+    for i in 0..cfg.recipients.len() {
+        if let Some(recipient) = cfg.recipients.get(i) {
+            if contains_addr(&cfg.blocked_recipients, &recipient) {
+                return Err(Error::InvalidConfig);
+            }
+        }
     }
     let mut contracts: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(env);
     for i in 0..cfg.protocols.len() {
@@ -206,12 +288,13 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
 
 // ── Event emission ───────────────────────────────────────────────────────
 
-fn emit_auth(env: &Env, allowed: bool, reason: Option<Error>) {
+fn emit_auth(env: &Env, allowed: bool, reason: Option<Error>, context_index: u32) {
     let res = if allowed { "allowed" } else { "blocked" };
     let reason = reason.map_or("", |e| e.reason());
     EventAuthChecked {
         result: Symbol::new(env, res),
         reason: Symbol::new(env, reason),
+        context_index,
     }
     .publish(env);
 }
@@ -384,7 +467,7 @@ impl PolicyEngine {
         emit_unfrozen(&env, &admin, rearmed_dms);
     }
 
-    // ── Read / advisory (no auth — safe reads only, nothing confidential) ─
+    // ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ─
 
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn policy(env: Env) -> Option<PolicyConfig> {
@@ -423,21 +506,54 @@ impl PolicyEngine {
         }
     }
 
-    /// Pure pre-flight of the asset-transfer decision path (no writes): lets
-    /// agents/SDK simulate a transfer before signing. Emits the same
-    /// `auth_checked` event as an in-path decision.
+    /// Preflight / simulate a transfer (`check`): permissionless pre-flight
+    /// of the asset-transfer decision path.
+    ///
+    /// Search aliases for SDK discoverability: "preflight", "simulate",
+    /// `simulate_transfer`, `simulate-transfer`. These are documentation
+    /// aliases only — the on-chain ABI is frozen as `check` (and
+    /// `check_detailed`); there is no `simulate_transfer` entrypoint.
+    ///
+    /// Lets agents/SDKs simulate a transfer before signing. A submitted call
+    /// may refresh persistent TTLs; simulation does not persist those rent
+    /// bumps. Emits the same `auth_checked` event as an in-path decision.
+    ///
+    /// # Example
+    ///
+    /// Mirrors the live Phase-1 testnet invocation (permissionless read,
+    /// simulation only; this account is DMS-frozen, so the honest answer
+    /// today is blocked):
+    ///
+    /// ```text
+    /// stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+    ///   --network testnet --source-account guard_admin --send=no -- \
+    ///   check --asset CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7 \
+    ///   --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX --amount 50
+    /// # → {"Blocked":"heartbeat_expired"}
+    /// ```
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult {
         Self::check_detailed(env, asset, to, amount).result
     }
 
-    /// Pre-flight decision plus current cap headroom for the targeted asset.
-    /// This path only reads storage, mutates a local ledger copy, and emits
-    /// exactly the same `auth_checked` event as `check`.
+    /// Preflight / simulate a transfer with headroom (`check_detailed`):
+    /// pre-flight decision plus current cap headroom for the targeted asset.
+    /// Part of the `check` preflight / simulate alias family (documentation
+    /// aliases only; the ABI is frozen — there is no `simulate_transfer`
+    /// entrypoint).
+    ///
+    /// This path does not change spend accounting: it mutates a local ledger
+    /// copy and emits exactly the same `auth_checked` event as `check`. A
+    /// submitted call may refresh persistent TTLs; simulation does not persist
+    /// those rent bumps.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the policy engine's `decide` evaluation returns an empty list of verdicts.
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
         let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
-            emit_auth(&env, false, Some(Error::NoPolicy));
+            emit_auth(&env, false, Some(Error::NoPolicy), 0);
             return CheckDetail {
                 result: CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason())),
                 remaining_window: None,
@@ -451,13 +567,13 @@ impl PolicyEngine {
         let now = env.ledger().timestamp();
         let self_addr = env.current_contract_address();
         let mut ledger = load_ledger(&env);
-        if cfg.window_cap > 0 {
+        if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
             ledger.prune(now, cfg.window_secs);
         }
-        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&cfg, &ledger);
+        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&cfg, &ledger, &to);
         let effective_per_tx_cap = per_tx_cap;
         let call = transfer_context(&env, &asset, &to, amount);
-        let result = match decide(
+        let verdicts = decide(
             &env,
             &self_addr,
             Some(&cfg),
@@ -468,13 +584,14 @@ impl PolicyEngine {
             &mut ledger,
             now,
             vec![&env, call],
-        ) {
+        );
+        let result = match verdicts.first().unwrap() {
             Decision::Allowed => {
-                emit_auth(&env, true, None);
+                emit_auth(&env, true, None, 0);
                 CheckResult::Allowed
             }
             Decision::Blocked(e) => {
-                emit_auth(&env, false, Some(e));
+                emit_auth(&env, false, Some(*e), 0);
                 CheckResult::Blocked(Symbol::new(&env, e.reason()))
             }
         };
@@ -523,7 +640,9 @@ impl CustomAccountInterface for PolicyEngine {
         // 1. Agent key registered (initialize done).
         let agent: Option<BytesN<32>> = env.storage().instance().get(&DataKey::AgentPubkey);
         let Some(agent) = agent else {
-            emit_auth(&env, false, Some(Error::NotInitialized));
+            for i in 0..auth_contexts.len() {
+                emit_auth(&env, false, Some(Error::NotInitialized), i);
+            }
             return Err(Error::NotInitialized);
         };
 
@@ -535,7 +654,9 @@ impl CustomAccountInterface for PolicyEngine {
 
         // 3. Policy snapshot + gate evaluation over every context.
         let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
-            emit_auth(&env, false, Some(Error::NoPolicy));
+            for i in 0..auth_contexts.len() {
+                emit_auth(&env, false, Some(Error::NoPolicy), i);
+            }
             return Err(Error::NoPolicy);
         };
         let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
@@ -544,7 +665,7 @@ impl CustomAccountInterface for PolicyEngine {
         let self_addr = env.current_contract_address();
 
         let mut ledger = load_ledger(&env);
-        match decide(
+        let verdicts = decide(
             &env,
             &self_addr,
             Some(&cfg),
@@ -555,21 +676,33 @@ impl CustomAccountInterface for PolicyEngine {
             &mut ledger,
             now,
             auth_contexts,
-        ) {
-            Decision::Allowed => {
-                // 4. Persist window changes made by the decision.
-                let had_window = persist_get::<WindowState>(&env, &DataKey::Window).is_some();
-                let has_entries = ledger.len() > 0;
-                if had_window || has_entries {
-                    save_ledger(&env, &ledger);
+        );
+
+        let mut all_passed = true;
+        let mut first_error = None;
+        for (i, v) in verdicts.iter().enumerate() {
+            match v {
+                Decision::Allowed => emit_auth(&env, true, None, u32::try_from(i).unwrap()),
+                Decision::Blocked(e) => {
+                    all_passed = false;
+                    if first_error.is_none() {
+                        first_error = Some(*e);
+                    }
+                    emit_auth(&env, false, Some(*e), u32::try_from(i).unwrap());
                 }
-                emit_auth(&env, true, None);
-                Ok(())
             }
-            Decision::Blocked(e) => {
-                emit_auth(&env, false, Some(e));
-                Err(e)
+        }
+
+        if all_passed {
+            // 4. Persist window changes made by the decision.
+            let had_window = persist_get::<WindowState>(&env, &DataKey::Window).is_some();
+            let has_entries = ledger.len() > 0 || ledger_has_recipient_entries(&ledger);
+            if had_window || has_entries {
+                save_ledger(&env, &ledger);
             }
+            Ok(())
+        } else {
+            Err(first_error.unwrap())
         }
     }
 }
@@ -580,7 +713,8 @@ impl CustomAccountInterface for PolicyEngine {
 pub mod testutils {
     pub use crate::engine::{contains_addr, decide, parse_call, AccountState, Decision};
     pub use crate::types::{
-        CheckResult, DataKey, Error, PolicyConfig, ProtocolRule, Status, WindowState,
+        CheckResult, DataKey, Error, PolicyConfig, ProtocolRule, RecipientCap,
+        RecipientWindowState, Status, WindowState,
     };
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};
