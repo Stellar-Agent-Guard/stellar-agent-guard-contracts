@@ -45,7 +45,7 @@ The policies installed:
 ```
 # Scenarios 1–4 (6f17c570…):
 per_tx_cap: 1000, window_cap: 150, window_secs: 60,
-assets: [token], recipients: [GDUYLF…], dms_grace_secs: 0 (DMS off)
+assets: [token], recipients: [GDUYLF…], blocked_recipients: [], dms_grace_secs: 0 (DMS off)
 
 # DMS scenario (1ddad388…): same policy with dms_grace_secs: 60
 ```

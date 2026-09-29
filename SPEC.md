@@ -122,24 +122,26 @@ TTL on every write; see §9.5).
 | `Admin` | `Address` | instance | policy admin; set once at `initialize` |
 | `AgentPubkey` | `BytesN<32>` | instance | the agent's Ed25519 public key |
 | `Policy` | `PolicyConfig` | persistent | current policy (`None` = default-deny) |
-| `Window` | `WindowState` | persistent | rolling spend ledger for asset transfers |
+| `Window` | `WindowState` | persistent | rolling spend ledger for asset transfers (global + per-recipient) |
 | `LastHeartbeat` | `u64` | persistent | unix seconds of last agent heartbeat (0 = never) |
 | `AdminFrozen` | `bool` | persistent | admin-initiated freeze flag |
 
 ```rust
 #[contracttype]
 pub struct PolicyConfig {
-    pub per_tx_cap: i128,                 // per asset-transfer call; 0 = disabled
-    pub window_secs: u64,                 // rolling window width in seconds (default 86_400)
-    pub window_cap: i128,                 // rolling cap within window_secs; 0 = disabled
-    pub assets: Vec<Address>,             // SAC token contracts whose transfers get parsed/enforced
-    pub protocols: Vec<ProtocolRule>,     // allowlisted non-asset contracts the account may call
-    pub recipients: Vec<Address>,         // allowed SAC transfer destinations
-    pub allow_any_recipient: bool,        // escape hatch: skip recipient allowlist (still capped)
-    pub active_from: u64,                 // unix seconds; 0 = no restriction
-    pub active_until: u64,                // unix seconds; 0 = no restriction
-    pub paused: bool,                     // admin kill switch
-    pub dms_grace_secs: u64,              // dead-man switch grace; 0 = disabled
+    pub per_tx_cap: i128,                    // per asset-transfer call; 0 = disabled
+    pub window_secs: u64,                    // rolling window width in seconds (default 86_400)
+    pub window_cap: i128,                    // rolling cap within window_secs; 0 = disabled
+    pub assets: Vec<Address>,                // SAC token contracts whose transfers get parsed/enforced
+    pub protocols: Vec<ProtocolRule>,        // allowlisted non-asset contracts the account may call
+    pub recipients: Vec<Address>,            // allowed SAC transfer destinations
+    pub recipient_window_caps: Vec<RecipientCap>, // per-recipient rolling cap overrides; 0 = fall back to global
+    pub blocked_recipients: Vec<Address>,    // denied SAC transfer destinations (checked first)
+    pub allow_any_recipient: bool,           // escape hatch: skip recipient allowlist (still capped)
+    pub active_from: u64,                    // unix seconds; 0 = no restriction
+    pub active_until: u64,                   // unix seconds; 0 = no restriction
+    pub paused: bool,                        // admin kill switch
+    pub dms_grace_secs: u64,                 // dead-man switch grace; 0 = disabled
 }
 
 #[contracttype]
@@ -149,10 +151,25 @@ pub struct ProtocolRule {
 }
 
 #[contracttype]
-pub struct WindowState {
-    pub total: i128,                      // cached rolling total
-    pub entries: Vec<SpendEntry>,         // chronological; pruned lazily on access
+pub struct RecipientCap {
+    pub recipient: Address,
+    pub cap: i128,                        // per-recipient rolling cap within window_secs; 0 = disabled / global fallback
 }
+
+#[contracttype]
+pub struct WindowState {
+    pub total: i128,                      // cached rolling global total
+    pub entries: Vec<SpendEntry>,         // chronological global spend entries; pruned lazily on access
+    pub recipients: Vec<RecipientWindowState>, // per-recipient rolling ledgers for recipients with override caps
+}
+
+#[contracttype]
+pub struct RecipientWindowState {
+    pub recipient: Address,
+    pub total: i128,                      // cached rolling total for this recipient
+    pub entries: Vec<SpendEntry>,          // chronological entries for this recipient
+}
+
 #[contracttype]
 pub struct SpendEntry { pub ts: u64, pub amount: i128 }
 ```
@@ -191,9 +208,12 @@ Implementation (exact, lazy, bounded):
   must remain live; see [issue #85](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/85)
   for the long-lived-account rent/TTL model.
 
-**Invariant (window):** for every authorization decision, `total` after any admission equals the
-sum of `entries[i].amount` over entries with `ts > now - window_secs`, and a new asset transfer
-is admitted only if that running total plus the transfer amount ≤ `window_cap`.
+**Invariant (window):** for every authorization decision, the global `total` after any admission equals the
+sum of `entries[i].amount` over global entries with `ts > now - window_secs`, and a new asset transfer
+is admitted only if the running total (plus amounts already staged in the same request) ≤ the
+effective cap for that transfer. Per-recipient overrides maintain the same invariant in their own
+`RecipientWindowState`; recipients without an override use the global cap. Both the global cap
+and any matching per-recipient cap must be satisfied.
 
 ---
 
@@ -317,15 +337,23 @@ calls whose semantics and arguments are known:
 
 **Exact arity required; extra args deny -- we do not partially parse.** A call whose argument list does not match the SAC schema exactly (`transfer` = 3, `transfer_from` = 4) is rejected with `UnknownContract` and never reaches the cap/allowlist evaluation. We only enforce what we fully understand; a context carrying extra trailing values is treated as a call we cannot reason about (conservative default-deny).
 
-Rules applied:
+Rules applied (in order; the denylist is checked before the allowlist/escape hatch):
 
-1. **Recipient allowlist:** if `allow_any_recipient == false`, `recipient ∈ policy.recipients`
+1. **Recipient denylist:** if `recipient ∈ policy.blocked_recipients`, block
+   `RecipientBlocked`. The denylist wins over both the allowlist and
+   `allow_any_recipient`.
+2. **Recipient allowlist:** if `allow_any_recipient == false`, `recipient ∈ policy.recipients`
    or block `RecipientNotAllowed`.
-2. **Per-tx cap:** if `per_tx_cap != 0`, `amount <= per_tx_cap` or block `PerTxCapExceeded`.
-3. **Rolling window (§3.1):** if `window_cap != 0`, prune expired entries, then
-   `total + amount <= window_cap` or block `WindowCapExceeded`; on admission, update
-   `total`/`entries`.
-4. Amount validity: `amount > 0` or block `InvalidAmount`.
+3. **Per-tx cap:** if `per_tx_cap != 0`, `amount <= per_tx_cap` or block `PerTxCapExceeded`.
+4. **Rolling window (§3.1):**
+   - Global window: if `window_cap != 0`, prune expired entries, then
+     `total + amount <= window_cap` or block `WindowCapExceeded`.
+   - Per-recipient window: if `recipient` has an entry in `policy.recipient_window_caps` with
+     `cap > 0`, use that cap against the recipient's own rolling ledger; otherwise fall back to
+     the global window cap. If the effective cap is exceeded, block `WindowCapExceeded`.
+   - On admission, update the global ledger and, when a per-recipient cap applies, the
+     recipient's ledger.
+5. Amount validity: `amount > 0` or block `InvalidAmount`.
 
 An asset contract listed in `assets` invoked with any other function (e.g. `mint`, `burn`,
 `set_admin`, `clawback` — none of which the account should ever call as authorizer) is blocked
@@ -351,6 +379,25 @@ to weaken an allowlist that already exists.
 are *transaction-level* gates applied before classification, so they bind every call the
 account makes, SAC or protocol. Spend caps and rolling-window accounting bind SAC asset
 transfers only. Recipient allowlists bind SAC asset transfers only.
+
+---
+
+### 6.5 Scenario matrix — decision rows × call kinds
+
+The §4 decision table and the §6 classifications above are two halves of one truth table:
+7 decision rows × 6 call kinds (self, asset transfer, asset other-fn, protocol,
+create-contract, unknown). That table is written out in full, cell by cell, in
+[`docs/scenario-matrix.md`](docs/scenario-matrix.md), together with a **coverage map** that
+names the test pinning each cell and enumerates the cells that no test pins yet (currently
+the entire `outside_active_window` row, the `AssetOther` and `CreateContract`
+classification arms, and most of the transaction-level gates × non-SAC kinds).
+
+Read it before changing anything under §4 or §6: it is the shortest path from "I am
+touching this gate" to "which test will catch me", and it is the shortest path from
+"is this tested?" to a citation instead of a guess. Note that the two `parse_call`-time
+outcomes `CreateContractNotAllowed` and the `AssetOther` → `function_not_allowed` arm are
+classified here but are **not** listed in §4 rule 7's inline reason list; §4.1's cost table
+does list gate 6 (`SelfFunctionNotAllowed`) but has no row for contract creation.
 
 ---
 
@@ -392,7 +439,8 @@ To close the CheckResult/Error duality gap, every contract `Error` variant maps 
 | 25 | `FunctionNotAllowed` | `function_not_allowed` | No | Auth-path only: restricted functions apply to auth contexts, not `check()`. |
 | 26 | `UnknownContract` | `unknown_contract` | No | Auth-path only: unlisted contracts are encountered in auth contexts. |
 | 27 | `SelfFunctionNotAllowed` | `self_function_not_allowed` | No | Auth-path only: self-calls are part of `__check_auth` context dispatch. |
-| 28 | `CreateContractNotAllowed` | `create_contract_not_allowed` | No | Auth-path only: contract creation host functions occur in auth contexts.
+| 28 | `CreateContractNotAllowed` | `create_contract_not_allowed` | No | Auth-path only: contract creation host functions occur in auth contexts. |
+| 29 | `RecipientBlocked` | `recipient_blocked` | Yes | Recipient is on the explicit denylist.
 
 // ── Policy management (admin only) ────────────────────────────────────────
 pub fn set_policy(env: Env, config: PolicyConfig)
@@ -422,6 +470,8 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // Simulation before signing does not persist those rent bumps.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
   // Same pre-flight, with remaining_window and effective cap metrics.
+  // `remaining_window` reflects the effective cap for the queried recipient
+  // (per-recipient override if configured, otherwise global cap).
 
 // ── Enforcement (host-invoked; not callable by anyone) ────────────────────
 impl CustomAccountInterface for PolicyEngine {
@@ -478,6 +528,7 @@ pub enum Error {            // values stable; see tests/fixtures
     WindowCapExceeded = 23, ProtocolNotAllowed = 24, FunctionNotAllowed = 25,
     UnknownContract = 26, SelfFunctionNotAllowed = 27,
     CreateContractNotAllowed = 28,
+    RecipientBlocked = 29,
 }
 ```
 
@@ -485,9 +536,11 @@ pub enum Error {            // values stable; see tests/fixtures
 it does not change spend accounting. A submitted invocation may refresh persistent
 entry TTLs under §9.5 and emits the same `auth_checked` event, with the same
 `allowed`/`blocked` result and reason, as `check`. `remaining_window` is the
-capacity available before the requested transfer; it is `None` when the rolling
-window cap is disabled. The configured and effective caps are `None` when
-disabled; v1 has no per-asset overrides, so effective caps equal configured caps.
+capacity available before the requested transfer; it is `None` when no effective
+window cap applies to the queried recipient (no global `window_cap` and no
+per-recipient override). The configured and effective caps are `None` when
+disabled; v1 has no per-asset overrides, so the effective per-transaction cap
+equals the configured cap.
 
 ---
 
@@ -501,20 +554,29 @@ disabled; v1 has no per-asset overrides, so effective caps equal configured caps
 
 - All amounts `>= 0`; `window_secs` and `dms_grace_secs` are `u64` (no negatives possible).
 - `window_cap != 0` requires `window_secs != 0`.
+- A per-recipient cap `> 0` requires `window_secs != 0`.
 - `active_until == 0 || active_until > active_from`.
 - Assets, protocols, recipients, and per-protocol fn lists must be non-empty for their
   respective vectors to matter (empty `assets` = no SAC transfer is ever allowed; empty
   `recipients` with `allow_any_recipient == false` = no recipient allowed).
-- Duplicate addresses within a list are rejected.
-- The contract's own address may not appear in **any** of the three address lists:
+- Duplicate addresses within a list are rejected (`assets`, `recipients`,
+  `blocked_recipients`, `protocols`).
+- Duplicate recipients within `recipient_window_caps` are rejected.
+- `recipients`, `blocked_recipients`, and `recipient_window_caps` are each bounded to
+  `MAX_RECIPIENT_ENTRIES` (256) entries to keep allowlist/denylist scans and
+  per-recipient storage predictable.
+- `recipients` and `blocked_recipients` must not intersect — a contradictory config is
+  rejected.
+- The contract's own address may not appear in **any** of the address lists:
   - `assets` — the guard is not an SAC; self-calls are governed by the fixed §6.1 rule, not
     by policy, so a self-entry would be a nonsensical allowlist.
   - `protocols` — same: allowlisting the account to call itself through the policy path is
     meaningless (and §6.1 already decides what self-calls are allowed).
-  - `recipients` — the account paying itself is a no-op loop (a self-debit/re-credit of the
-    same SAC balance) with no purpose; allowing it adds no capability while making a
-    mis-pasted recipient address look like a deliberate policy. Rejected (recommended:
-    catches typos) rather than allowed-with-documentation.
+  - `recipients` and `blocked_recipients` — the account paying itself is a no-op loop (a
+    self-debit/re-credit of the same SAC balance) with no purpose; allowing it adds no
+    capability while making a mis-pasted recipient address look like a deliberate policy.
+    Rejected (recommended: catches typos) rather than allowed-with-documentation.
+  - The same rule applies to `recipient_window_caps` entries.
   The self-address is known pre-`initialize` (`env.current_contract_address()` is a
   deployment-time constant), and `set_policy` can only run post-initialize, so the check
   always compares against the real deployed contract ID.
@@ -582,8 +644,9 @@ and the operator [rent/TTL guide](docs/rent-and-ttl.md).
 Guarded against, on-chain and unbypassable (a compromised agent key cannot exceed policy —
 spend caps, allowlists, freeze, default-deny all execute inside `__check_auth` before any value
 moves):
-- runaway/overspend loops (per-tx + rolling window caps)
+- runaway/overspend loops (per-tx + global/per-recipient rolling window caps)
 - payment to unauthorized recipients (recipient allowlist on asset transfers)
+- per-recipient overspend (per-recipient rolling window caps)
 - calls to unauthorized protocols/functions (protocol allowlist + default-deny)
 - agent disappearance (dead-man switch) and operator-initiated halt (freeze/pause)
 

@@ -30,8 +30,8 @@ use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, TryFromVal, Val,
 };
-pub use types::{CheckDetail, Error, PolicyConfig};
-use types::{CheckResult, DataKey, Status, WindowState};
+pub use types::{CheckDetail, Error, PolicyConfig, RecipientCap, RecipientWindowState};
+use types::{CheckResult, DataKey, Status, WindowState, MAX_RECIPIENT_ENTRIES};
 use window::Ledger;
 
 // ── Contract events (SPEC §9). Each event is its own type; topic layout
@@ -136,20 +136,13 @@ fn persist_get<T: soroban_sdk::TryFromVal<Env, Val>>(env: &Env, key: &DataKey) -
 
 fn load_ledger(env: &Env) -> Ledger {
     match persist_get::<WindowState>(env, &DataKey::Window) {
-        Some(state) => Ledger::from_entries(env, state.entries),
+        Some(state) => Ledger::from_state(env, state),
         None => Ledger::empty(env),
     }
 }
 
 fn save_ledger(env: &Env, ledger: &Ledger) {
-    persist_set(
-        env,
-        &DataKey::Window,
-        &WindowState {
-            total: ledger.total,
-            entries: ledger.entries.clone(),
-        },
-    );
+    persist_set(env, &DataKey::Window, &ledger.to_state(env));
 }
 
 fn increment_revision(env: &Env) -> u64 {
@@ -157,6 +150,18 @@ fn increment_revision(env: &Env) -> u64 {
     let next = rev.saturating_add(1);
     persist_set(env, &DataKey::PolicyRevision, &next);
     next
+}
+
+#[allow(clippy::must_use_candidate)]
+fn ledger_has_recipient_entries(ledger: &Ledger) -> bool {
+    for i in 0..ledger.recipients.len() {
+        if let Some(r) = ledger.recipients.get(i) {
+            if !r.entries.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ── Policy config validation (SPEC §8) ───────────────────────────────────
@@ -206,11 +211,57 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
     // almost certainly signals a mis-pasted address. `self_addr` is fixed at
     // deployment (known before `initialize`), and `set_policy` can only run
     // post-initialize, so this always compares against the real contract ID.
-    if contains_addr(&cfg.recipients, &self_addr) {
+    if contains_addr(&cfg.recipients, &self_addr)
+        || contains_addr(&cfg.blocked_recipients, &self_addr)
+    {
         return Err(Error::InvalidConfig);
     }
-    if has_dup(env, &cfg.assets) || has_dup(env, &cfg.recipients) {
+    if has_dup(env, &cfg.assets)
+        || has_dup(env, &cfg.recipients)
+        || has_dup(env, &cfg.blocked_recipients)
+    {
         return Err(Error::InvalidConfig);
+    }
+    for i in 0..cfg.recipient_window_caps.len() {
+        for j in (i + 1)..cfg.recipient_window_caps.len() {
+            if let (Some(a), Some(b)) = (
+                cfg.recipient_window_caps.get(i),
+                cfg.recipient_window_caps.get(j),
+            ) {
+                if a.recipient == b.recipient {
+                    return Err(Error::InvalidConfig);
+                }
+            }
+        }
+    }
+    if (cfg.recipients.len() as usize) > MAX_RECIPIENT_ENTRIES
+        || (cfg.recipient_window_caps.len() as usize) > MAX_RECIPIENT_ENTRIES
+        || (cfg.blocked_recipients.len() as usize) > MAX_RECIPIENT_ENTRIES
+    {
+        return Err(Error::InvalidConfig);
+    }
+    for i in 0..cfg.recipient_window_caps.len() {
+        if let Some(rc) = cfg.recipient_window_caps.get(i) {
+            if rc.cap < 0 {
+                return Err(Error::InvalidConfig);
+            }
+            if rc.cap > 0 && cfg.window_secs == 0 {
+                return Err(Error::InvalidConfig);
+            }
+            // Same rule as `recipients`: a self-addressed cap entry is a
+            // meaningless no-op loop.
+            if rc.recipient == self_addr {
+                return Err(Error::InvalidConfig);
+            }
+        }
+    }
+    // A recipient cannot be both explicitly allowed and explicitly denied.
+    for i in 0..cfg.recipients.len() {
+        if let Some(recipient) = cfg.recipients.get(i) {
+            if contains_addr(&cfg.blocked_recipients, &recipient) {
+                return Err(Error::InvalidConfig);
+            }
+        }
     }
     let mut contracts: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(env);
     for i in 0..cfg.protocols.len() {
@@ -488,10 +539,10 @@ impl PolicyEngine {
         let now = env.ledger().timestamp();
         let self_addr = env.current_contract_address();
         let mut ledger = load_ledger(&env);
-        if cfg.window_cap > 0 {
+        if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
             ledger.prune(now, cfg.window_secs);
         }
-        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&cfg, &ledger);
+        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&cfg, &ledger, &to);
         let effective_per_tx_cap = per_tx_cap;
         let call = transfer_context(&env, &asset, &to, amount);
         let verdicts = decide(
@@ -617,7 +668,7 @@ impl CustomAccountInterface for PolicyEngine {
         if all_passed {
             // 4. Persist window changes made by the decision.
             let had_window = persist_get::<WindowState>(&env, &DataKey::Window).is_some();
-            let has_entries = ledger.len() > 0;
+            let has_entries = ledger.len() > 0 || ledger_has_recipient_entries(&ledger);
             if had_window || has_entries {
                 save_ledger(&env, &ledger);
             }
@@ -634,7 +685,8 @@ impl CustomAccountInterface for PolicyEngine {
 pub mod testutils {
     pub use crate::engine::{contains_addr, decide, parse_call, AccountState, Decision};
     pub use crate::types::{
-        CheckResult, DataKey, Error, PolicyConfig, ProtocolRule, Status, WindowState,
+        CheckResult, DataKey, Error, PolicyConfig, ProtocolRule, RecipientCap,
+        RecipientWindowState, Status, WindowState,
     };
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};

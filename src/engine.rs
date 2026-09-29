@@ -20,16 +20,23 @@ pub enum Decision {
     Blocked(Error),
 }
 
-/// Return advisory cap metrics from an already-loaded ledger. The current
-/// policy has no per-asset overrides, so effective asset caps equal the
-/// configured caps.
+/// Return advisory cap metrics from an already-loaded ledger for a specific
+/// recipient. If the recipient has a per-recipient window override, the
+/// effective cap and remaining headroom use that recipient's ledger;
+/// otherwise the global ledger and cap are used.
 pub fn cap_metrics(
     policy: &PolicyConfig,
     ledger: &Ledger,
+    recipient: &Address,
 ) -> (Option<i128>, Option<i128>, Option<i128>) {
-    let window_cap = (policy.window_cap > 0).then_some(policy.window_cap);
+    let window_cap = effective_window_cap(policy, recipient);
     let per_tx_cap = (policy.per_tx_cap > 0).then_some(policy.per_tx_cap);
-    let remaining = window_cap.map(|cap| cap.saturating_sub(ledger.total).max(0));
+    let tracked_total = if has_recipient_window_cap(policy, recipient) {
+        ledger.recipient_total(recipient)
+    } else {
+        ledger.total
+    };
+    let remaining = window_cap.map(|cap| cap.saturating_sub(tracked_total).max(0));
     (remaining, per_tx_cap, window_cap)
 }
 
@@ -83,6 +90,29 @@ fn contains_sym(list: &Vec<Symbol>, s: &Symbol) -> bool {
         }
     }
     false
+}
+
+#[allow(clippy::must_use_candidate)]
+fn recipient_override_cap(cfg: &PolicyConfig, recipient: &Address) -> Option<i128> {
+    for i in 0..cfg.recipient_window_caps.len() {
+        if let Some(rc) = cfg.recipient_window_caps.get(i) {
+            if &rc.recipient == recipient && rc.cap > 0 {
+                return Some(rc.cap);
+            }
+        }
+    }
+    None
+}
+
+#[allow(clippy::must_use_candidate)]
+fn has_recipient_window_cap(cfg: &PolicyConfig, recipient: &Address) -> bool {
+    recipient_override_cap(cfg, recipient).is_some()
+}
+
+#[allow(clippy::must_use_candidate)]
+fn effective_window_cap(cfg: &PolicyConfig, recipient: &Address) -> Option<i128> {
+    recipient_override_cap(cfg, recipient)
+        .or_else(|| (cfg.window_cap > 0).then_some(cfg.window_cap))
 }
 
 // ── Context parsing (SPEC §6) ────────────────────────────────────────────
@@ -227,11 +257,19 @@ pub fn decide(
     }
 
     // ── Per-context rules (SPEC §6) ──────────────────────────────────────
-    if cfg.window_cap > 0 {
+    // Window: prune expired entries once up front, then check every transfer
+    // against the running total (current total + amounts already admitted in
+    // this request). Admission is staged and committed only after every
+    // context passes. Per-recipient overrides run alongside the global window.
+    if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
         ledger.prune(now, cfg.window_secs);
     }
     let mut pending: i128 = 0;
     let mut admission: Vec<crate::types::SpendEntry> = Vec::new(env);
+    // Running per-recipient totals staged in this request. Parallel Vecs keep
+    // iteration deterministic and avoid pulling `Map` into the pure engine.
+    let mut pending_recipients: Vec<Address> = Vec::new(env);
+    let mut pending_recipient_amounts: Vec<i128> = Vec::new(env);
     let mut all_passed = true;
 
     for ctx in contexts.iter() {
@@ -250,21 +288,59 @@ pub fn decide(
             ParsedCall::AssetTransfer { to, amount, .. } => {
                 if amount <= 0 {
                     Decision::Blocked(Error::InvalidAmount)
+                } else if contains_addr(&cfg.blocked_recipients, &to) {
+                    Decision::Blocked(Error::RecipientBlocked)
                 } else if !cfg.allow_any_recipient && !contains_addr(&cfg.recipients, &to) {
                     Decision::Blocked(Error::RecipientNotAllowed)
                 } else if cfg.per_tx_cap > 0 && amount > cfg.per_tx_cap {
                     Decision::Blocked(Error::PerTxCapExceeded)
-                } else if cfg.window_cap > 0 {
-                    let projected = ledger.total.saturating_add(pending);
-                    if projected.saturating_add(amount) > cfg.window_cap {
+                } else {
+                    // Window accounting: global cap plus an optional
+                    // per-recipient override keyed by the destination.
+                    // Projections are computed first; staging happens only
+                    // when this context clears both caps.
+                    let recip_cap = recipient_override_cap(cfg, &to);
+                    let mut staged_recip: i128 = 0;
+                    let mut staged_idx: Option<u32> = None;
+                    if recip_cap.is_some() {
+                        for i in 0..pending_recipients.len() {
+                            if let Some(r) = pending_recipients.get(i) {
+                                if r == to {
+                                    staged_idx = Some(i);
+                                    staged_recip = pending_recipient_amounts.get(i).unwrap_or(0);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Cumulative against the current windows: existing totals +
+                    // amounts staged earlier in this same request.
+                    let global_projected =
+                        ledger.total.saturating_add(pending).saturating_add(amount);
+                    let recip_projected = ledger
+                        .recipient_total(&to)
+                        .saturating_add(staged_recip)
+                        .saturating_add(amount);
+                    if (cfg.window_cap > 0 && global_projected > cfg.window_cap)
+                        || recip_cap.is_some_and(|cap| recip_projected > cap)
+                    {
                         Decision::Blocked(Error::WindowCapExceeded)
                     } else {
-                        pending = pending.saturating_add(amount);
-                        admission.push_back(crate::types::SpendEntry { ts: now, amount });
+                        if cfg.window_cap > 0 {
+                            pending = pending.saturating_add(amount);
+                            admission.push_back(crate::types::SpendEntry { ts: now, amount });
+                        }
+                        if recip_cap.is_some() {
+                            let next = staged_recip.saturating_add(amount);
+                            if let Some(idx) = staged_idx {
+                                pending_recipient_amounts.set(idx, next);
+                            } else {
+                                pending_recipients.push_back(to.clone());
+                                pending_recipient_amounts.push_back(next);
+                            }
+                        }
                         Decision::Allowed
                     }
-                } else {
-                    Decision::Allowed
                 }
             }
             ParsedCall::Protocol { contract, fname } => {
@@ -303,6 +379,13 @@ pub fn decide(
         for e in admission.iter() {
             ledger.admit(e.ts, e.amount);
         }
+        for i in 0..pending_recipients.len() {
+            if let (Some(recipient), Some(amount)) =
+                (pending_recipients.get(i), pending_recipient_amounts.get(i))
+            {
+                ledger.admit_for_recipient(env, now, recipient, amount);
+            }
+        }
     }
 
     verdicts
@@ -311,7 +394,7 @@ pub fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ProtocolRule;
+    use crate::types::{ProtocolRule, RecipientCap};
     use soroban_sdk::{auth::ContractContext, vec, Address, Env, IntoVal, Symbol, Val, Vec};
 
     fn addr(env: &Env, n: u8) -> Address {
@@ -328,6 +411,8 @@ mod tests {
             assets: vec![env, addr(env, 1)],
             protocols: Vec::new(env),
             recipients: vec![env, addr(env, 2)],
+            recipient_window_caps: Vec::new(env),
+            blocked_recipients: Vec::new(env),
             allow_any_recipient: false,
             active_from: 0,
             active_until: 0,
@@ -434,6 +519,51 @@ mod tests {
         let ctx2 = vec![&env, transfer_ctx(&env, 1, 99, 5)];
         let d2 = decide(&env, &sa, Some(&p2), &alive(), &mut l, 1000, ctx2.clone());
         assert!(matches!(d2.first().unwrap(), Decision::Allowed));
+    }
+
+    #[test]
+    fn blocked_recipient_wins_over_allowlist_and_escape_hatch() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let blocked_addr = addr(&env, 3);
+
+        // Listed in both allowlist and denylist -> blocked wins.
+        let mut p = base_policy(&env);
+        p.recipients = vec![&env, addr(&env, 2), blocked_addr.clone()];
+        p.blocked_recipients = vec![&env, blocked_addr.clone()];
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, transfer_ctx(&env, 1, 3, 5)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::RecipientBlocked)
+        ));
+
+        // allow_any_recipient true but address is blocked -> still blocked.
+        let mut p2 = base_policy(&env);
+        p2.allow_any_recipient = true;
+        p2.blocked_recipients = vec![&env, blocked_addr.clone()];
+        let d2 = decide(&env, &sa, Some(&p2), &alive(), &mut l, 1000, ctx.clone());
+        assert!(matches!(
+            d2.first().unwrap(),
+            Decision::Blocked(Error::RecipientBlocked)
+        ));
+
+        // A different non-blocked recipient passes under the escape hatch.
+        let ctx3 = vec![&env, transfer_ctx(&env, 1, 4, 5)];
+        let d3 = decide(&env, &sa, Some(&p2), &alive(), &mut l, 1000, ctx3);
+        assert!(matches!(d3.first().unwrap(), Decision::Allowed));
+    }
+
+    #[test]
+    fn empty_blocked_recipients_list_is_no_op() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, transfer_ctx(&env, 1, 2, 5)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
+        assert!(matches!(d.first().unwrap(), Decision::Allowed));
     }
 
     #[test]
@@ -808,5 +938,180 @@ mod tests {
         let ctx = vec![&env, transfer_from_ctx_with_arg_count(&env, 1, 2, 5, 4)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
         assert!(matches!(d.first().unwrap(), Decision::Allowed));
+    }
+
+    #[test]
+    fn per_recipient_cap_enforced_independently() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        let r2 = addr(&env, 2);
+        let r3 = addr(&env, 3);
+        p.recipients = vec![&env, r2.clone(), r3.clone()];
+        p.window_cap = 1_000; // generous global cap
+        p.recipient_window_caps = vec![
+            &env,
+            RecipientCap {
+                recipient: r2.clone(),
+                cap: 100,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+
+        // r2 is bound by its per-recipient cap.
+        let d1 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 101)],
+        );
+        assert!(matches!(
+            d1.first().unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
+
+        // r3 is not in the override map, so it falls back to the global cap.
+        let d2 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 3, 500)],
+        );
+        assert!(matches!(d2.first().unwrap(), Decision::Allowed));
+
+        // Allowed spends to r2 are tracked only in its own ledger.
+        let d3 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 80)],
+        );
+        assert!(matches!(d3.first().unwrap(), Decision::Allowed));
+        let d4 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 21)],
+        );
+        assert!(matches!(
+            d4.first().unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
+    }
+
+    #[test]
+    fn per_recipient_cap_stages_cumulatively_within_request() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.window_cap = 1_000;
+        p.recipient_window_caps = vec![
+            &env,
+            RecipientCap {
+                recipient: addr(&env, 2),
+                cap: 100,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+
+        let ctx = vec![
+            &env,
+            transfer_ctx(&env, 1, 2, 60),
+            transfer_ctx(&env, 1, 2, 50), // cumulative 110 > 100
+        ];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx);
+        assert!(matches!(
+            d.get(1).unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
+        assert_eq!(l.recipient_total(&addr(&env, 2)), 0);
+    }
+
+    #[test]
+    fn per_recipient_and_global_caps_both_bind() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        let r2 = addr(&env, 2);
+        p.window_cap = 50; // tighter global cap
+        p.recipient_window_caps = vec![
+            &env,
+            RecipientCap {
+                recipient: r2.clone(),
+                cap: 100,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+
+        // The per-recipient cap (100) is higher, but the global cap (50) blocks first.
+        let d = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 60)],
+        );
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
+    }
+
+    #[test]
+    fn per_recipient_cap_with_allow_any_recipient() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.allow_any_recipient = true;
+        p.window_cap = 1_000;
+        p.recipient_window_caps = vec![
+            &env,
+            RecipientCap {
+                recipient: addr(&env, 2),
+                cap: 50,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+
+        // Listed recipient is bound by its per-recipient cap.
+        let d1 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 51)],
+        );
+        assert!(matches!(
+            d1.first().unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
+
+        // Unlisted recipient falls back to the global cap and is allowed.
+        let d2 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 99, 500)],
+        );
+        assert!(matches!(d2.first().unwrap(), Decision::Allowed));
     }
 }

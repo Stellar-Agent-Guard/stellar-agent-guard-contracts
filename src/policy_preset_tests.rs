@@ -7,7 +7,7 @@
 //! faithful round-trip. A preset that stops deserializing, stops validating,
 //! or stops round-tripping fails `cargo test` — doc rot cannot ship silently.
 
-use crate::types::{PolicyConfig, ProtocolRule};
+use crate::types::{PolicyConfig, ProtocolRule, RecipientCap};
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use serde_json::Value as JsonValue;
@@ -156,6 +156,34 @@ fn protocols(env: &Env, block: &JsonValue, index: usize) -> Vec<ProtocolRule> {
     out
 }
 
+fn recipient_window_caps(env: &Env, block: &JsonValue, index: usize) -> Vec<RecipientCap> {
+    let mut out = Vec::new(env);
+    let Some(items) = block.get("recipient_window_caps") else {
+        return out;
+    };
+    let items = items
+        .as_array()
+        .unwrap_or_else(|| panic!("preset #{index}: `recipient_window_caps` must be an array"));
+    for item in items {
+        let recipient = item
+            .get("recipient")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_else(|| panic!("preset #{index}: recipient cap needs a `recipient` string"));
+        let cap = item
+            .get("cap")
+            .and_then(JsonValue::as_str)
+            .and_then(|raw| raw.parse::<i128>().ok())
+            .unwrap_or_else(|| {
+                panic!("preset #{index}: recipient cap needs a string-encoded i128 `cap`")
+            });
+        out.push_back(RecipientCap {
+            recipient: Address::from_str(env, recipient),
+            cap,
+        });
+    }
+    out
+}
+
 fn policy_config_from_json(env: &Env, block: &JsonValue, index: usize) -> PolicyConfig {
     PolicyConfig {
         per_tx_cap: i128_field(block, "per_tx_cap", index),
@@ -164,6 +192,8 @@ fn policy_config_from_json(env: &Env, block: &JsonValue, index: usize) -> Policy
         assets: addr_list(env, block, "assets", index),
         protocols: protocols(env, block, index),
         recipients: addr_list(env, block, "recipients", index),
+        recipient_window_caps: recipient_window_caps(env, block, index),
+        blocked_recipients: soroban_sdk::Vec::new(env),
         allow_any_recipient: bool_field(block, "allow_any_recipient", index),
         active_from: u64_field(block, "active_from", index),
         active_until: u64_field(block, "active_until", index),

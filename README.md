@@ -96,7 +96,7 @@ This boundary is an inherent property of the platform (the auth context does not
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 46 tests, isolated (no network)
+cargo test                                      # 68 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only)
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -157,6 +157,8 @@ starts the dead-man-switch clock at install time (a fresh policy gets full grace
 | `assets` | `Vec<Address>` | SAC token contracts whose transfers get parsed and enforced |
 | `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`) |
 | `recipients` | `Vec<Address>` | allowed SAC transfer destinations |
+| `recipient_window_caps` | `Vec<RecipientCap>` | per-recipient rolling-window cap overrides; recipients not listed use the global `window_cap` |
+| `blocked_recipients` | `Vec<Address>` | denied SAC transfer destinations; checked before the allowlist and `allow_any_recipient` |
 | `allow_any_recipient` | `bool` | escape hatch: skip the recipient allowlist (caps still apply) |
 | `active_from` / `active_until` | `u64` | active window (unix seconds); `0` = unrestricted |
 | `paused` | `bool` | admin kill switch |
@@ -176,9 +178,13 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
     "window_cap": "150", "window_secs": 60 }'
 # → Event: EventPolicySet (event_policy_set)
 ```
-Other validation rules (SPEC §8): negative caps, `window_cap > 0` with `window_secs == 0`,
-duplicate assets/recipients/protocol contracts, empty per-protocol fn lists, or the
-self-address in `assets`/`protocols`/`recipients` all fail with `InvalidConfig`.
+Other validation rules (SPEC §8): negative caps, `window_cap > 0` or a positive
+`recipient_window_caps` entry with `window_secs == 0`, duplicate
+assets/recipients/blocked_recipients/protocol contracts, duplicate recipients in
+`recipient_window_caps`, a non-empty intersection between `recipients` and
+`blocked_recipients`, more than 256 recipients, blocked recipients, or per-recipient
+cap entries, empty per-protocol fn lists, or the self-address in
+`assets`/`protocols`/`recipients`/`blocked_recipients` all fail with `InvalidConfig`.
 
 **Not sure where to start?** Copy-paste presets for common operator personas —
 day-trader agent, payments bot, watch-only + heartbeat, max security — each with
@@ -476,6 +482,7 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).
 5. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
+   denylist (checked before the allowlist and before `allow_any_recipient`), recipient
    allowlist, per-tx cap, and the rolling-window projection (existing total + amounts
    staged earlier in the same request). Protocol calls get contract + per-function
    allowlisting. Everything else is denied by default.
@@ -597,6 +604,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 | Per-transaction spend cap | ✅ |
 | Rolling window spend cap | ✅ |
 | Recipient allowlist (SAC transfers) | ✅ |
+| Recipient denylist / blocklist (SAC transfers) | ✅ |
 | Protocol/function allowlist (any call) | ✅ |
 | Dead-man switch (freeze on missed heartbeat) | ✅ |
 | Admin unfreeze | ✅ |
@@ -605,11 +613,11 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-46 tests (unit + integration) cover the policy decision engine — including the regression
+68 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `46 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green this session: `68 passed; 0 failed`.
 
 ```bash
 cargo test

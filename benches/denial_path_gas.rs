@@ -58,6 +58,8 @@ fn base_policy(env: &Env) -> PolicyConfig {
         assets: vec![env, addr(env, 1)],
         protocols: Vec::new(env),
         recipients: vec![env, addr(env, 2)],
+        recipient_window_caps: Vec::new(env),
+        blocked_recipients: Vec::new(env),
         allow_any_recipient: false,
         active_from: 0,
         active_until: 0,

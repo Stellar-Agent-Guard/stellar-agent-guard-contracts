@@ -172,6 +172,8 @@ impl Harness {
             assets: soroban_sdk::vec![&self.env, self.asset.clone()],
             protocols: soroban_sdk::Vec::new(&self.env),
             recipients: soroban_sdk::vec![&self.env, self.recv.clone()],
+            recipient_window_caps: soroban_sdk::Vec::new(&self.env),
+            blocked_recipients: soroban_sdk::Vec::new(&self.env),
             allow_any_recipient: false,
             active_from: 0,
             active_until: 0,
@@ -634,6 +636,44 @@ fn recipient_allowlist_blocked() {
 }
 
 #[test]
+fn blocked_recipient_wins_over_escape_hatch() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    let mut p = h.base_policy();
+    // With the escape hatch on, any recipient would be allowed — except the
+    // explicit denylist. `other` is neither allowed nor in the blocklist by
+    // default, so it would pass under `allow_any_recipient`.
+    p.allow_any_recipient = true;
+    p.blocked_recipients = soroban_sdk::vec![&h.env, other.clone()];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Denylist beats the escape hatch.
+    h.transfer_expect_blocked(&other, 5);
+    // Non-blocked recipients still pass through the escape hatch.
+    h.transfer(&recv, 5);
+}
+
+#[test]
+fn blocked_recipients_contradiction_rejected_at_set_policy() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, h.recv.clone(), h.other.clone()];
+    p.blocked_recipients = soroban_sdk::vec![&h.env, h.other.clone()];
+
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.set_policy(&p);
+    }));
+    assert!(
+        res.is_err(),
+        "contradictory recipient config must be rejected"
+    );
+}
+
+#[test]
 fn allow_any_recipient_escape_hatch_still_capped() {
     let mut h = Harness::new();
     let other = h.other.clone();
@@ -993,6 +1033,7 @@ fn error_and_block_reason_round_trip() {
         GuardError::OutsideActiveWindow,
         GuardError::AssetNotAllowed,
         GuardError::RecipientNotAllowed,
+        GuardError::RecipientBlocked,
         GuardError::PerTxCapExceeded,
         GuardError::WindowCapExceeded,
         GuardError::ProtocolNotAllowed,
@@ -1098,7 +1139,15 @@ fn policy_config_debug_snapshot() {
                 fns: None,
             },
         ],
-        recipients: vec![&env, recip_a, recip_b],
+        recipients: vec![&env, recip_a.clone(), recip_b],
+        recipient_window_caps: vec![
+            &env,
+            crate::types::RecipientCap {
+                recipient: recip_a,
+                cap: 10_000,
+            },
+        ],
+        blocked_recipients: vec![&env],
         allow_any_recipient: false,
         active_from: 1_700_000_000,
         active_until: 1_800_000_000,
@@ -1115,6 +1164,8 @@ fn policy_config_debug_snapshot() {
         "assets",
         "protocols",
         "recipients",
+        "recipient_window_caps",
+        "blocked_recipients",
         "allow_any_recipient",
         "active_from",
         "active_until",
@@ -1246,4 +1297,147 @@ fn batch_events_emit_in_order_with_context_index() {
     // ctx3: allowed (even though the batch fails, decide evaluates all contexts and emits for all)
     assert_eq!(auth_events[2].0.get(1).unwrap(), &want_allowed);
     assert_eq!(auth_events[2].1, build_map(2));
+}
+
+#[test]
+fn per_recipient_window_cap_enforced_on_chain() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, recv.clone(), other.clone()];
+    p.window_cap = 1_000; // loose global cap
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: recv.clone(),
+            cap: 100,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Within the per-recipient cap.
+    h.transfer(&recv, 60);
+    // Second transfer to the same recipient exceeds its per-recipient cap.
+    h.transfer_expect_blocked(&recv, 50);
+    // A different recipient uses the global cap and is still allowed.
+    h.transfer(&other, 500);
+}
+
+#[test]
+fn per_recipient_window_cap_falls_back_to_global() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, recv.clone(), other.clone()];
+    p.window_cap = 100;
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: recv.clone(),
+            cap: 1_000,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // `recv` has a generous override but is still bound by the global cap.
+    h.transfer(&recv, 60);
+    h.transfer_expect_blocked(&recv, 50); // would exceed global 100
+                                          // `other` has no override and uses the global cap.
+    h.transfer_expect_blocked(&other, 101);
+    h.transfer(&other, 30);
+}
+
+#[test]
+fn per_recipient_window_cap_with_allow_any_recipient() {
+    let mut h = Harness::new();
+    let other = h.other.clone();
+    let mut p = h.base_policy();
+    p.allow_any_recipient = true;
+    p.window_cap = 1_000;
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: other.clone(),
+            cap: 50,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Unlisted recipient with an override cap.
+    h.transfer(&other, 30);
+    h.transfer_expect_blocked(&other, 25); // exceeds per-recipient 50
+
+    // Another unlisted recipient has no override, so it falls back to global.
+    let third = Address::generate(&h.env);
+    h.transfer(&third, 500);
+}
+
+#[test]
+fn invalid_recipient_window_cap_rejected() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: h.recv.clone(),
+            cap: -1,
+        },
+    ];
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(res.is_err(), "negative per-recipient cap must be rejected");
+}
+
+#[test]
+fn invalid_duplicate_recipient_window_cap_rejected() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: h.recv.clone(),
+            cap: 100,
+        },
+        crate::types::RecipientCap {
+            recipient: h.recv.clone(),
+            cap: 200,
+        },
+    ];
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(res.is_err(), "duplicate per-recipient cap must be rejected");
+}
+
+#[test]
+fn detailed_check_reports_per_recipient_headroom() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.window_cap = 1_000;
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        crate::types::RecipientCap {
+            recipient: recv.clone(),
+            cap: 100,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+    h.transfer(&recv, 40);
+
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 10)
+    });
+    assert_eq!(detail.result, crate::types::CheckResult::Allowed);
+    assert_eq!(detail.remaining_window, Some(60)); // 100 cap - 40 already admitted
+    assert_eq!(detail.effective_window_cap, Some(100));
 }
