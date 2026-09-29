@@ -212,6 +212,35 @@ pre-flight, blocked-reason handling, DMS stop conditions), see
 The TypeScript equivalent is the SDK's
 [agent-runtime guide issue](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
 
+#### Check a transfer without broadcasting
+
+`agent-tx preflight` simulates a transfer against current ledger state and
+never submits it. With the registered agent secret, the signed auth entry runs
+the real `__check_auth`; an admitted transfer prints an estimated fee, while a
+policy denial prints the `auth_checked` diagnostic reason. The estimate is
+`minResourceFee + inclusion fee + guard-footprint fee allowance`; it is not a
+guarantee of the eventual inclusion fee.
+
+```bash
+cd tools/agent-tx && cargo build --release
+./target/release/agent-tx preflight \
+  --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+  --asset CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7 \
+  --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX \
+  --amount 1100 --secret "$AGENT_SECRET"
+# BLOCKED (pre-broadcast, enforced simulation)
+# diagnostic event: auth_checked, blocked, per_tx_cap_exceeded
+# broadcast: no
+```
+
+The example exceeds the fixture policy's `per_tx_cap: 1000`. Exit codes:
+`0` means signed simulation admitted the call, `1` means signed simulation
+blocked it, and `2` means the unsigned simulation was inconclusive. `--secret`
+is optional (or supplied via `AGENT_SECRET`): without it the tool retrieves the
+registered public key and estimates a fee, but cannot sign the custom-account
+authorization, so it cannot establish whether `__check_auth` will admit the
+transfer. See [`tools/agent-tx/README.md`](tools/agent-tx/README.md) for details.
+
 ### `freeze` / `unfreeze`
 ```rust
 pub fn freeze(env: Env)      // admin only — sets AdminFrozen = true
