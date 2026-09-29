@@ -17,13 +17,13 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{CheckResult, Error as GuardError, PolicyConfig, ProtocolRule};
+use crate::types::{CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule};
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use soroban_sdk::auth::{Context, CustomAccountInterface};
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::testutils::{storage::Persistent as _, Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{
     self, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs, Limited, Limits,
     ScBytes, ScSymbol, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
@@ -33,8 +33,6 @@ use soroban_sdk::{
     contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val,
 };
 use std::format;
-
-const SIG_EXPIRATION_LEDGER: u32 = 6_000_000;
 
 /// A `ScVal::Symbol` built from a plain string (event names / map keys).
 fn symbol_val(s: &str) -> ScVal {
@@ -120,7 +118,19 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_env(Env::default())
+    }
+
+    fn with_short_persistent_ttl() -> Self {
         let env = Env::default();
+        env.ledger().set_min_persistent_entry_ttl(2);
+        env.ledger().set_max_entry_ttl(10);
+        // Exercise the host's max-TTL semantics away from ledger sequence 0.
+        env.ledger().set_sequence_number(1_000);
+        Self::with_env(env)
+    }
+
+    fn with_env(env: Env) -> Self {
         let agent = SigningKey::from_bytes(&[7u8; 32]);
         let admin = env.register(MockAdmin, ());
         let asset = env.register(MockAsset, ());
@@ -227,11 +237,18 @@ impl Harness {
         self.invocation(&self.guard, "unfreeze", std::vec![])
     }
 
+    fn signature_expiration_ledger(&self) -> u32 {
+        self.env
+            .ledger()
+            .sequence()
+            .saturating_add(self.env.storage().max_ttl())
+    }
+
     fn payload(&self, nonce: i64, invocation: &SorobanAuthorizedInvocation) -> [u8; 32] {
         let preimage = HashIdPreimage::SorobanAuthorization(HashIdPreimageSorobanAuthorization {
             network_id: xdr::Hash(self.env.ledger().network_id().to_array()),
             nonce,
-            signature_expiration_ledger: SIG_EXPIRATION_LEDGER,
+            signature_expiration_ledger: self.signature_expiration_ledger(),
             invocation: invocation.clone(),
         });
         let mut buf: std::vec::Vec<u8> = std::vec::Vec::new();
@@ -248,11 +265,12 @@ impl Harness {
         self.guard_nonce += 1;
         let payload = self.payload(nonce, root);
         let sig = self.agent.sign(&payload).to_bytes();
+        let signature_expiration_ledger = self.signature_expiration_ledger();
         SorobanAuthorizationEntry {
             credentials: SorobanCredentials::Address(SorobanAddressCredentials {
                 address: xdr::ScAddress::from(&self.guard),
                 nonce,
-                signature_expiration_ledger: SIG_EXPIRATION_LEDGER,
+                signature_expiration_ledger,
                 signature: ScVal::Bytes(ScBytes::try_from(sig.to_vec()).unwrap()),
             }),
             root_invocation: root.clone(),
@@ -263,11 +281,12 @@ impl Harness {
     fn admin_entry(&mut self, root: &SorobanAuthorizedInvocation) -> SorobanAuthorizationEntry {
         let nonce = self.admin_nonce;
         self.admin_nonce += 1;
+        let signature_expiration_ledger = self.signature_expiration_ledger();
         SorobanAuthorizationEntry {
             credentials: SorobanCredentials::Address(SorobanAddressCredentials {
                 address: xdr::ScAddress::from(&self.admin),
                 nonce,
-                signature_expiration_ledger: SIG_EXPIRATION_LEDGER,
+                signature_expiration_ledger,
                 signature: ScVal::Void,
             }),
             root_invocation: root.clone(),
@@ -390,6 +409,75 @@ fn lifecycle_initialize_once_then_status() {
     assert!(!st.admin_frozen);
     assert!(!st.heartbeat_expired);
     assert_eq!(st.now, 0);
+}
+
+#[test]
+fn persistent_read_refreshes_ttl_below_half_life() {
+    let h = Harness::with_short_persistent_ttl();
+    h.set_time(1_000);
+    h.install_policy(&h.base_policy());
+
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let initial_sequence = h.env.ledger().sequence();
+    h.env.ledger().set_sequence_number(initial_sequence + 6);
+
+    assert!(client.policy().is_some());
+    let policy_ttl = h.env.as_contract(&h.guard, || {
+        h.env.storage().persistent().get_ttl(&DataKey::Policy)
+    });
+    assert_eq!(
+        policy_ttl, 10,
+        "a successful read should restore the TTL to max"
+    );
+}
+
+#[test]
+fn archived_policy_window_and_heartbeat_restore_without_resetting_limits() {
+    let mut h = Harness::with_short_persistent_ttl();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    policy.dms_grace_secs = 60;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+    h.set_time(1_010);
+    h.transfer(&recv, 80);
+
+    // Let Policy, Window, LastHeartbeat, and AdminFrozen all pass their
+    // deliberately short test TTL. Protocol 23+ restores archived persistent
+    // entries from the invocation's restore footprint before contract code.
+    let expired_sequence = h.env.ledger().sequence() + 11;
+    h.env.ledger().set_sequence_number(expired_sequence);
+
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(client.policy(), Some(policy));
+
+    // The check does not change spend accounting but succeeds as an invocation,
+    // so it commits TTL refreshes. The 80 units in Window must still block 30.
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 30)
+    });
+    assert_eq!(
+        detail.result,
+        CheckResult::Blocked(Symbol::new(&h.env, "window_cap_exceeded"))
+    );
+
+    let status = client.status();
+    assert!(!status.admin_frozen);
+    assert_eq!(status.last_heartbeat, 1_000);
+    h.set_time(1_100);
+    assert!(client.status().heartbeat_expired);
+
+    let ttls = h.env.as_contract(&h.guard, || {
+        let persistent = h.env.storage().persistent();
+        (
+            persistent.get_ttl(&DataKey::Policy),
+            persistent.get_ttl(&DataKey::Window),
+            persistent.get_ttl(&DataKey::LastHeartbeat),
+            persistent.get_ttl(&DataKey::AdminFrozen),
+        )
+    });
+    assert_eq!(ttls, (10, 10, 10, 10));
 }
 
 #[test]
@@ -686,11 +774,12 @@ fn wrong_signature_is_rejected_by_host_crypto() {
     h.guard_nonce += 1;
     let payload = h.payload(nonce, &root);
     let sig = wrong.sign(&payload).to_bytes();
+    let signature_expiration_ledger = h.signature_expiration_ledger();
     let entry = SorobanAuthorizationEntry {
         credentials: SorobanCredentials::Address(SorobanAddressCredentials {
             address: xdr::ScAddress::from(&h.guard),
             nonce,
-            signature_expiration_ledger: SIG_EXPIRATION_LEDGER,
+            signature_expiration_ledger,
             signature: ScVal::Bytes(ScBytes::try_from(sig.to_vec()).unwrap()),
         }),
         root_invocation: root,
@@ -746,11 +835,12 @@ fn rotated_agent_key_binds() {
     h.guard_nonce += 1;
     let old_payload = h.payload(old_nonce, &old_root);
     let old_sig = h.agent.sign(&old_payload).to_bytes();
+    let signature_expiration_ledger = h.signature_expiration_ledger();
     let old_entry = SorobanAuthorizationEntry {
         credentials: SorobanCredentials::Address(SorobanAddressCredentials {
             address: xdr::ScAddress::from(&h.guard),
             nonce: old_nonce,
-            signature_expiration_ledger: SIG_EXPIRATION_LEDGER,
+            signature_expiration_ledger,
             signature: ScVal::Bytes(ScBytes::try_from(old_sig.to_vec()).unwrap()),
         }),
         root_invocation: old_root,

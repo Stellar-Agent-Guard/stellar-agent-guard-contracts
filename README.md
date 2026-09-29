@@ -275,8 +275,10 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 ```rust
 pub fn policy(env: Env) -> Option<PolicyConfig>
 ```
-No auth. Returns the current policy, or `None` (default-deny). Verified live against the
-deployed contract — this is the real installed fixture policy:
+No auth. Returns the current policy, or `None` (default-deny). When submitted on-ledger, this
+read may extend the policy TTL and incur rent if it is below the threshold in [SPEC §9.5](SPEC.md#95-persistent-storage-ttl-liveness);
+simulation does not persist the extension. Verified live against the deployed contract — this is
+the real installed fixture policy:
 ```bash
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --network testnet --source-account guard_admin --send=no -- policy
@@ -291,7 +293,9 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 ```rust
 pub fn status(env: Env) -> Status
 ```
-No auth. Returns `{ has_policy, admin_frozen, heartbeat_expired, last_heartbeat, now }`.
+No auth. Returns `{ has_policy, admin_frozen, heartbeat_expired, last_heartbeat, now }`. When
+submitted on-ledger, this read may extend persistent-entry TTLs and incur rent; simulation does
+not persist those extensions (SPEC §9.5).
 Verified live:
 ```bash
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -306,9 +310,10 @@ itself with zero transactions.
 ```rust
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
 ```
-No auth, no writes. A pure pre-flight replica of the SAC-transfer decision path: lets
-agents/SDKs simulate a transfer *before* signing, emitting the same `auth_checked` events
-as an in-path decision so telemetry sees one vocabulary. Verified live (this account is
+No auth. A pre-flight replica of the SAC-transfer decision path: lets agents/SDKs simulate a
+transfer *before* signing, emitting the same `auth_checked` events as an in-path decision so
+telemetry sees one vocabulary. Submitting it on-ledger may extend persistent-entry TTLs and
+incur rent (SPEC §9.5); simulation does not persist those extensions. Verified live (this account is
 DMS-frozen, so the honest answer today is blocked):
 ```bash
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -319,7 +324,8 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 ```
 
 For operator triage, `check_detailed` returns the same verdict plus current headroom and
-effective caps without writing the rolling window:
+effective caps without changing spend accounting. A submitted call may extend persistent-entry
+TTLs and incur rent (SPEC §9.5); simulation does not persist those extensions:
 ```rust
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
 ```
@@ -478,7 +484,8 @@ On-chain state, keyed per the `DataKey` enum in `src/types.rs` (SPEC §3):
 | `AdminFrozen` | `bool` | persistent | admin-initiated freeze flag |
 
 Instance keys auto-refresh TTL on every invocation; persistent keys are extended to the
-maximum TTL on every write (`persist_set`). The `Window` ledger is bounded at
+maximum TTL on writes and refreshed to maximum when a read finds less than half the maximum
+TTL remaining (`persist_get`; SPEC §9.5). The `Window` ledger is bounded at
 `MAX_WINDOW_ENTRIES = 8192` — beyond that, the two oldest entries merge *forward*
 (conservative over-count), so the `window_cap` ceiling is never exceeded (SPEC §3.1).
 See [Storage rent and TTL cost model](docs/rent-and-ttl.md) for approximate XLM costs,

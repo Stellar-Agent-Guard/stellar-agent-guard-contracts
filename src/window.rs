@@ -6,6 +6,10 @@
 //! popped lazily on access; same-second spends coalesce; at the entry bound
 //! the two oldest entries merge *forward* (newer ts), which can only
 //! over-count — never under-count — so the ceiling is never exceeded.
+//!
+//! Persistent `WindowState` TTL management belongs to the storage boundary in
+//! `lib.rs` (`persist_get`/`save_ledger`); this module transforms only the
+//! in-memory snapshot after storage has loaded it.
 
 use crate::types::{SpendEntry, MAX_WINDOW_ENTRIES};
 use soroban_sdk::Env;

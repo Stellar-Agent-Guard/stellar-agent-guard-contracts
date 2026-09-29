@@ -412,16 +412,16 @@ pub fn heartbeat(env: Env)
 pub fn freeze(env: Env)      // require_auth(Admin); sets AdminFrozen = true
 pub fn unfreeze(env: Env)    // require_auth(Admin); clears AdminFrozen, LastHeartbeat = now
 
-// ── Read / advisory (no auth — safe reads only, nothing confidential) ─────
+// ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ──
 pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
 pub fn status(env: Env) -> Status                     // frozen? admin_frozen? last_heartbeat? now?
 pub fn dms_health(env: Env) -> DmsHealth                  // ok, warn (>=80%), or expired
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
-    // Pure pre-flight replica of the §6.2 decision path (same code, no writes):
-    // lets agents/SDK simulate an asset transfer before signing. Emits the same
-    // events as an in-path decision so telemetry sees one vocabulary.
+    // Pure pre-flight replica of the §6.2 decision path: it does not change
+    // spend accounting, but a submitted call may refresh TTLs under §9.5.
+    // Simulation before signing does not persist those rent bumps.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
-  // Same zero-write pre-flight, with remaining_window and effective cap metrics.
+  // Same pre-flight, with remaining_window and effective cap metrics.
 
 // ── Enforcement (host-invoked; not callable by anyone) ────────────────────
 impl CustomAccountInterface for PolicyEngine {
@@ -431,7 +431,7 @@ impl CustomAccountInterface for PolicyEngine {
                     auth_contexts: Vec<Context>) -> Result<(), Error>;
     // 1. ed25519_verify(AgentPubkey, signature_payload, signatures) or Unauthorized.
     // 2. Decision table §4 + classification §6 over every context.
-    // 3. Events (§9) + storage writes only on admission.
+    // 3. Events (§9) + TTL refreshes (§9.5); spend-accounting writes only on admission.
 }
 ```
 
@@ -481,8 +481,9 @@ pub enum Error {            // values stable; see tests/fixtures
 }
 ```
 
-`check_detailed` loads and prunes only an in-memory copy of the rolling ledger.
-It writes no ledger state and emits the same `auth_checked` event, with the same
+`check_detailed` loads and prunes only an in-memory copy of the rolling ledger;
+it does not change spend accounting. A submitted invocation may refresh persistent
+entry TTLs under §9.5 and emits the same `auth_checked` event, with the same
 `allowed`/`blocked` result and reason, as `check`. `remaining_window` is the
 capacity available before the requested transfer; it is `None` when the rolling
 window cap is disabled. The configured and effective caps are `None` when
@@ -528,6 +529,34 @@ off-chain. Rotations record both endpoints (outgoing and incoming) so an auditor
 "when did key K stop being authoritative" from the append-only event log; the full public key is
 never repeated in event data (it is already public at `initialize`). SDK/dashboard decoders must
 render the `BytesN<8>` data fields as hex — a cross-repo follow-up tracked in those repositories.
+
+### 9.5 Persistent storage TTL liveness
+
+`Policy`, `Window`, `LastHeartbeat`, `AdminFrozen`, and `PolicyRevision` are persistent ledger
+entries. A successful write extends its entry to `env.storage().max_ttl()` ledgers. A successful
+read refreshes the accessed entry to that same TTL when its remaining TTL is below half of
+`max_ttl()`. The extension target is a TTL duration relative to the current ledger sequence, not
+an absolute sequence number. This thresholded read refresh avoids paying rent on every read while
+keeping frequently accessed guard state away from archival. Because of this refresh, submitting a
+read call such as `policy`, `status`, or `check` can write TTL metadata and charge rent when the
+threshold is crossed; an RPC simulation (`send=no`) does not persist that change. A rejected
+authorization transaction rolls back its TTL updates along with its other state changes.
+
+This is an activity-based liveness policy, not a promise that untouched state never expires. If
+an entry is left untouched for its full maximum TTL, Soroban archives it. A transaction that
+accesses archived persistent data must restore that entry in its footprint before contract
+execution; RPC simulation normally supplies the restore footprint. If restoration is not
+included or its rent cannot be funded, the transaction fails before a guard decision can approve
+the spend. Once restored, a successful read refreshes the entry. Operators requiring liveness
+through inactivity longer than the maximum TTL must arrange a keeper/restore transaction before
+expiry; the contract cannot run a background extension itself.
+
+The executable TTL regression test shortens the test ledger's persistent TTL, advances ledger
+sequence past expiry, and verifies that archived `Policy`, `Window`, `LastHeartbeat`, and
+`AdminFrozen` entries restore with their original values. It also checks that a pre-expiry spend
+still counts against `window_cap` after restoration and that an expired dead-man clock remains
+expired. See [issue #43](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/43)
+and the operator [rent/TTL guide](docs/rent-and-ttl.md).
 
 ---
 
