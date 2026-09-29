@@ -1,4 +1,4 @@
-//! agent-tx — sign and submit Soroban transactions on behalf of the
+//! agent-tx — simulate and submit Soroban transactions on behalf of the
 //! `stellar-agent-guard` custom account.
 //!
 //! Why this exists: the `stellar` CLI builds Soroban auth entries and signs
@@ -19,6 +19,7 @@
 //! 5. on success, send the transaction and poll for the result.
 //!
 //! Usage:
+//! agent-tx preflight --guard C... --asset C... --to G... --amount 50 [--secret S...]
 //! ```text
 //! agent-tx transfer --guard C... --token C... --to G... --amount 50 \
 //!     --agent-secret S... [--expect-blocked] [--rpc-url ...] [--network-passphrase "..."]
@@ -130,6 +131,13 @@ struct Rpc {
     url: String,
 }
 
+trait PreflightRpc {
+    fn account_seq(&self, account: &str) -> i64;
+    fn latest_ledger(&self) -> u32;
+    fn simulate(&self, envelope: &str) -> serde_json::Value;
+    fn registered_agent_pubkey(&self, guard: &ScAddress) -> [u8; 32];
+}
+
 impl Rpc {
     fn post(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
         let body = serde_json::json!({
@@ -192,6 +200,49 @@ impl Rpc {
 
     fn get_tx(&self, hash: &str) -> serde_json::Value {
         self.post("getTransaction", serde_json::json!({ "hash": hash }))
+    }
+}
+
+impl PreflightRpc for Rpc {
+    fn account_seq(&self, account: &str) -> i64 {
+        Rpc::account_seq(self, account)
+    }
+
+    fn latest_ledger(&self) -> u32 {
+        Rpc::latest_ledger(self)
+    }
+
+    fn simulate(&self, envelope: &str) -> serde_json::Value {
+        Rpc::simulate(self, envelope)
+    }
+
+    fn registered_agent_pubkey(&self, guard: &ScAddress) -> [u8; 32] {
+        let key = guard_instance_key(guard);
+        let res = self.post(
+            "getLedgerEntries",
+            serde_json::json!({ "keys": [b64_encode_xdr(&key)] }),
+        );
+        let entry = res["entries"][0]["xdr"]
+            .as_str()
+            .expect("guard instance ledger entry XDR");
+        let entry: LedgerEntryData = xdr(entry);
+        let LedgerEntryData::ContractData(entry) = entry else {
+            panic!("unexpected guard instance ledger entry: {entry:?}");
+        };
+        let ScVal::ContractInstance(instance) = entry.val else {
+            panic!("guard instance ledger entry did not contain a contract instance");
+        };
+        instance
+            .storage
+            .unwrap_or_default()
+            .iter()
+            .find_map(|item| match &item.val {
+                ScVal::Bytes(bytes) if bytes.0.len() == 32 => {
+                    Some(bytes.0.as_slice().try_into().expect("agent key length"))
+                }
+                _ => None,
+            })
+            .expect("registered agent public key not found in guard instance storage")
     }
 }
 
@@ -314,8 +365,88 @@ struct Args {
     rpc: Rpc,
     passphrase: String,
     guard: ScAddress,
-    secret: String,
+    secret: Option<String>,
     expect_blocked: bool,
+}
+
+fn preflight<R: PreflightRpc>(call: &Call, args: &Args, rpc: &R) -> Result<(), i32> {
+    let (agent, source_pk) = if let Some(secret) = &args.secret {
+        let agent = SigningKey::from_bytes(&secret_to_seed(secret));
+        let pubkey = agent.verifying_key().to_bytes();
+        (Some(agent), pubkey)
+    } else {
+        (None, rpc.registered_agent_pubkey(&args.guard))
+    };
+    let source_g = account_strkey(&source_pk);
+    let seq = rpc.account_seq(&source_g).saturating_add(1);
+    let latest = rpc.latest_ledger();
+    let sig_exp = latest.saturating_add(10_000);
+    let network_id: [u8; 32] = Sha256::digest(args.passphrase.as_bytes()).into();
+    let invocation = call.invocation(&args.guard);
+    let auth = agent
+        .as_ref()
+        .map(|agent| {
+            VecM::try_from(vec![build_auth_entry(
+                &args.guard,
+                &invocation,
+                seq,
+                sig_exp,
+                &network_id,
+                agent,
+            )])
+            .expect("auth count")
+        })
+        .unwrap_or_default();
+    let env = build_initial_envelope(
+        &MuxedAccount::Ed25519(Uint256(source_pk)),
+        seq,
+        invoke_op(&invocation, auth),
+        &args.guard,
+    );
+    let sim = rpc.simulate(&b64_encode_xdr(&env));
+
+    if let Some(err) = sim.get("error") {
+        if agent.is_some() {
+            println!("BLOCKED (pre-broadcast, enforced simulation):");
+        } else {
+            println!("RESULT: INDETERMINATE (unsigned simulation failed):");
+        }
+        if let Some(code) = err["code"].as_str() {
+            println!("  error code: {code}");
+        }
+        if let Some(msg) = err["message"].as_str() {
+            println!("  message: {msg}");
+        }
+        if let Some(events) = err["data"]["events"].as_array() {
+            println!("  diagnostic events:");
+            print_events(&serde_json::Value::Array(events.clone()));
+        }
+        println!("  broadcast: no");
+        return Err(if agent.is_some() { 1 } else { 2 });
+    }
+
+    let min_fee: u32 = sim["minResourceFee"]
+        .as_str()
+        .expect("simulation minResourceFee")
+        .parse()
+        .expect("simulation fee");
+    const GUARD_KEY_FEE_BUMP: u32 = 100_000;
+    let fee = min_fee
+        .saturating_add(INCLUSION_FEE)
+        .saturating_add(GUARD_KEY_FEE_BUMP);
+    if agent.is_some() {
+        println!("RESULT: ALLOWED (preflight only)");
+    } else {
+        println!("RESULT: INDETERMINATE (unsigned simulation)");
+        println!("  limitation: provide --secret to run signed __check_auth simulation");
+    }
+    println!("estimated fee: {fee} stroops");
+    println!("broadcast: no");
+    if agent.is_some() {
+        Ok(())
+    } else {
+        Err(2)
+    }
 }
 
 /// The guard storage keys `__check_auth` reads. Declaring them in the *first*
@@ -496,7 +627,7 @@ impl Call {
 
 fn run(call: &Call, args: &Args) {
     let guard = &args.guard;
-    let seed = secret_to_seed(&args.secret);
+    let seed = secret_to_seed(args.secret.as_deref().expect("--agent-secret required"));
     let agent = SigningKey::from_bytes(&seed);
     let source_pk = agent.verifying_key().to_bytes();
     let source_g = account_strkey(&source_pk);
@@ -516,7 +647,7 @@ fn run(call: &Call, args: &Args) {
     let auth = VecM::try_from(vec![build_auth_entry(
         guard,
         &invocation,
-        seq as i64,
+        seq,
         sig_exp,
         &network_id,
         &agent,
@@ -937,6 +1068,87 @@ mod tests {
             _ => panic!("expected contract address"),
         }
     }
+
+    #[derive(Default)]
+    struct MockPreflightRpc {
+        sequence: std::cell::Cell<i64>,
+        sequence_reads: std::cell::Cell<u32>,
+        simulations: std::cell::Cell<u32>,
+        response: serde_json::Value,
+    }
+
+    impl PreflightRpc for MockPreflightRpc {
+        fn account_seq(&self, _account: &str) -> i64 {
+            self.sequence_reads.set(self.sequence_reads.get() + 1);
+            self.sequence.get()
+        }
+
+        fn latest_ledger(&self) -> u32 {
+            100
+        }
+
+        fn simulate(&self, _envelope: &str) -> serde_json::Value {
+            self.simulations.set(self.simulations.get() + 1);
+            self.response.clone()
+        }
+
+        fn registered_agent_pubkey(&self, _guard: &ScAddress) -> [u8; 32] {
+            let seed = secret_to_seed("SBRVOEN5IIWAROJVJI2OHN2IYD2H3S75UOM3UKY7RQ42JRDPH5KRHQC4");
+            SigningKey::from_bytes(&seed).verifying_key().to_bytes()
+        }
+    }
+
+    #[test]
+    fn preflight_simulates_without_submitting_or_advancing_sequence() {
+        let rpc = MockPreflightRpc {
+            sequence: std::cell::Cell::new(7),
+            response: serde_json::json!({ "minResourceFee": "200" }),
+            ..Default::default()
+        };
+        let args = Args {
+            rpc: Rpc { url: String::new() },
+            passphrase: DEFAULT_PASSPHRASE.to_string(),
+            guard: "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
+                .parse()
+                .unwrap(),
+            secret: None,
+            expect_blocked: false,
+        };
+
+        assert_eq!(preflight(&Call::Heartbeat, &args, &rpc), Err(2));
+        assert_eq!(rpc.sequence_reads.get(), 1);
+        assert_eq!(rpc.simulations.get(), 1);
+        assert_eq!(rpc.sequence.get(), 7);
+    }
+
+    #[test]
+    fn signed_preflight_block_returns_failure_without_advancing_sequence() {
+        let rpc = MockPreflightRpc {
+            sequence: std::cell::Cell::new(7),
+            response: serde_json::json!({
+                "error": {
+                    "code": "simulation",
+                    "message": "auth_checked: per_tx_cap_exceeded",
+                    "data": { "events": [] }
+                }
+            }),
+            ..Default::default()
+        };
+        let args = Args {
+            rpc: Rpc { url: String::new() },
+            passphrase: DEFAULT_PASSPHRASE.to_string(),
+            guard: "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
+                .parse()
+                .unwrap(),
+            secret: Some("SBRVOEN5IIWAROJVJI2OHN2IYD2H3S75UOM3UKY7RQ42JRDPH5KRHQC4".to_string()),
+            expect_blocked: false,
+        };
+
+        assert_eq!(preflight(&Call::Heartbeat, &args, &rpc), Err(1));
+        assert_eq!(rpc.sequence_reads.get(), 1);
+        assert_eq!(rpc.simulations.get(), 1);
+        assert_eq!(rpc.sequence.get(), 7);
+    }
 }
 
 fn map_submission_error(err_str: &str) -> String {
@@ -954,11 +1166,15 @@ fn map_submission_error(err_str: &str) -> String {
 }
 
 fn print_help() {
-    println!("agent-tx — sign and submit Soroban transactions for Stellar Agent Guard");
+    println!("agent-tx — simulate or submit Soroban transactions for Stellar Agent Guard");
     println!("Usage:");
+    println!("  agent-tx preflight --guard <C...> --asset <C...> --to <G...> --amount <N> [--secret <S...>]");
     println!("  agent-tx transfer --guard <C...> --token <C...> --to <G...> --amount <N> --agent-secret <S...>");
     println!("  agent-tx heartbeat --guard <C...> --agent-secret <S...>");
     println!("  agent-tx guards <add|list|remove|set-default> ...");
+    println!(
+        "Preflight exit codes: 0=admitted, 1=blocked (signed simulation), 2=unsigned/inconclusive."
+    );
     println!("Troubleshooting: See README.md 'Troubleshooting — Submission Errors' table for error mapping and concrete fix flags (--fee-multiplier, etc.).");
 }
 
@@ -994,8 +1210,11 @@ fn main() {
             }
             return;
         }
-        "transfer" | "heartbeat" => {}
+        "preflight" | "transfer" | "heartbeat" => {}
         other => panic!("unknown subcommand {other}"),
+    }
+    if cmd == "preflight" {
+        println!("send=no (preflight only)");
     }
 
     let mut guard_s = None;
@@ -1011,10 +1230,10 @@ fn main() {
         let mut val = || it.next().expect(&format!("value for {a}"));
         match a.as_str() {
             "--guard" => guard_s = Some(val()),
-            "--token" => token_s = Some(val()),
+            "--token" | "--asset" => token_s = Some(val()),
             "--to" => to_s = Some(val()),
             "--amount" => amount = Some(val().parse().expect("amount")),
-            "--agent-secret" => secret = Some(val()),
+            "--agent-secret" | "--secret" => secret = Some(val()),
             "--rpc-url" => rpc_url = val(),
             "--network-passphrase" => passphrase = val(),
             "--expect-blocked" => expect_blocked = true,
@@ -1026,9 +1245,11 @@ fn main() {
         eprintln!("Error: {e}");
         std::process::exit(1);
     });
-    let secret = secret
-        .or_else(|| std::env::var("AGENT_SECRET").ok())
-        .expect("--agent-secret");
+    let secret = secret.or_else(|| std::env::var("AGENT_SECRET").ok());
+    if cmd != "preflight" && secret.is_none() {
+        eprintln!("Error: --agent-secret (or AGENT_SECRET) is required for submission commands");
+        std::process::exit(1);
+    }
     let guard: ScAddress = guard_addr.parse().expect("guard address");
     let args = Args {
         rpc: Rpc { url: rpc_url },
@@ -1039,6 +1260,13 @@ fn main() {
     };
 
     match cmd.as_str() {
+        "preflight" => {
+            let token: ScAddress = token_s.expect("--asset").parse().expect("asset address");
+            let to: ScAddress = to_s.expect("--to").parse().expect("to address");
+            let amount = amount.expect("--amount");
+            let result = preflight(&Call::Transfer { token, to, amount }, &args, &args.rpc);
+            std::process::exit(result.err().unwrap_or(0));
+        }
         "transfer" => {
             let token: ScAddress = token_s.expect("--token").parse().expect("token address");
             let to: ScAddress = to_s.expect("--to").parse().expect("to address");
