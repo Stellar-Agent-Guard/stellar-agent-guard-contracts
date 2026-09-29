@@ -141,7 +141,7 @@ fn persist_get<T: soroban_sdk::TryFromVal<Env, Val>>(env: &Env, key: &DataKey) -
 /// authorization snapshot) must not re-read the key to find out.
 fn load_window(env: &Env) -> (Ledger, bool) {
     match persist_get::<WindowState>(env, &DataKey::Window) {
-        Some(state) => (Ledger::from_entries(env, state.entries), true),
+        Some(state) => (Ledger::from_state(env, state), true),
         None => (Ledger::empty(env), false),
     }
 }

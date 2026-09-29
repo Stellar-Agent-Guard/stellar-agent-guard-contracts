@@ -17,21 +17,14 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule};
 use crate::types::{
     CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule, WindowState,
 };
 use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
-use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
-
-use ed25519_dalek::{Signer, SigningKey};
-use sha2::{Digest, Sha256};
-use soroban_sdk::auth::{Context, CustomAccountInterface};
 use soroban_sdk::testutils::{storage::Persistent as _, Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{
     self, ContractCostType, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs,
