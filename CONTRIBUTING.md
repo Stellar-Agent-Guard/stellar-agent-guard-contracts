@@ -48,9 +48,15 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    authorization path must be deliberate `panic_with_error!` calls that surface
    as stable `Error` reasons (SPEC §7), never accidental traps.
 2. **Every policy change must update SPEC.md and the tests together** — the
-   decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2 /
-   README) must stay word-for-word consistent with the code; that consistency is
-   a review requirement, not a nicety.
+   decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2)
+   must stay word-for-word consistent with the code; that consistency is
+   a review requirement, not a nicety. Scope *wording* itself is single-sourced:
+   edit the canonical paragraph in SPEC §2 only — the README and
+   `docs/enforcement-scope.md` carry short excerpts plus a
+   `full statement: SPEC §2` link that auto-follows (re-sync an excerpt only if
+   the quoted sentence itself changes). Copies in sibling repositories
+   (`stellar-agent-guard-sdk`, `stellar-agent-guard-dashboard`) are out of scope
+   here; they are tracked in their own issue trackers.
 3. **`clippy::all` and `clippy::pedantic` clean** — enforced in CI with
    `-D warnings`.
 4. **`cargo fmt` clean** — enforced in CI.
