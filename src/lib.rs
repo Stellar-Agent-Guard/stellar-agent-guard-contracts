@@ -527,33 +527,22 @@ impl PolicyEngine {
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
         let cfg = persist_get::<PolicyConfig>(&env, &DataKey::Policy);
-        let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
-            emit_auth(&env, false, Some(Error::NoPolicy), 0);
-            return CheckDetail {
-                result: CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason())),
-                remaining_window: None,
-                per_tx_cap: None,
-                effective_per_tx_cap: None,
-                effective_window_cap: None,
-            };
-        };
         let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
         let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
         let now = env.ledger().timestamp();
         let self_addr = env.current_contract_address();
         let mut ledger = load_ledger(&env);
 
-        let (remaining_window, per_tx_cap, effective_window_cap) =
-            cfg.as_ref().map_or((None, None, None), |cfg| {
-                if cfg.window_cap > 0 {
-                    ledger.prune(now, cfg.window_secs);
-                }
-                cap_metrics(cfg, &ledger)
-            });
-        if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
-            ledger.prune(now, cfg.window_secs);
+        // A missing policy is decided by `decide` itself (SPEC §4 ordering:
+        // admin freeze outranks no-policy), so `None` flows straight through.
+        if let Some(cfg) = cfg.as_ref() {
+            if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
+                ledger.prune(now, cfg.window_secs);
+            }
         }
-        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&cfg, &ledger, &to);
+        let (remaining_window, per_tx_cap, effective_window_cap) = cfg
+            .as_ref()
+            .map_or((None, None, None), |cfg| cap_metrics(cfg, &ledger, &to));
         let effective_per_tx_cap = per_tx_cap;
         let call = transfer_context(&env, &asset, &to, amount);
         let verdicts = decide(
@@ -636,13 +625,9 @@ impl CustomAccountInterface for PolicyEngine {
         env.crypto().ed25519_verify(&agent, &message, &signatures);
 
         // 3. Policy snapshot + gate evaluation over every context.
+        // A missing policy is decided by `decide` itself (SPEC §4 ordering:
+        // admin freeze outranks no-policy), so `None` flows straight through.
         let cfg = persist_get::<PolicyConfig>(&env, &DataKey::Policy);
-        let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
-            for i in 0..auth_contexts.len() {
-                emit_auth(&env, false, Some(Error::NoPolicy), i);
-            }
-            return Err(Error::NoPolicy);
-        };
         let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
         let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
         let now = env.ledger().timestamp();

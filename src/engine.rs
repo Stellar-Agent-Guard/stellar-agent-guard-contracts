@@ -222,17 +222,18 @@ pub fn decide(
     ledger: &mut Ledger,
     now: u64,
     contexts: soroban_sdk::Vec<Context>,
-) -> Decision {
-    // ── Account-level gates (SPEC §4, rules 1-5) ─────────────────────────
-    if state.admin_frozen {
-        return Decision::Blocked(Error::AdminFrozen);
-    }
-    let Some(cfg) = policy else {
-        return Decision::Blocked(Error::NoPolicy);
-    };
-    if cfg.dms_grace_secs > 0
 ) -> alloc::vec::Vec<Decision> {
     let mut verdicts = alloc::vec::Vec::new();
+
+    // ── Account-level gates (SPEC §4, rules 1-5; first match wins) ───────
+    // Admin freeze outranks a missing policy: a frozen account reports
+    // `AdminFrozen` even when its policy was revoked or never installed.
+    if state.admin_frozen {
+        for _ in 0..contexts.len() {
+            verdicts.push(Decision::Blocked(Error::AdminFrozen));
+        }
+        return verdicts;
+    }
 
     let Some(cfg) = policy else {
         for _ in 0..contexts.len() {
@@ -241,9 +242,7 @@ pub fn decide(
         return verdicts;
     };
 
-    let account_error = if state.admin_frozen {
-        Some(Error::AdminFrozen)
-    } else if cfg.dms_grace_secs > 0
+    let account_error = if cfg.dms_grace_secs > 0
         && state.last_heartbeat != 0
         && now.saturating_sub(state.last_heartbeat) > cfg.dms_grace_secs
     {
@@ -810,7 +809,9 @@ mod tests {
             last_heartbeat: 0,
         };
         assert!(matches!(
-            decide(&env, &sa, None, &frozen, &mut l, 1000, ctx.clone()),
+            decide(&env, &sa, None, &frozen, &mut l, 1000, ctx.clone())
+                .first()
+                .unwrap(),
             Decision::Blocked(Error::AdminFrozen)
         ));
     }
