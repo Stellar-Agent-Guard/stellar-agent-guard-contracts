@@ -127,6 +127,17 @@ fn parse_call_inner(
                 } else {
                     (2u32, 3u32)
                 };
+                // Exact arity required: transfer = 3 args, transfer_from = 4 args.
+                // Extra trailing args or short arg lists are rejected -- we do not
+                // partially parse a call whose effective meaning we do not fully
+                // understand (SPEC section 6.2). Falling through to Unknown = default deny.
+                let expected_arity: u32 = if fn_name == &fn_transfer { 3 } else { 4 };
+                if args.len() != expected_arity {
+                    return ParsedCall::Unknown {
+                        contract: contract.clone(),
+                        fname: fn_name.clone(),
+                    };
+                }
                 let to_val = args.get(to_idx);
                 let amt_val = args.get(amt_idx);
                 if let (Some(to_val), Some(amt_val)) = (to_val, amt_val) {
@@ -616,5 +627,123 @@ mod tests {
             d,
             Decision::Blocked(Error::SelfFunctionNotAllowed)
         ));
+    }
+
+    fn transfer_ctx_with_extra_args(
+        env: &Env,
+        asset: u8,
+        to: u8,
+        amount: i128,
+        extra: u32,
+    ) -> Context {
+        let mut args: Vec<Val> = Vec::new(env);
+        args.push_back(addr(env, 9).into_val(env));
+        args.push_back(addr(env, to).into_val(env));
+        args.push_back(amount.into_val(env));
+        for i in 0..extra {
+            args.push_back(i128::from(i).into_val(env));
+        }
+        Context::Contract(ContractContext {
+            contract: addr(env, asset),
+            fn_name: Symbol::new(env, "transfer"),
+            args,
+        })
+    }
+
+    fn transfer_from_ctx_with_arg_count(
+        env: &Env,
+        asset: u8,
+        to: u8,
+        amount: i128,
+        count: u32,
+    ) -> Context {
+        let mut args: Vec<Val> = Vec::new(env);
+        args.push_back(addr(env, 9).into_val(env));
+        args.push_back(addr(env, 8).into_val(env));
+        args.push_back(addr(env, to).into_val(env));
+        args.push_back(amount.into_val(env));
+        if count < 4 {
+            let mut short: Vec<Val> = Vec::new(env);
+            for i in 0..count {
+                if let Some(v) = args.get(i) {
+                    short.push_back(v);
+                }
+            }
+            args = short;
+        } else {
+            for i in 4..count {
+                args.push_back(i128::from(i).into_val(env));
+            }
+        }
+        Context::Contract(ContractContext {
+            contract: addr(env, asset),
+            fn_name: Symbol::new(env, "transfer_from"),
+            args,
+        })
+    }
+
+    #[test]
+    fn arity_guard_transfer_4_args_is_denied() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, transfer_ctx_with_extra_args(&env, 1, 2, 5, 1)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
+        assert!(matches!(d, Decision::Blocked(Error::UnknownContract)));
+    }
+
+    #[test]
+    fn arity_guard_transfer_2_args_is_denied() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        let mut l = Ledger::empty(&env);
+        let mut args: Vec<Val> = Vec::new(&env);
+        args.push_back(addr(&env, 9).into_val(&env));
+        args.push_back(addr(&env, 2).into_val(&env));
+        let ctx = vec![
+            &env,
+            Context::Contract(ContractContext {
+                contract: addr(&env, 1),
+                fn_name: Symbol::new(&env, "transfer"),
+                args,
+            }),
+        ];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
+        assert!(matches!(d, Decision::Blocked(Error::UnknownContract)));
+    }
+
+    #[test]
+    fn arity_guard_transfer_from_5_args_is_denied() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, transfer_from_ctx_with_arg_count(&env, 1, 2, 5, 5)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
+        assert!(matches!(d, Decision::Blocked(Error::UnknownContract)));
+    }
+
+    #[test]
+    fn arity_guard_transfer_from_3_args_is_denied() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, transfer_from_ctx_with_arg_count(&env, 1, 2, 5, 3)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
+        assert!(matches!(d, Decision::Blocked(Error::UnknownContract)));
+    }
+
+    #[test]
+    fn arity_guard_transfer_from_4_args_is_allowed() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, transfer_from_ctx_with_arg_count(&env, 1, 2, 5, 4)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
+        assert!(matches!(d, Decision::Allowed));
     }
 }
