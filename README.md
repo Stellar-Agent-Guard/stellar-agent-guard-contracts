@@ -91,7 +91,7 @@ This boundary is an inherent property of the platform (the auth context does not
 
 ## Quick Start
 
-```bash
+```bash-verify
 # Build the contract and run the test suite
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
@@ -405,7 +405,7 @@ When submitting transactions via `agent-tx` (run `agent-tx --help` for usage and
 | `futurenet` | `https://rpc-futurenet.stellar.org` |
 
 ### Build from source
-```bash
+```bash-verify
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
