@@ -6,7 +6,6 @@
 
 set -euo pipefail
 
-# Collect target markdown files that actually exist
 TARGET_FILES=()
 if [ "$#" -gt 0 ]; then
   TARGET_FILES=("$@")
@@ -31,6 +30,7 @@ for file in "${TARGET_FILES[@]}"; do
   in_block=0
   block_start=0
   should_run=0
+  in_header=0
 
   while IFS= read -r raw_line || [ -n "$raw_line" ]; do
     line_no=$((line_no + 1))
@@ -42,6 +42,7 @@ for file in "${TARGET_FILES[@]}"; do
           in_block=1
           block_start=$line_no
           should_run=0
+          in_header=1
           : > "$TMP_BLOCK"
           ;;
       esac
@@ -52,6 +53,7 @@ for file in "${TARGET_FILES[@]}"; do
       case "$line" in
         '```'*)
           in_block=0
+          in_header=0
           TOTAL_BLOCKS=$((TOTAL_BLOCKS + 1))
 
           # 1. Syntax check with bash -n
@@ -75,11 +77,24 @@ for file in "${TARGET_FILES[@]}"; do
             RUN_PASSED=$((RUN_PASSED + 1))
           fi
           ;;
-        *'# run:'*)
-          should_run=1
-          printf "%s\n" "$line" >> "$TMP_BLOCK"
-          ;;
         *)
+          # Detect opt-in run header directive at the top of the block
+          trimmed="${line#"${line%%[![:space:]]*}"}"
+          if [ "$in_header" -eq 1 ]; then
+            case "$trimmed" in
+              '# run:'* | '#run:'*)
+                should_run=1
+                ;;
+              '#'* | '')
+                # Still in leading comments or blank lines
+                ;;
+              *)
+                # Hit executable command; header section ended
+                in_header=0
+                ;;
+            esac
+          fi
+
           printf "%s\n" "$line" >> "$TMP_BLOCK"
           ;;
       esac
