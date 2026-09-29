@@ -203,8 +203,6 @@ impl AuthSnapshot {
             window_persisted,
             ledger,
         })
-        Some(state) => Ledger::from_state(env, state),
-        None => Ledger::empty(env),
     }
 }
 
@@ -409,7 +407,7 @@ fn emit_agent_rotated(env: &Env, by: &Address, old: &BytesN<32>, new: &BytesN<32
     .publish(env);
 }
 
-// ── Contract ─────────────────────────────────────────────────────────────
+// ── Contract ──────────────────────────────────────────────────────────
 
 #[contract]
 pub struct PolicyEngine;
@@ -592,8 +590,6 @@ impl PolicyEngine {
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
         let Some(snapshot) = AuthSnapshot::load(&env) else {
-            emit_auth(&env, false, Some(Error::NoPolicy));
-        let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
             emit_auth(&env, false, Some(Error::NoPolicy), 0);
             return CheckDetail {
                 result: CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason())),
@@ -603,6 +599,7 @@ impl PolicyEngine {
                 effective_window_cap: None,
             };
         };
+
         let AuthSnapshot {
             policy,
             admin_frozen,
@@ -612,15 +609,12 @@ impl PolicyEngine {
         } = snapshot;
         let now = env.ledger().timestamp();
         let self_addr = env.current_contract_address();
-        if policy.window_cap > 0 {
+
+        if policy.window_cap > 0 || !policy.recipient_window_caps.is_empty() {
             ledger.prune(now, policy.window_secs);
         }
-        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&policy, &ledger);
-        let mut ledger = load_ledger(&env);
-        if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
-            ledger.prune(now, cfg.window_secs);
-        }
-        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&cfg, &ledger, &to);
+
+        let (remaining_window, per_tx_cap, effective_window_cap) = cap_metrics(&policy, &ledger, &to);
         let effective_per_tx_cap = per_tx_cap;
         let call = transfer_context(&env, &asset, &to, amount);
         let verdicts = decide(
@@ -706,14 +700,12 @@ impl CustomAccountInterface for PolicyEngine {
         //    storage read set of an authorization happens here, in one place,
         //    exactly once per key — see the `AuthSnapshot` invariant.
         let Some(snapshot) = AuthSnapshot::load(&env) else {
-            emit_auth(&env, false, Some(Error::NoPolicy));
-        // 3. Policy snapshot + gate evaluation over every context.
-        let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
             for i in 0..auth_contexts.len() {
                 emit_auth(&env, false, Some(Error::NoPolicy), i);
             }
             return Err(Error::NoPolicy);
         };
+
         let AuthSnapshot {
             policy,
             admin_frozen,
@@ -724,7 +716,6 @@ impl CustomAccountInterface for PolicyEngine {
         let now = env.ledger().timestamp();
         let self_addr = env.current_contract_address();
 
-        let mut ledger = load_ledger(&env);
         let verdicts = decide(
             &env,
             &self_addr,
@@ -755,9 +746,8 @@ impl CustomAccountInterface for PolicyEngine {
 
         if all_passed {
             // 4. Persist window changes made by the decision.
-            let had_window = persist_get::<WindowState>(&env, &DataKey::Window).is_some();
             let has_entries = ledger.len() > 0 || ledger_has_recipient_entries(&ledger);
-            if had_window || has_entries {
+            if window_persisted || has_entries {
                 save_ledger(&env, &ledger);
             }
             Ok(())
