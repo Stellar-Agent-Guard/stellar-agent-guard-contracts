@@ -31,6 +31,9 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+      - name: Verify documentation code blocks
+        run: ./scripts/check-code-blocks.sh
+
       - name: Clippy (all + pedantic deny, all targets/features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 

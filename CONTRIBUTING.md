@@ -124,3 +124,6 @@ When bumping `soroban-sdk` version in `Cargo.toml`, you **must** re-verify
 SPEC §1.1 quotes against the new SDK source (`src/auth.rs`, `src/custom_account.rs`).
 Update the version comment in `Cargo.toml` and the SPEC §1.1 header accordingly.
 This is the mechanical ratchet preventing silent auth-semantics drift.
+### Embedded Code Block Verification
+
+Embedded bash snippets in documentation (`README.md`, `SPEC.md`) intended for copy-pasting should be tagged with the ````bash-verify```` language marker. The CI script `scripts/check-code-blocks.sh` verifies each tagged block for syntax correctness using `bash -n` and reports errors with a `file:line` locator. Blocks containing hermetic local commands can opt in to execution by adding a `# run: true` comment header, while commands requiring network access or external live environments (such as `stellar` CLI testnet calls) must remain syntax-only.
