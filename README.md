@@ -94,7 +94,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 45 tests, isolated (no network)
+cargo test                                      # 68 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only)
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -127,6 +127,15 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
   --agent_pubkey 1cb479acb9bb7d9b3a04a6865f5c44216f8a463d64ea7ceeb1447fee21cdcc05
 # → ❌ transaction simulation failed: HostError: Error(Contract, #2)   (AlreadyInitialized)
 ```
+
+> **Recovery: `AlreadyInitialized` is not a failure.** Deploy scripts that retry — a
+> fee-bump double-submit or an operator panic-retry — hit `Error(Contract, #2)` on the
+> second attempt when the **first** attempt actually succeeded. If you see it, do **not**
+> redeploy a fresh guard (you would split your policy admin across two contracts): check
+> `status()` first, and only if it reads sane (`has_policy: false`/`admin_frozen: false`,
+> agent key as expected) proceed directly to the next step, `set_policy`. Redeploy only
+> if `status()` shows the first attempt genuinely failed (nothing was ever initialized).
+
 The Phase-1 deployment's real `initialize` transaction:
 `cb17b7b1c65bff74b6bc99f67fe3cf1070c7a28f14bdd71527ba60c9d4a81264`.
 
@@ -146,6 +155,8 @@ starts the dead-man-switch clock at install time (a fresh policy gets full grace
 | `assets` | `Vec<Address>` | SAC token contracts whose transfers get parsed and enforced |
 | `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`) |
 | `recipients` | `Vec<Address>` | allowed SAC transfer destinations |
+| `recipient_window_caps` | `Vec<RecipientCap>` | per-recipient rolling-window cap overrides; recipients not listed use the global `window_cap` |
+| `blocked_recipients` | `Vec<Address>` | denied SAC transfer destinations; checked before the allowlist and `allow_any_recipient` |
 | `allow_any_recipient` | `bool` | escape hatch: skip the recipient allowlist (caps still apply) |
 | `active_from` / `active_until` | `u64` | active window (unix seconds); `0` = unrestricted |
 | `paused` | `bool` | admin kill switch |
@@ -165,9 +176,19 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
     "window_cap": "150", "window_secs": 60 }'
 # → Event: EventPolicySet (event_policy_set)
 ```
-Other validation rules (SPEC §8): negative caps, `window_cap > 0` with `window_secs == 0`,
-duplicate assets/recipients/protocol contracts, empty per-protocol fn lists, or the
-self-address in `assets`/`protocols` all fail with `InvalidConfig`.
+Other validation rules (SPEC §8): negative caps, `window_cap > 0` or a positive
+`recipient_window_caps` entry with `window_secs == 0`, duplicate
+assets/recipients/blocked_recipients/protocol contracts, duplicate recipients in
+`recipient_window_caps`, a non-empty intersection between `recipients` and
+`blocked_recipients`, more than 256 recipients, blocked recipients, or per-recipient
+cap entries, empty per-protocol fn lists, or the self-address in
+`assets`/`protocols`/`recipients`/`blocked_recipients` all fail with `InvalidConfig`.
+
+**Not sure where to start?** Copy-paste presets for common operator personas —
+day-trader agent, payments bot, watch-only + heartbeat, max security — each with
+rationale, explicit "what it does NOT protect against", and unaudited/mainnet/DMS-grace
+warnings, are in [`docs/policy-templates.md`](docs/policy-templates.md). A CI test
+installs every preset documented there, so the examples stay valid.
 
 ### `revoke_policy`
 ```rust
@@ -273,8 +294,10 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 ```rust
 pub fn policy(env: Env) -> Option<PolicyConfig>
 ```
-No auth. Returns the current policy, or `None` (default-deny). Verified live against the
-deployed contract — this is the real installed fixture policy:
+No auth. Returns the current policy, or `None` (default-deny). When submitted on-ledger, this
+read may extend the policy TTL and incur rent if it is below the threshold in [SPEC §9.5](SPEC.md#95-persistent-storage-ttl-liveness);
+simulation does not persist the extension. Verified live against the deployed contract — this is
+the real installed fixture policy:
 ```bash
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --network testnet --source-account guard_admin --send=no -- policy
@@ -289,7 +312,9 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 ```rust
 pub fn status(env: Env) -> Status
 ```
-No auth. Returns `{ has_policy, admin_frozen, heartbeat_expired, last_heartbeat, now }`.
+No auth. Returns `{ has_policy, admin_frozen, heartbeat_expired, last_heartbeat, now }`. When
+submitted on-ledger, this read may extend persistent-entry TTLs and incur rent; simulation does
+not persist those extensions (SPEC §9.5).
 Verified live:
 ```bash
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -304,9 +329,10 @@ itself with zero transactions.
 ```rust
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
 ```
-No auth, no writes. A pure pre-flight replica of the SAC-transfer decision path: lets
-agents/SDKs simulate a transfer *before* signing, emitting the same `auth_checked` events
-as an in-path decision so telemetry sees one vocabulary. Verified live (this account is
+No auth. A pre-flight replica of the SAC-transfer decision path: lets agents/SDKs simulate a
+transfer *before* signing, emitting the same `auth_checked` events as an in-path decision so
+telemetry sees one vocabulary. Submitting it on-ledger may extend persistent-entry TTLs and
+incur rent (SPEC §9.5); simulation does not persist those extensions. Verified live (this account is
 DMS-frozen, so the honest answer today is blocked):
 ```bash
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -317,7 +343,8 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 ```
 
 For operator triage, `check_detailed` returns the same verdict plus current headroom and
-effective caps without writing the rolling window:
+effective caps without changing spend accounting. A submitted call may extend persistent-entry
+TTLs and incur rent (SPEC §9.5); simulation does not persist those extensions:
 ```rust
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
 ```
@@ -453,6 +480,7 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).
 5. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
+   denylist (checked before the allowlist and before `allow_any_recipient`), recipient
    allowlist, per-tx cap, and the rolling-window projection (existing total + amounts
    staged earlier in the same request). Protocol calls get contract + per-function
    allowlisting. Everything else is denied by default.
@@ -476,9 +504,12 @@ On-chain state, keyed per the `DataKey` enum in `src/types.rs` (SPEC §3):
 | `AdminFrozen` | `bool` | persistent | admin-initiated freeze flag |
 
 Instance keys auto-refresh TTL on every invocation; persistent keys are extended to the
-maximum TTL on every write (`persist_set`). The `Window` ledger is bounded at
+maximum TTL on writes and refreshed to maximum when a read finds less than half the maximum
+TTL remaining (`persist_get`; SPEC §9.5). The `Window` ledger is bounded at
 `MAX_WINDOW_ENTRIES = 8192` — beyond that, the two oldest entries merge *forward*
 (conservative over-count), so the `window_cap` ceiling is never exceeded (SPEC §3.1).
+See [Storage rent and TTL cost model](docs/rent-and-ttl.md) for approximate XLM costs,
+who pays extension rent, and the underfunded-expiry failure mode.
 
 ## Architecture
 
@@ -529,6 +560,10 @@ Stellar Agent Guard operates across three dedicated repositories:
 - `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat
   cadence formula (`interval ≤ grace / 3`), pre-flight `check()`, blocked-reason
   handling table, and stop conditions, with tested `agent-tx` commands.
+- `docs/policy-templates.md` — copy-paste **policy presets** for common operator
+  personas (day-trader, payments bot, watch-only, max security), each with rationale
+  and explicit "what it does NOT protect against"; kept installable by
+  `src/policy_preset_tests.rs`, which installs every preset via `set_policy` in CI.
 - `tests/fixtures/README.md` — the real testnet evidence for the five scenarios,
   with a machine-readable scenario index in
   [`tests/fixtures/index.json`](tests/fixtures/index.json) (scenario → tx hash →
@@ -567,6 +602,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 | Per-transaction spend cap | ✅ |
 | Rolling window spend cap | ✅ |
 | Recipient allowlist (SAC transfers) | ✅ |
+| Recipient denylist / blocklist (SAC transfers) | ✅ |
 | Protocol/function allowlist (any call) | ✅ |
 | Dead-man switch (freeze on missed heartbeat) | ✅ |
 | Admin unfreeze | ✅ |
@@ -575,11 +611,11 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-45 tests (unit + integration) cover the policy decision engine — including the regression
+68 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `45 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green this session: `68 passed; 0 failed`.
 
 ```bash
 cargo test

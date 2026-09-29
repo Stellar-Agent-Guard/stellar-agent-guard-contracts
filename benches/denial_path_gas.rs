@@ -58,6 +58,8 @@ fn base_policy(env: &Env) -> PolicyConfig {
         assets: vec![env, addr(env, 1)],
         protocols: Vec::new(env),
         recipients: vec![env, addr(env, 2)],
+        recipient_window_caps: Vec::new(env),
+        blocked_recipients: Vec::new(env),
         allow_any_recipient: false,
         active_from: 0,
         active_until: 0,
@@ -77,7 +79,7 @@ fn alive() -> AccountState {
 /// Measure CPU instructions for a single `decide` call
 fn measure_decide<F>(env: &Env, name: &str, mut f: F) -> u64
 where
-    F: FnMut() -> Decision,
+    F: FnMut() -> std::vec::Vec<Decision>,
 {
     // Warm up
     for _ in 0..10 {
