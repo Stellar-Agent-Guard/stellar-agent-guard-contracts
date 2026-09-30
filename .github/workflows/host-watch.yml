@@ -26,6 +26,8 @@ jobs:
       # `github-actions` PRs — never by hand (see CONTRIBUTING.md).
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@v7
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
@@ -34,6 +36,7 @@ jobs:
 
       - name: Install Stellar CLI
         uses: stellar/stellar-cli@300aaf69ab100536678bdb641428b06f06b318ea # v28.0.0
+        uses: stellar/stellar-cli@v28.1.0
         with:
           version: 28.0.0
 

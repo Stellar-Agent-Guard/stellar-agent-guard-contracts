@@ -7,9 +7,70 @@ address. Build it from the repository root with:
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
 
+## Read-only diagnostics
+
+Read the guard's current state without simulation or submission.
+
+### `status`
+
+Fetch and display the guard's current status (JSON output):
+
+```bash
+agent-tx status --guard C...
+```
+
+Output includes:
+- `has_policy`: whether a policy is installed
+- `admin_frozen`: whether the admin has frozen the account
+- `heartbeat_expired`: whether the heartbeat has expired (dead-man switch triggered)
+- `last_heartbeat`: unix seconds of the last heartbeat (0 = never)
+- `now`: current ledger sequence (used as proxy for "now")
+
+Example:
+```json
+{
+  "has_policy": true,
+  "admin_frozen": false,
+  "heartbeat_expired": false,
+  "last_heartbeat": 1788855212,
+  "now": 1788863857
+}
+```
+
+### `policy`
+
+Fetch and display the installed policy (or `null` if none):
+
+```bash
+agent-tx policy --guard C...
+```
+
+Returns the current `PolicyConfig` structure, or `null` if no policy is installed (default-deny state).
+
+### `check`
+
+Simulate a prospective transfer and display the decision without submitting:
+
+```bash
+agent-tx check --guard C... --asset C... --to G... --amount 1100
+```
+
+Output shows:
+- `result`: `allowed` or `blocked`
+- If blocked: `reason` (the policy rejection reason, e.g., `per_tx_cap_exceeded`)
+- If allowed: `estimated_fee_stroops` (RPC's `minResourceFee`)
+
+Example (blocked by per-tx cap):
+```text
+result: blocked
+reason: per_tx_cap_exceeded
+```
+
+These reads use `getLedgerEntries` and `simulateTransaction` — no auth, no submission, no sequence advancement.
+
 ## Preflight
 
-Run a transfer simulation without submitting a transaction:
+Run a transfer simulation without submitting a transaction (deprecated in favor of `check`):
 
 ```bash
 agent-tx preflight --guard C... --asset C... --to G... --amount 1100 --secret "$AGENT_SECRET"

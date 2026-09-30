@@ -98,8 +98,10 @@ here; scope-wording edits touch this section only (CONTRIBUTING rule 2).*
 What "window and pause state" means for non-SAC calls is made exact in §6.4: the account is a
 **default-deny** environment — every call must match the protocol allowlist (contract, and
 optionally function) — and the active-window / pause / dead-man-freeze checks gate every context
-equally, SAC or not. What is *not* applied to non-SAC calls is per-call amount capping and
-rolling-window spend accounting, because the amount is not available in the context in any
+equally, SAC or not. What *is* applied to non-SAC calls as of v1 is **call count rate limiting**
+(rolling-window cap on the number of protocol calls; see §6.3), which is fully observable and
+addresses runaway-loop attacks. What is *not* applied to non-SAC calls is per-call amount capping
+and rolling-window spend accounting, because the amount is not available in the context in any
 trustworthy way.
 
 This boundary is an inherent property of the platform (an independent current confirmation:
@@ -107,7 +109,7 @@ OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer con
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
 and `docs/enforcement-scope.md` quote this section briefly and link here as canonical.
 
-**Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol parsers, rate limiting, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Recommended direction: protocol rate limiting (count-based) as core deliverable; opt-in protocol parsers as secondary.
+**Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol-specific parsers, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Count-based protocol call rate limiting (v1) is now implemented; opt-in protocol parsers remain a secondary track.
 
 ---
 
@@ -142,6 +144,7 @@ pub struct PolicyConfig {
     pub active_until: u64,                   // unix seconds; 0 = no restriction
     pub paused: bool,                        // admin kill switch
     pub dms_grace_secs: u64,                 // dead-man switch grace; 0 = disabled
+    pub protocol_calls_per_window: u32,      // max protocol calls per rolling window; 0 = disabled
 }
 
 #[contracttype]
@@ -161,6 +164,7 @@ pub struct WindowState {
     pub total: i128,                      // cached rolling global total
     pub entries: Vec<SpendEntry>,         // chronological global spend entries; pruned lazily on access
     pub recipients: Vec<RecipientWindowState>, // per-recipient rolling ledgers for recipients with override caps
+    pub protocol_call_entries: Vec<ProtocolCallEntry>, // rolling protocol call count entries; pruned lazily
 }
 
 #[contracttype]
@@ -172,6 +176,9 @@ pub struct RecipientWindowState {
 
 #[contracttype]
 pub struct SpendEntry { pub ts: u64, pub amount: i128 }
+
+#[contracttype]
+pub struct ProtocolCallEntry { pub ts: u64, pub count: u32 }  // coalesced call count per second
 ```
 
 ### 3.1 The window is genuinely rolling — not a fixed bucket
@@ -477,9 +484,15 @@ the "we know what we're enforcing" promise exact.
 ### 6.3 Protocol calls — allowlist only (window/pause state still enforced)
 
 `contract ∈ policy.protocols` (each with optional per-function allowlist). Allowed calls are
-authorized; per-call amount/recipient limits do **not** apply because the arguments of an
-arbitrary protocol are not interpretable (§2). Functions not in a rule's `fns` allowlist (when
-present) are blocked `FunctionNotAllowed`.
+authorized; per-call amount/recipient limits do **not** apply to individual call values because
+the arguments of an arbitrary protocol are not interpretable (§2). However, the **count of
+protocol calls is fully observable** — the engine loops over contexts and can meter them — so
+a rolling-window rate limit on call count (`policy.protocol_calls_per_window`; 0 = disabled)
+is enforced: if the cumulative count of protocol contexts within `window_secs` would exceed the
+cap, the call is blocked with `ProtocolCallRateExceeded`. This count-based throttling is
+defensible v1 enforcement that does not overclaim — it directly addresses runaway loops
+(the threat case this project exists to stop) within what the host actually exposes. Functions
+not in a rule's `fns` allowlist (when present) are blocked `FunctionNotAllowed`.
 
 ### 6.4 Anything else — blocked
 
@@ -578,11 +591,12 @@ pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
 pub fn status(env: Env) -> Status                     // frozen? admin_frozen? last_heartbeat? now?
 pub fn dms_health(env: Env) -> DmsHealth                  // ok, warn (>=80%), or expired
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
-    // Pure pre-flight replica of the §6.2 decision path: it does not change
+    // Preflight / simulate a transfer (doc alias; ABI frozen as `check`):
+    // pure pre-flight replica of the §6.2 decision path: it does not change
     // spend accounting, but a submitted call may refresh TTLs under §9.5.
     // Simulation before signing does not persist those rent bumps.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
-  // Same pre-flight, with remaining_window and effective cap metrics.
+  // Same preflight / simulate path, with remaining_window and effective cap metrics.
   // `remaining_window` reflects the effective cap for the queried recipient
   // (per-recipient override if configured, otherwise global cap).
 
@@ -654,6 +668,26 @@ window cap applies to the queried recipient (no global `window_cap` and no
 per-recipient override). The configured and effective caps are `None` when
 disabled; v1 has no per-asset overrides, so the effective per-transaction cap
 equals the configured cap.
+
+### 7.2 Preflight / simulate a transfer (doc alias for `check`)
+
+`check(asset, to, amount)` is the permissionless **preflight** / **simulate**
+entrypoint: a pure pre-flight replica of the §6.2 SAC-transfer decision path
+for agents and SDKs to call before signing. Search for "preflight",
+"simulate", or `simulate_transfer` to find it.
+
+These are documentation aliases only: the on-chain ABI is frozen as `check`
+(and `check_detailed`); there is no `simulate_transfer` function to invoke,
+and no contract change ships with this alias. Canonical behavior is the §6.2
+path above; the live testnet invocation mirrored in the `check` rustdoc is:
+
+```text
+stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+  --network testnet --source-account guard_admin --send=no -- \
+  check --asset CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7 \
+  --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX --amount 50
+# → {"Blocked":"heartbeat_expired"}
+```
 
 ---
 
@@ -771,6 +805,56 @@ Not guarded by v1 (documented, not hidden):
   cannot move funds)
 - DoS on the *account* is not possible (anyone may call read functions); policy writes are
   admin-only. The contract is unaudited; see `SECURITY.md`/README disclaimers.
+
+### 10.1 Signature binding
+
+**What the payload covers.** `__check_auth` step 1 is
+`ed25519_verify(AgentPubkey, signature_payload, sig)` — a pure signature check over a
+digest the **host** computes, never this contract:
+`sha256(HashIdPreimage::SorobanAuthorization { network_id, nonce,
+signature_expiration_ledger, invocation })`, where `invocation` is the complete root
+invocation — every auth context (target contract, function, argument values) the
+transaction will execute under this account. What the binding therefore covers:
+
+| Payload field | Bound meaning | If altered |
+|---|---|---|
+| `network_id` | chain domain | a testnet signature verifies on no other network |
+| `nonce` | single-use label, unique per address | host rejects reuse once consumed |
+| `signature_expiration_ledger` | validity bound in ledgers | entry fails after that ledger passes |
+| `invocation` (root) | contract + function + args of every context | digest changes ⇒ signature no longer verifies |
+
+**Replay analysis.**
+
+- *Across transactions: impossible by construction.* A signature captured for tx A
+  verifies only against A's digest. Replaying it inside tx B's auth entry makes the
+  host recompute B's digest — different invocation, nonce, or expiry ⇒ different bytes
+  ⇒ `ed25519_verify` traps **before** any policy evaluation, so a replayed signature
+  never reaches the decision table. Pinned by
+  `captured_signature_cannot_authorize_different_tx` and
+  `check_auth_binds_signature_to_the_exact_payload` (`src/integration_tests.rs`).
+- *The same transaction twice: host-side.* A byte-identical resubmission reuses A's
+  nonce (unique per address, rejected by the host after first consumption) and dies at
+  `signature_expiration_ledger` regardless. Division of labor, stated plainly: nonce
+  and expiry replay defense is **host** construction — this contract only ever checks
+  the signature over the digest the host hands it.
+- *Agent signature ≠ admin authority.* An agent signature clears step 1 only for auth
+  entries whose credentials address is **this account**. The admin write path
+  (`set_policy`, `revoke_policy`, `freeze`, `unfreeze`, `rotate_agent_key`) runs under
+  `require_auth(Admin)` — a different address, a different auth entry, a different
+  payload — and an agent-signed entry never satisfies it
+  (`agent_signature_does_not_confer_admin_authority`). The converse is the
+  admin-compromise bullet above: the admin cannot produce the agent's signature either,
+  so it may widen policy but still cannot move funds.
+
+**Leaked payload + sig, mid-flight.** Anyone holding `(payload, sig)` before inclusion
+can submit **exactly** tx A themselves — front-running the already-authorized
+invocation. That is not an escalation: amount, recipient, and function are inside the
+digest, so nothing can be edited without invalidating the signature; policy is
+re-evaluated at execution, so caps, allowlists, pause, and freeze still bind the
+replayed transaction; the nonce is consumed on first use; and
+`signature_expiration_ledger` bounds how long the leak stays usable. A leaked pair
+cannot authorize a policy change, a different recipient, or a larger amount — those
+are different digests, and the admin path never consults the agent's signature at all.
 
 ---
 

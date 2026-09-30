@@ -65,6 +65,7 @@ fn base_policy(env: &Env) -> PolicyConfig {
         active_until: 0,
         paused: false,
         dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
     }
 }
 

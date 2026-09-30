@@ -199,6 +199,7 @@ fn policy_config_from_json(env: &Env, block: &JsonValue, index: usize) -> Policy
         active_until: u64_field(block, "active_until", index),
         paused: bool_field(block, "paused", index),
         dms_grace_secs: u64_field(block, "dms_grace_secs", index),
+        protocol_calls_per_window: 0,
     }
 }
 

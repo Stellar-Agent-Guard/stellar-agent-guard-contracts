@@ -1,0 +1,139 @@
+# Stellar Agent Guard — public contract ABI snapshot.
+#
+# Committed baseline of the surface SDK, dashboard, and deployed
+# integrations consume: every contract entrypoint with its signature,
+# every #[contracttype] shape with its fields/variants, and every
+# contract error with its numeric code and reason symbol. Any diff to
+# this file is a potential breaking change for consumers.
+#
+# Scope:
+# - Functions: all `pub fn` entrypoints of `PolicyEngine` plus the
+#   host-invoked `__check_auth` (CustomAccountInterface), from src/lib.rs.
+# - Types: every `#[contracttype]` item in src/types.rs (policy, ledger,
+#   status, and advisory shapes) plus `RecipientLedger` in src/window.rs
+#   (a #[contracttype] in a private module, listed for completeness
+#   because it still shapes the XDR surface).
+# - Errors: every `Error` variant in src/types.rs with its discriminant
+#   (the on-chain `Error(Contract, #N)`) and its `reason()` symbol (the
+#   `auth_checked` topic and `check`/`check_detailed` block reason).
+#   Events are pinned separately by src/event_audit_tests.rs.
+#
+# Breaking-change gate: CI runs `cargo test` on every push/PR, and this
+# test fails on any drift. Review it with
+#   git diff <last-release-tag> HEAD -- tests/snapshots/abi_snapshot.txt
+#
+# To update after an intentional surface change:
+#   UPDATE_SNAPSHOTS=1 cargo test --test abi_snapshot
+# and explain the breaking change (or why it is NOT breaking) in the PR
+# body. An unexplained snapshot diff blocks the PR.
+#
+# GENERATED — do not edit by hand; regenerate with the command above.
+
+## Functions
+pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
+pub fn set_policy(env: Env, config: PolicyConfig)
+pub fn revoke_policy(env: Env)
+pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
+pub fn heartbeat(env: Env)
+pub fn freeze(env: Env)
+pub fn unfreeze(env: Env)
+pub fn policy(env: Env) -> Option<PolicyConfig>
+pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus
+pub fn status(env: Env) -> Status
+pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
+pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
+fn __check_auth(env: Env, signature_payload: soroban_sdk::crypto::Hash<32>, signatures: Self::Signature, auth_contexts: soroban_sdk::Vec<Context>) -> Result<(), Error>
+
+## Contract types
+enum DmsHealthStatus
+  Ok
+  Warn
+  Expired
+struct WindowState
+  total: i128
+  entries: Vec<SpendEntry>
+  recipients: Vec<RecipientWindowState>
+  protocol_call_entries: Vec<ProtocolCallEntry>
+struct RecipientWindowState
+  recipient: Address
+  total: i128
+  entries: Vec<SpendEntry>
+struct SpendEntry
+  ts: u64
+  amount: i128
+struct ProtocolCallEntry
+  ts: u64
+  count: u32
+struct RecipientCap
+  recipient: Address
+  cap: i128
+struct PolicyConfig
+  per_tx_cap: i128
+  window_secs: u64
+  window_cap: i128
+  assets: Vec<Address>
+  protocols: Vec<ProtocolRule>
+  recipients: Vec<Address>
+  recipient_window_caps: Vec<RecipientCap>
+  blocked_recipients: Vec<Address>
+  allow_any_recipient: bool
+  active_from: u64
+  active_until: u64
+  paused: bool
+  dms_grace_secs: u64
+  protocol_calls_per_window: u32
+struct ProtocolRule
+  contract: Address
+  fns: Option<Vec<Symbol>>
+struct Status
+  has_policy: bool
+  policy_revision: u64
+  admin_frozen: bool
+  heartbeat_expired: bool
+  last_heartbeat: u64
+  now: u64
+enum CheckResult
+  Allowed
+  Blocked(Symbol)
+struct CheckDetail
+  result: CheckResult
+  remaining_window: Option<i128>
+  per_tx_cap: Option<i128>
+  effective_per_tx_cap: Option<i128>
+  effective_window_cap: Option<i128>
+enum DataKey
+  Initialized
+  Admin
+  AgentPubkey
+  Policy
+  Window
+  LastHeartbeat
+  AdminFrozen
+  PolicyRevision
+struct RecipientLedger
+  recipient: Address
+  total: i128
+  entries: soroban_sdk::Vec<SpendEntry>
+
+## Errors
+1 Unauthorized unauthorized
+2 AlreadyInitialized already_initialized
+3 NotInitialized not_initialized
+4 InvalidConfig invalid_config
+5 InvalidAmount invalid_amount
+10 AdminFrozen admin_frozen
+11 HeartbeatExpired heartbeat_expired
+12 NoPolicy no_policy
+13 Paused paused
+14 OutsideActiveWindow outside_active_window
+20 AssetNotAllowed asset_not_allowed
+21 RecipientNotAllowed recipient_not_allowed
+22 PerTxCapExceeded per_tx_cap_exceeded
+23 WindowCapExceeded window_cap_exceeded
+24 ProtocolNotAllowed protocol_not_allowed
+25 FunctionNotAllowed function_not_allowed
+26 UnknownContract unknown_contract
+27 SelfFunctionNotAllowed self_function_not_allowed
+28 CreateContractNotAllowed create_contract_not_allowed
+29 RecipientBlocked recipient_blocked
+30 ProtocolCallRateExceeded protocol_call_rate_exceeded

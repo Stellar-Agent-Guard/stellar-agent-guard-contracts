@@ -14,7 +14,9 @@
 //! `lib.rs` (`persist_get`/`save_ledger`); this module transforms only the
 //! in-memory snapshot after storage has loaded it.
 
-use crate::types::{RecipientWindowState, SpendEntry, WindowState, MAX_WINDOW_ENTRIES};
+use crate::types::{
+    ProtocolCallEntry, RecipientWindowState, SpendEntry, WindowState, MAX_WINDOW_ENTRIES,
+};
 use soroban_sdk::{contracttype, Address, Env};
 
 #[contracttype]
@@ -44,6 +46,10 @@ pub struct Ledger {
     /// configured per-recipient cap override. Storage is bounded by the same
     /// cardinality limit applied to the recipient allowlist (SPEC §8).
     pub recipients: soroban_sdk::Vec<RecipientLedger>,
+    /// Protocol call count entries (for rate limiting).
+    pub protocol_call_entries: soroban_sdk::Vec<ProtocolCallEntry>,
+    /// Cached rolling total of protocol calls (sum of non-expired entries).
+    pub protocol_call_total: u32,
 }
 
 impl Ledger {
@@ -53,6 +59,8 @@ impl Ledger {
             total: 0,
             entries: soroban_sdk::Vec::new(env),
             recipients: soroban_sdk::Vec::new(env),
+            protocol_call_entries: soroban_sdk::Vec::new(env),
+            protocol_call_total: 0,
         }
     }
 
@@ -72,10 +80,13 @@ impl Ledger {
                 });
             }
         }
+        let proto_call_info = protocol_call_entries_from_state(env, state.protocol_call_entries);
         Self {
             total: global.total,
             entries: global.entries,
             recipients,
+            protocol_call_entries: proto_call_info.entries,
+            protocol_call_total: proto_call_info.total,
         }
     }
 
@@ -98,6 +109,7 @@ impl Ledger {
             total: self.total,
             entries: self.entries.clone(),
             recipients: recipient_states,
+            protocol_call_entries: self.protocol_call_entries.clone(),
         }
     }
 
@@ -122,6 +134,12 @@ impl Ledger {
                 self.recipients.set(i, r);
             }
         }
+        prune_protocol_call_entries(
+            &mut self.protocol_call_total,
+            &mut self.protocol_call_entries,
+            now,
+            window_secs,
+        );
     }
 
     /// Record a spend against the global window at `now`.
@@ -161,6 +179,15 @@ impl Ledger {
         let mut created = RecipientLedger::empty(env, recipient);
         admit_to_ledger(&mut created.total, &mut created.entries, now, amount);
         self.recipients.push_back(created);
+    }
+
+    /// Record a protocol call at `now`.
+    pub fn admit_protocol_call(&mut self, now: u64) {
+        admit_to_protocol_call_ledger(
+            &mut self.protocol_call_total,
+            &mut self.protocol_call_entries,
+            now,
+        );
     }
 }
 
@@ -246,6 +273,89 @@ fn admit_to_ledger(
     }
 }
 
+fn prune_protocol_call_entries(
+    total: &mut u32,
+    entries: &mut soroban_sdk::Vec<ProtocolCallEntry>,
+    now: u64,
+    window_secs: u64,
+) {
+    if window_secs == 0 {
+        return;
+    }
+    while let Some(front) = entries.first() {
+        if front.ts.saturating_add(window_secs) <= now {
+            *total = total.saturating_sub(front.count);
+            entries.pop_front();
+        } else {
+            break;
+        }
+    }
+}
+
+fn protocol_call_entries_from_state(
+    env: &Env,
+    mut entries: soroban_sdk::Vec<ProtocolCallEntry>,
+) -> ProtocolCallLedger {
+    let mut acc: u32 = 0;
+    let mut clean: soroban_sdk::Vec<ProtocolCallEntry> = soroban_sdk::Vec::new(env);
+    while let Some(e) = entries.pop_front() {
+        if e.count > 0 {
+            acc = acc.saturating_add(e.count);
+            clean.push_back(e);
+        }
+    }
+    ProtocolCallLedger {
+        total: acc,
+        entries: clean,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProtocolCallLedger {
+    total: u32,
+    entries: soroban_sdk::Vec<ProtocolCallEntry>,
+}
+
+fn admit_to_protocol_call_ledger(
+    total: &mut u32,
+    entries: &mut soroban_sdk::Vec<ProtocolCallEntry>,
+    now: u64,
+) {
+    let n = entries.len();
+    if n > 0 {
+        if let Some(last) = entries.get(n - 1) {
+            if last.ts == now {
+                entries.set(
+                    n - 1,
+                    ProtocolCallEntry {
+                        ts: now,
+                        count: last.count.saturating_add(1),
+                    },
+                );
+                *total = total.saturating_add(1);
+                return;
+            }
+        }
+    }
+    entries.push_back(ProtocolCallEntry { ts: now, count: 1 });
+    *total = total.saturating_add(1);
+    if entries.len() as usize > MAX_WINDOW_ENTRIES {
+        // Conservative merge: keep the newer timestamp
+        let older = entries
+            .first()
+            .unwrap_or(ProtocolCallEntry { ts: 0, count: 0 });
+        entries.pop_front();
+        let newer = entries
+            .first()
+            .unwrap_or(ProtocolCallEntry { ts: 0, count: 0 });
+        entries.pop_front();
+        entries.push_front(ProtocolCallEntry {
+            ts: newer.ts,
+            count: older.count.saturating_add(newer.count),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,21 +386,45 @@ mod tests {
         prune_entries(&mut l.total, &mut l.entries, 300, 200); // cutoff 100; ts==cutoff expired
         assert_eq!(l.total, 7);
         assert_eq!(l.entries.len(), 1);
-        assert_eq!(l.entries.get(0).unwrap().ts, 200);
+        assert_eq!(l.entries.first().unwrap().ts, 200);
     }
 
     #[test]
-    fn admit_coalesces_same_second() {
+    fn admit_coalesces_three_same_second_spends() {
         let env = Env::default();
-        let mut total = 0i128;
-        let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
-        admit_to_ledger(&mut total, &mut entries, 100, 3);
-        admit_to_ledger(&mut total, &mut entries, 100, 4);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries.get(0).unwrap().amount, 7);
-        admit_to_ledger(&mut total, &mut entries, 101, 5);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(total, 12);
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit(100, 3);
+        ledger.admit(100, 4);
+        ledger.admit(100, 5);
+        assert_eq!(ledger.entries.len(), 1);
+        assert_eq!(ledger.entries.get(0).unwrap().ts, 100);
+        assert_eq!(ledger.entries.get(0).unwrap().amount, 12);
+
+        ledger.admit(101, 6);
+        assert_eq!(ledger.entries.len(), 2);
+        assert_eq!(ledger.entries.get(0).unwrap().ts, 100);
+        assert_eq!(ledger.entries.get(0).unwrap().amount, 12);
+        assert_eq!(ledger.entries.get(1).unwrap().ts, 101);
+        assert_eq!(ledger.entries.get(1).unwrap().amount, 6);
+    }
+
+    #[test]
+    fn prune_then_admit_coalesces_with_trailing_same_second_entry() {
+        let env = Env::default();
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit(0, 3);
+        ledger.admit(100, 7);
+        assert_eq!(ledger.entries.len(), 2);
+
+        // At the exact expiry boundary, the oldest entry is pruned before
+        // the new spend is admitted at the trailing entry's second.
+        ledger.prune(100, 100);
+        ledger.admit(100, 11);
+
+        assert_eq!(ledger.entries.len(), 1);
+        assert_eq!(ledger.entries.get(0).unwrap().ts, 100);
+        assert_eq!(ledger.entries.get(0).unwrap().amount, 18);
+        assert_eq!(ledger.total, 18);
     }
 
     #[test]
@@ -397,5 +531,49 @@ mod tests {
         ledger.admit_for_recipient(&env, 101, r.clone(), 5);
         assert_eq!(ledger.recipient_total(&r), 12);
         assert_eq!(ledger.recipients.len(), 1);
+    }
+
+    #[test]
+    fn protocol_call_counter_admits_and_coalesces() {
+        let env = Env::default();
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit_protocol_call(100);
+        assert_eq!(ledger.protocol_call_total, 1);
+        ledger.admit_protocol_call(100);
+        assert_eq!(ledger.protocol_call_total, 2);
+        assert_eq!(ledger.protocol_call_entries.len(), 1);
+        ledger.admit_protocol_call(101);
+        assert_eq!(ledger.protocol_call_total, 3);
+        assert_eq!(ledger.protocol_call_entries.len(), 2);
+    }
+
+    #[test]
+    fn protocol_call_counter_prunes_expired() {
+        let env = Env::default();
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit_protocol_call(0);
+        ledger.admit_protocol_call(100);
+        ledger.admit_protocol_call(200);
+        assert_eq!(ledger.protocol_call_total, 3);
+
+        ledger.prune(300, 200); // ts 0 exactly expired, ts 100 exactly expired
+        assert_eq!(ledger.protocol_call_total, 1);
+        assert_eq!(ledger.protocol_call_entries.len(), 1);
+        assert_eq!(ledger.protocol_call_entries.first().unwrap().ts, 200);
+    }
+
+    #[test]
+    fn protocol_call_counter_round_trips_through_state() {
+        let env = Env::default();
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit_protocol_call(100);
+        ledger.admit_protocol_call(100);
+        ledger.admit_protocol_call(101);
+
+        let state = ledger.to_state(&env);
+        let restored = Ledger::from_state(&env, state);
+
+        assert_eq!(restored.protocol_call_total, 3);
+        assert_eq!(restored.protocol_call_entries.len(), 2);
     }
 }

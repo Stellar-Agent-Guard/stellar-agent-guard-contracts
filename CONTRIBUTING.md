@@ -29,6 +29,11 @@ cargo build --release --target wasm32v1-none
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
 
+The `stellar` CLI cannot sign Soroban authorization entries whose address is a
+contract. Heartbeat testing uses the guard contract's own address, so the CLI
+cannot submit a heartbeat; use `agent-tx` for this path. See the
+[`agent-tx` usage guide](tools/agent-tx/README.md) for commands and options.
+
 ## Clean Build Artifacts
 
 ```bash
@@ -181,3 +186,11 @@ When bumping `soroban-sdk` version in `Cargo.toml`, you **must** re-verify
 SPEC §1.1 quotes against the new SDK source (`src/auth.rs`, `src/custom_account.rs`).
 Update the version comment in `Cargo.toml` and the SPEC §1.1 header accordingly.
 This is the mechanical ratchet preventing silent auth-semantics drift.
+
+Dependabot (`.github/dependabot.yml`, weekly, Cargo + GitHub Actions) files
+update PRs against `main` the same as any contributor PR: they must pass the
+full `ci` gate (`cargo fmt --check`, clippy with `-D warnings`, `cargo test`,
+both builds) — branch protection on `main` requires the `ci` check, so a
+dependabot PR cannot merge green-skipped. `soroban-sdk` majors are isolated in
+their own group because they can break the ABI; review those with the SPEC §1.1
+re-verification above.

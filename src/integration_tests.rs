@@ -179,6 +179,7 @@ impl Harness {
             active_until: 0,
             paused: false,
             dms_grace_secs: 0,
+            protocol_calls_per_window: 0,
         }
     }
 
@@ -877,6 +878,184 @@ fn wrong_signature_is_rejected_by_host_crypto() {
     h.transfer(&recv, 5);
 }
 
+/// SPEC §10.1: a signature captured for tx A binds to A's host-computed
+/// payload digest (invocation + nonce + expiry ledger + network) and cannot
+/// authorize tx B — even though tx B is policy-admissible on its own, so
+/// the only possible cause of rejection is the binding.
+#[test]
+fn captured_signature_cannot_authorize_different_tx() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    h.install_policy(&h.base_policy());
+    h.set_time(1_000);
+
+    // Tx A: the transfer the agent actually signed (policy-admissible).
+    let root_a = h.transfer_invocation(&h.guard, &recv, 5);
+    let nonce_a = h.guard_nonce;
+    h.guard_nonce += 1;
+    let payload_a = h.payload(nonce_a, &root_a);
+    let sig_a = h.agent.sign(&payload_a).to_bytes();
+
+    // Tx B: a different transfer — also admissible, once correctly signed.
+    let root_b = h.transfer_invocation(&h.guard, &recv, 10);
+    let nonce_b = h.guard_nonce;
+    h.guard_nonce += 1;
+    let payload_b = h.payload(nonce_b, &root_b);
+    assert_ne!(
+        payload_a, payload_b,
+        "distinct transactions must produce distinct payload digests"
+    );
+
+    // Cross-context confusion: tx A's signature presented inside tx B's entry.
+    let signature_expiration_ledger = h.signature_expiration_ledger();
+    let replay = SorobanAuthorizationEntry {
+        credentials: SorobanCredentials::Address(SorobanAddressCredentials {
+            address: xdr::ScAddress::from(&h.guard),
+            nonce: nonce_b,
+            signature_expiration_ledger,
+            signature: ScVal::Bytes(ScBytes::try_from(sig_a.to_vec()).unwrap()),
+        }),
+        root_invocation: root_b,
+    };
+    h.env.set_auths(&[replay]);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        MockAssetClient::new(&h.env, &h.asset).transfer(&h.guard, &recv, &10);
+    }));
+    let err = res.expect_err("a signature captured for tx A must not authorize tx B");
+    let msg = err
+        .downcast_ref::<std::string::String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        msg.contains("failed ED25519 verification"),
+        "tx B must be rejected at signature verification, not by policy: {msg}"
+    );
+
+    // Control 1: the very same sig_a still authorizes tx A — it is valid,
+    // just bound to A's payload.
+    let honest_a = SorobanAuthorizationEntry {
+        credentials: SorobanCredentials::Address(SorobanAddressCredentials {
+            address: xdr::ScAddress::from(&h.guard),
+            nonce: nonce_a,
+            signature_expiration_ledger,
+            signature: ScVal::Bytes(ScBytes::try_from(sig_a.to_vec()).unwrap()),
+        }),
+        root_invocation: root_a,
+    };
+    h.env.set_auths(&[honest_a]);
+    MockAssetClient::new(&h.env, &h.asset).transfer(&h.guard, &recv, &5);
+
+    // Control 2: tx B's shape passes policy when signed over its own payload —
+    // so the rejection above was the signature binding, not the policy.
+    h.transfer(&recv, 10);
+}
+
+/// SPEC §10.1: `__check_auth` step 1 verifies the signature against the
+/// exact payload it is presented — the matching pair approves, the
+/// cross-context mismatch traps before any policy evaluation.
+#[test]
+fn check_auth_binds_signature_to_the_exact_payload() {
+    let h = Harness::new();
+    let recv = h.recv.clone();
+    h.install_policy(&h.base_policy());
+    h.set_time(1_000);
+
+    let root_a = h.transfer_invocation(&h.guard, &recv, 5);
+    let root_b = h.transfer_invocation(&h.guard, &recv, 10);
+    let payload_a = h.payload(1, &root_a);
+    let payload_b = h.payload(2, &root_b);
+    assert_ne!(payload_a, payload_b);
+
+    // The agent's signature over tx A's payload only.
+    let sig_a = h.agent.sign(&payload_a).to_bytes();
+    let signatures = BytesN::from_array(&h.env, &sig_a);
+    let contexts = soroban_sdk::vec![
+        &h.env,
+        Context::Contract(soroban_sdk::auth::ContractContext {
+            contract: h.asset.clone(),
+            fn_name: Symbol::new(&h.env, "transfer"),
+            args: soroban_sdk::vec![
+                &h.env,
+                h.guard.into_val(&h.env),
+                recv.into_val(&h.env),
+                5i128.into_val(&h.env),
+            ],
+        }),
+    ];
+
+    let check = |payload: [u8; 32]| {
+        let payload = BytesN::from_array(&h.env, &payload);
+        h.env.as_contract(&h.guard, || {
+            <PolicyEngine as CustomAccountInterface>::__check_auth(
+                h.env.clone(),
+                unsafe {
+                    std::mem::transmute::<BytesN<32>, soroban_sdk::crypto::Hash<32>>(payload)
+                },
+                signatures.clone(),
+                contexts.clone(),
+            )
+        })
+    };
+
+    // Matching pair: sig over payload A presented with payload A → approved.
+    assert!(
+        check(payload_a).is_ok(),
+        "the signature over payload A must verify against payload A"
+    );
+
+    // Mismatch: the same signature presented with tx B's payload → trap.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(payload_b)));
+    assert!(
+        res.is_err(),
+        "a signature over payload A must not verify against payload B"
+    );
+}
+
+/// SPEC §10.1: the agent's signature never satisfies the admin path —
+/// `require_auth(Admin)` checks a different address's auth entry, so an
+/// agent-signed payload whose root invocation is an admin-only call
+/// confers no admin authority.
+#[test]
+fn agent_signature_does_not_confer_admin_authority() {
+    let mut h = Harness::new();
+    h.install_policy(&h.base_policy());
+    h.set_time(1_000);
+
+    // The agent signs a payload whose root invocation is an admin-only write.
+    let root = h.unfreeze_invocation();
+    let nonce = h.guard_nonce;
+    h.guard_nonce += 1;
+    let payload = h.payload(nonce, &root);
+    let sig = h.agent.sign(&payload).to_bytes();
+    let signature_expiration_ledger = h.signature_expiration_ledger();
+    let entry = SorobanAuthorizationEntry {
+        credentials: SorobanCredentials::Address(SorobanAddressCredentials {
+            address: xdr::ScAddress::from(&h.guard),
+            nonce,
+            signature_expiration_ledger,
+            signature: ScVal::Bytes(ScBytes::try_from(sig.to_vec()).unwrap()),
+        }),
+        root_invocation: root,
+    };
+    h.env.set_auths(&[entry]);
+
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).unfreeze();
+    }));
+    let err = res.expect_err("an agent-signed entry must not satisfy require_auth(Admin)");
+    let msg = err
+        .downcast_ref::<std::string::String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        msg.contains("Unauthorized function call for address"),
+        "the admin path must fail on the admin's missing authentication: {msg}"
+    );
+
+    // Control: the admin's own auth entry authorizes the identical call.
+    h.unfreeze();
+}
+
 #[test]
 fn rotate_agent_key_event_carries_old_and_new_fingerprints() {
     let h = Harness::new();
@@ -1248,6 +1427,7 @@ fn policy_config_debug_snapshot() {
         active_until: 1_800_000_000,
         paused: true,
         dms_grace_secs: 3600,
+        protocol_calls_per_window: 0,
     };
 
     let debug_output = format!("{config:?}");
