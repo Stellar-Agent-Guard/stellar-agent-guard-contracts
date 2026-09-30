@@ -181,6 +181,11 @@ pub struct SpendEntry { pub ts: u64, pub amount: i128 }
 pub struct ProtocolCallEntry { pub ts: u64, pub count: u32 }  // coalesced call count per second
 ```
 
+Tooling-facing JSON shape is maintained in [`policy.schema.json`](policy.schema.json).
+Treat it as normative-adjacent: the contract's `validate_config` implementation is authoritative
+if a conflict exists, but changes to `PolicyConfig` or its validation rules must update this
+schema and its conformance tests in the same change.
+
 ### 3.1 The window is genuinely rolling — not a fixed bucket
 
 A fixed 86,400-second bucket (reset-at-midnight style) is a **different guarantee** from a

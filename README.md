@@ -147,6 +147,9 @@ Admin-only (`require_auth(Admin)`). Replaces the policy, resets the rolling wind
 starts the dead-man-switch clock at install time (a fresh policy gets full grace). The
 `PolicyConfig` fields:
 
+Tooling can validate this CLI JSON shape against the checked-in
+[`policy.schema.json`](policy.schema.json); the contract remains the authoritative validator.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `per_tx_cap` | `i128` | per asset-transfer call cap; `0` = disabled |
