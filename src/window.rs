@@ -484,6 +484,27 @@ mod tests {
     }
 
     #[test]
+    fn prune_boundary_is_addition_form_at_zero_timestamp() {
+        // Issue #18: pin the exact expiry boundary. With `now = 0` the
+        // subtraction form `now - window_secs` saturates to 0 and would wrongly
+        // expire an entry recorded at ts 0; the addition form must retain it.
+        let env = Env::default();
+        let mut total = 0i128;
+        let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
+
+        admit_to_ledger(&mut total, &mut entries, 0, 7);
+        // 0 + 1 <= 0 is false -> inside the window, retained.
+        prune_entries(&mut total, &mut entries, 0, 1);
+        assert_eq!(total, 7);
+        assert_eq!(entries.len(), 1);
+
+        // Exactly on the boundary: 0 + 1 <= 1 -> expired, per SPEC §3.1.
+        prune_entries(&mut total, &mut entries, 1, 1);
+        assert_eq!(total, 0);
+        assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
     fn backstop_merge_is_conservative_and_bounded() {
         let env = Env::default();
         env.cost_estimate().budget().reset_unlimited();

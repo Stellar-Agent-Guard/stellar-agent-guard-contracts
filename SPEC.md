@@ -192,9 +192,11 @@ exactly the burst-boundary cases a spend guard exists to catch.
 Implementation (exact, lazy, bounded):
 
 - Entries are append-ordered by unix ledger time (`env.ledger().timestamp()`, 1s granularity).
-- On every evaluation: while `entries[0].ts <= now - window_secs`, pop from the front and
-  subtract from `total`. Evaluation is lazy — no cron, no background writes; the O(expired)
-  pruning cost amortizes over accesses.
+- On every evaluation: while `entries[0].ts + window_secs <= now`, pop from the front and
+  subtract from `total`. Expiry is tested in this addition form (not the algebraically
+  equivalent `entries[0].ts <= now - window_secs`) so that a low ledger timestamp cannot
+  underflow `now - window_secs` and wrongly expire a still-live entry. Evaluation is lazy — no
+  cron, no background writes; the O(expired) pruning cost amortizes over accesses.
 - A new spend coalesces into the trailing entry when it shares the same second
   (`entries.last().ts == now`), so dense bursts in one second stay one entry.
 - **Boundedness backstop:** `MAX_WINDOW_ENTRIES = 8192`. If a write would exceed it, the two
@@ -216,7 +218,7 @@ Implementation (exact, lazy, bounded):
   for the long-lived-account rent/TTL model.
 
 **Invariant (window):** for every authorization decision, the global `total` after any admission equals the
-sum of `entries[i].amount` over global entries with `ts > now - window_secs`, and a new asset transfer
+sum of `entries[i].amount` over global entries with `ts + window_secs > now`, and a new asset transfer
 is admitted only if the running total (plus amounts already staged in the same request) ≤ the
 effective cap for that transfer. Per-recipient overrides maintain the same invariant in their own
 `RecipientWindowState`; recipients without an override use the global cap. Both the global cap
