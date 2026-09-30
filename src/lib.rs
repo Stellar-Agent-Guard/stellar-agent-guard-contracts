@@ -880,7 +880,10 @@ impl CustomAccountInterface for PolicyEngine {
 #[cfg(feature = "testutils")]
 #[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
 pub mod testutils {
-    pub use crate::engine::{contains_addr, decide, parse_call, AccountState, Decision};
+    pub use crate::engine::{
+        contains_addr, decide, parse_call, worst_case_transfer_policy, worst_case_transfer_target,
+        AccountState, Decision,
+    };
     pub use crate::types::policy_canonical_encoding;
     pub use crate::types::{
         CheckResult, DataKey, Error, PolicyConfig, PolicyRuleId, ProtocolRule, RecipientCap,

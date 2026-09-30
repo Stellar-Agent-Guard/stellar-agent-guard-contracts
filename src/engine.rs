@@ -120,6 +120,110 @@ fn contains_sym(list: &Vec<Symbol>, s: &Symbol) -> bool {
     false
 }
 
+// ── Worst-case decision-path fixtures (issue #118) ───────────────────────
+//
+// The recipient checks in `decide` are the only place the engine does work
+// proportional to a policy list length, and SPEC §8 caps every one of those
+// lists at `MAX_RECIPIENT_ENTRIES`. That makes the cost boundable: build the
+// lists at exactly the documented maximum, and the decision path can be
+// measured at its true worst case rather than at some arbitrary list size.
+//
+// Gated out of the shipped wasm: they exist only so `benches/` and the unit
+// test can drive the *identical* scenario behind the number SPEC §6.2 quotes
+// (issue #118 asks for one harness, not two that can drift).
+
+/// Namespace tag for a synthetic address family (see [`worst_case_transfer_policy`]).
+#[cfg(any(test, feature = "testutils"))]
+const WC_RECIPIENTS: u8 = 1;
+/// Namespace tag for the `blocked_recipients` family.
+#[cfg(any(test, feature = "testutils"))]
+const WC_BLOCKED: u8 = 2;
+/// Namespace tag for the transfer destination, absent from both lists.
+#[cfg(any(test, feature = "testutils"))]
+const WC_TARGET: u8 = 3;
+
+/// A contract address in the `tag` family, `index` of the way through it.
+/// Distinct tags yield disjoint addresses, so the recipient allowlist and the
+/// recipient denylist stay disjoint as SPEC §8 requires.
+#[cfg(any(test, feature = "testutils"))]
+pub fn worst_case_addr(env: &Env, tag: u8, index: u8) -> Address {
+    use soroban_sdk::xdr::{ContractId, Hash, ScAddress};
+    let mut hash = [0u8; 32];
+    hash[0] = tag;
+    hash[1..].fill(index);
+    let sc = ScAddress::Contract(ContractId(Hash(hash)));
+    Address::try_from_val(env, &sc).unwrap()
+}
+
+/// The policy whose decision path is the documented worst case (SPEC §6.2).
+///
+/// Every recipient list `set_policy` will accept is filled to exactly
+/// [`crate::types::MAX_RECIPIENT_ENTRIES`], and the returned transfer
+/// destination is deliberately in **none** of them:
+///
+/// - `allow_any_recipient == false` — the expensive case. `decide` scans
+///   `blocked_recipients` (§6.2 rule 1), then `recipients` (rule 2), and
+///   misses on the *last* element of each: a full sweep of both lists, with no
+///   early exit. This is what the escape hatch buys you.
+/// - `allow_any_recipient == true` — the cheap case. Rule 2 is skipped, so
+///   only the denylist is swept before the caps and window are applied. This
+///   is the case the escape hatch actually costs.
+///
+/// The two recipient lists use disjoint address families because SPEC §8
+/// rejects a destination that is both explicitly allowed and explicitly denied.
+///
+/// # Panics
+///
+/// If `MAX_RECIPIENT_ENTRIES` ever exceeded 256 entries the per-list index
+/// would no longer fit the synthetic address family. That is a test-fixture
+/// invariant, not a policy error: aliasing indices would silently shorten the
+/// measured sweep and understate the worst case, so it fails loudly instead.
+#[cfg(any(test, feature = "testutils"))]
+#[must_use]
+pub fn worst_case_transfer_policy(env: &Env, allow_any_recipient: bool) -> PolicyConfig {
+    let n = crate::types::MAX_RECIPIENT_ENTRIES;
+    let mut recipients = Vec::new(env);
+    let mut blocked_recipients = Vec::new(env);
+    for i in 0..n {
+        // Two indices that alias would silently shorten the measured sweep and
+        // understate the worst case, so a bound that no longer fits fails
+        // loudly instead.
+        let index = u8::try_from(i).expect("MAX_RECIPIENT_ENTRIES must fit in a u8 index");
+        recipients.push_back(worst_case_addr(env, WC_RECIPIENTS, index));
+        blocked_recipients.push_back(worst_case_addr(env, WC_BLOCKED, index));
+    }
+    PolicyConfig {
+        per_tx_cap: 0,
+        window_secs: 86_400,
+        // A cap and a window are on, so the measured path also pays for the
+        // §6.2 rule-4 window evaluation the escape-on case must still run.
+        window_cap: 1_000,
+        assets: {
+            let mut assets = Vec::new(env);
+            assets.push_back(worst_case_addr(env, WC_RECIPIENTS, 0));
+            assets
+        },
+        protocols: Vec::new(env),
+        recipients,
+        recipient_window_caps: Vec::new(env),
+        blocked_recipients,
+        allow_any_recipient,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
+    }
+}
+
+/// The transfer destination the worst-case policy admits only under the escape
+/// hatch — absent from `recipients` and from `blocked_recipients`.
+#[cfg(any(test, feature = "testutils"))]
+#[must_use]
+pub fn worst_case_transfer_target(env: &Env) -> Address {
+    worst_case_addr(env, WC_TARGET, 0)
+}
+
 #[allow(clippy::must_use_candidate)]
 fn recipient_override_cap(cfg: &PolicyConfig, recipient: &Address) -> Option<i128> {
     for i in 0..cfg.recipient_window_caps.len() {
@@ -1636,6 +1740,111 @@ mod tests {
         assert!(
             observed_strictness,
             "expected the over-count to make at least one admission stricter"
+        );
+    }
+
+    /// Per-instruction CPU budget the decision path is asserted against
+    /// (issue #118). Stellar meters a Soroban invocation against a
+    /// per-transaction instruction limit; this is the value quoted for the
+    /// current network setting. The assertion is "the whole decision path, at
+    /// the documented maximum list cardinalities, fits in one invocation's
+    /// budget" — the claim SPEC §6.2 makes about a bounded worst case.
+    const DECISION_PATH_CPU_BUDGET: u64 = 100_000_000;
+
+    /// CPU instructions for one `decide` call, measured in isolation.
+    ///
+    /// The budget is reset *after* the scenario is built so only the decision
+    /// path is charged, and the call is warmed first so one-time host setup
+    /// (allocating the returned verdict vector, interning symbols) is not
+    /// attributed to the path being measured.
+    fn measure_decision_path(env: &Env, policy: &PolicyConfig, target: &Address) -> u64 {
+        let asset = policy.assets.first().unwrap();
+        let self_addr = addr(env, 200);
+        let mut args: Vec<Val> = Vec::new(env);
+        args.push_back(self_addr.clone().into_val(env));
+        args.push_back(target.clone().into_val(env));
+        args.push_back(5i128.into_val(env));
+        let context = Context::Contract(ContractContext {
+            contract: asset,
+            fn_name: Symbol::new(env, "transfer"),
+            args,
+        });
+
+        let run = |ledger: &mut Ledger| {
+            decide(
+                env,
+                &self_addr,
+                Some(policy),
+                &alive(),
+                ledger,
+                1_000,
+                vec![env, context.clone()],
+            )
+        };
+
+        // Warm up, then charge only the measured call.
+        let mut warmup = Ledger::empty(env);
+        for _ in 0..10 {
+            std::hint::black_box(run(&mut warmup));
+        }
+        warmup = Ledger::empty(env);
+        env.cost_estimate().budget().reset_unlimited();
+        let verdicts = run(&mut warmup);
+        std::hint::black_box(&verdicts);
+        env.cost_estimate().budget().cpu_instruction_cost()
+    }
+
+    /// Issue #118: measure the §6.2 decision path at the **documented maximum**
+    /// list cardinalities, and assert the bound the SPEC now cites.
+    ///
+    /// Both shapes the issue calls for are measured:
+    ///
+    /// - **escape off**, the expensive case: the destination is in neither
+    ///   list, so rule 1 sweeps the full 256-entry denylist and rule 2 sweeps
+    ///   the full 256-entry allowlist before either misses. No early exit.
+    /// - **escape on**, the cheap case: rule 2 is skipped, so only the denylist
+    ///   is swept before the caps and window run.
+    ///
+    /// The escape-on cost is the *price of the escape hatch*, so it is
+    /// asserted to be strictly cheaper — otherwise `allow_any_recipient` would
+    /// be buying nothing. Both must fit one invocation's CPU budget; the
+    /// numbers are printed so SPEC §6.2 can quote them, and
+    /// `benches/worst_case_decision_path.rs` reports the same figures through
+    /// the identical fixtures.
+    #[test]
+    fn worst_case_decision_path_measured_cost() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+
+        let target = worst_case_transfer_target(&env);
+
+        let off = worst_case_transfer_policy(&env, false);
+        let on = worst_case_transfer_policy(&env, true);
+
+        let escape_off = measure_decision_path(&env, &off, &target);
+        let escape_on = measure_decision_path(&env, &on, &target);
+
+        std::println!(
+            "worst-case decision path cpu instructions: \
+             escape_off_full_scan={escape_off} escape_on={escape_on} \
+             lists=2x{} budget={DECISION_PATH_CPU_BUDGET}",
+            crate::types::MAX_RECIPIENT_ENTRIES,
+        );
+
+        assert!(
+            escape_off > escape_on,
+            "the full two-list scan must cost more than the escape-hatch path \
+             (escape_off={escape_off}, escape_on={escape_on})"
+        );
+        assert!(
+            escape_off <= DECISION_PATH_CPU_BUDGET,
+            "worst-case §6.2 decision path exceeds the per-invocation CPU \
+             budget: {escape_off} > {DECISION_PATH_CPU_BUDGET}"
+        );
+        assert!(
+            escape_on <= DECISION_PATH_CPU_BUDGET,
+            "escape-hatch §6.2 decision path exceeds the per-invocation CPU \
+             budget: {escape_on} > {DECISION_PATH_CPU_BUDGET}"
         );
     }
 }

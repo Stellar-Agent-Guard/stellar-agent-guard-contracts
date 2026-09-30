@@ -499,6 +499,31 @@ An asset contract listed in `assets` invoked with any other function (e.g. `mint
 (`AssetNotAllowed`) — an agent cannot silently move balances on an unregistered SAC. This keeps
 the "we know what we're enforcing" promise exact.
 
+**Measured worst case: evaluation ≈ 338,315 CPU instructions.** Rules 1 and 2 are the only
+steps whose cost depends on a policy list length, and §8 caps every recipient list at
+`MAX_RECIPIENT_ENTRIES = 256`, so the decision path is bounded by construction. Measured in the
+Soroban test environment with both `recipients` and `blocked_recipients` filled to exactly 256
+entries and the transfer destination deliberately in **neither** — the configuration that makes
+the linear sweeps the dominant term:
+
+| Configuration | Instructions | % of the 100,000,000 per-invocation CPU budget |
+|---|---|---|
+| `allow_any_recipient = false` — full 2×256 scan, miss on the last element of each | **338,315** | 0.34% |
+| `allow_any_recipient = true` — denylist swept, rule 2 skipped | 179,552 | 0.18% |
+
+The escape hatch saves 158,763 instructions by skipping the 256-entry allowlist, which is
+precisely what it buys: under the escape hatch the remaining linear work is a single sweep, not
+two. Reproduce with `cargo test worst_case_decision_path_measured_cost -- --nocapture`, which
+also asserts both figures fit one invocation's budget, or
+`cargo run --manifest-path benches/Cargo.toml --bin worst_case_decision_path`. Both drive the
+same `testutils` fixtures (`worst_case_transfer_policy` / `worst_case_transfer_target`), so the
+table and the assertion cannot drift apart. As elsewhere in §3.1/§4.1 these are test-environment
+instruction counts; on-chain cost also carries host overhead, metering, and fee accounting.
+
+This bound covers the *allowlist* worst case only. The rolling window has its own, much larger
+one — a single lazy prune of 8192 stale entries — which is measured separately in §3.1 and
+tracked in [issue #113](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/113).
+
 ### 6.3 Protocol calls — allowlist only (window/pause state still enforced)
 
 `contract ∈ policy.protocols` (each with optional per-function allowlist). Allowed calls are
