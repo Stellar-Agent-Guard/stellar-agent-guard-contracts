@@ -127,6 +127,7 @@ TTL on every write; see §9.5).
 | `Window` | `WindowState` | persistent | rolling spend ledger for asset transfers (global + per-recipient) |
 | `LastHeartbeat` | `u64` | persistent | unix seconds of last agent heartbeat (0 = never) |
 | `AdminFrozen` | `bool` | persistent | admin-initiated freeze flag |
+| `PolicyRevision` | `u64` | persistent | policy sequence number; incremented on every `set_policy`/`revoke_policy`, stamped into `policy_set`/`policy_revoked`/`auth_checked` events (§9, issue #38) |
 
 ```rust
 #[contracttype]
@@ -183,6 +184,21 @@ pub struct ProtocolCallEntry { pub ts: u64, pub count: u32 }  // coalesced call 
 
 ### 3.1 The window is genuinely rolling — not a fixed bucket
 
+**Clock and pre-flight freshness.** `now` is the Soroban ledger's unix timestamp
+(`env.ledger().timestamp()`), not the submitter's wall clock. The host supplies that
+timestamp when the transaction executes; the contract cannot select or backdate it. Ledger
+timestamps have one-second granularity, so events whose execution timestamps fall in the same
+second are tied for window membership and are ordered by the host's transaction execution,
+not by a sub-second wall-clock ordering. A policy or pre-flight `check()` result therefore
+describes the ledger-time snapshot used by that invocation; it is advisory, not a reservation
+of capacity. Between simulation and execution, another transaction may consume the remaining
+cap or the ledger timestamp may advance across an active/window boundary. Re-run `check()`
+immediately before signing/broadcasting if more than one ledger has elapsed, and always handle
+the authoritative execution result (which can still differ if state changes afterward).
+
+A test-env boundary example is covered by `window::tests::ledger_second_changes_window_membership_at_boundary`:
+a spend admitted at second `t` remains live at `t`, then expires at `t + window_secs`.
+
 A fixed 86,400-second bucket (reset-at-midnight style) is a **different guarantee** from a
 rolling window and is rejected here. Under a fixed bucket, spend at 23:59 and spend at 00:01
 are never counted together even though they are two minutes apart; under a rolling window, any
@@ -192,9 +208,11 @@ exactly the burst-boundary cases a spend guard exists to catch.
 Implementation (exact, lazy, bounded):
 
 - Entries are append-ordered by unix ledger time (`env.ledger().timestamp()`, 1s granularity).
-- On every evaluation: while `entries[0].ts <= now - window_secs`, pop from the front and
-  subtract from `total`. Evaluation is lazy — no cron, no background writes; the O(expired)
-  pruning cost amortizes over accesses.
+- On every evaluation: while `entries[0].ts + window_secs <= now`, pop from the front and
+  subtract from `total`. Expiry is tested in this addition form (not the algebraically
+  equivalent `entries[0].ts <= now - window_secs`) so that a low ledger timestamp cannot
+  underflow `now - window_secs` and wrongly expire a still-live entry. Evaluation is lazy — no
+  cron, no background writes; the O(expired) pruning cost amortizes over accesses.
 - A new spend coalesces into the trailing entry when it shares the same second
   (`entries.last().ts == now`), so dense bursts in one second stay one entry.
 - **Boundedness backstop:** `MAX_WINDOW_ENTRIES = 8192`. If a write would exceed it, the two
@@ -216,7 +234,7 @@ Implementation (exact, lazy, bounded):
   for the long-lived-account rent/TTL model.
 
 **Invariant (window):** for every authorization decision, the global `total` after any admission equals the
-sum of `entries[i].amount` over global entries with `ts > now - window_secs`, and a new asset transfer
+sum of `entries[i].amount` over global entries with `ts + window_secs > now`, and a new asset transfer
 is admitted only if the running total (plus amounts already staged in the same request) ≤ the
 effective cap for that transfer. Per-recipient overrides maintain the same invariant in their own
 `RecipientWindowState`; recipients without an override use the global cap. Both the global cap
@@ -588,8 +606,17 @@ pub fn unfreeze(env: Env)    // require_auth(Admin); clears AdminFrozen, LastHea
 
 // ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ──
 pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
-pub fn status(env: Env) -> Status                     // frozen? admin_frozen? last_heartbeat? now?
+pub fn status(env: Env) -> Status                     // operational snapshot (see Status block below):
+                                                      // paused / window_remaining / outside_active_window
+                                                      // / admin_frozen / heartbeat_expired / revision
 pub fn dms_health(env: Env) -> DmsHealth                  // ok, warn (>=80%), or expired
+pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+    // Dry-run §8 validation over the *candidate* `config` (issue #35):
+    // `Valid`, or `Invalid(rule)` naming the first failing §8 rule in
+    // evaluation order. Read-only preflight so SDKs/dashboards can pinpoint
+    // the offending field before submission; the on-chain rejection path is
+    // unchanged (`set_policy` still fails with the single `InvalidConfig`
+    // code).
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // Preflight / simulate a transfer (doc alias; ABI frozen as `check`):
     // pure pre-flight replica of the §6.2 decision path: it does not change
@@ -620,7 +647,21 @@ impl CustomAccountInterface for PolicyEngine {
 #[contracttype]
 pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
                    pub last_heartbeat: u64, pub now: u64, pub has_policy: bool,
-                   pub policy_revision: u64 }
+                   pub policy_revision: u64,
+                   pub paused: bool, pub window_remaining: Option<i128>,
+                   pub outside_active_window: bool }
+// Operational fields (additive; SDK/dashboard decoders must tolerate new keys):
+// - paused: the installed policy's admin kill switch (§3 `PolicyConfig.paused`);
+//   false when no policy is installed (default-deny has nothing to pause).
+// - window_remaining: global headroom `window_cap - spent` over the *pruned*
+//   rolling ledger (expired entries never count) — the same number
+//   `check_detailed` reports as `remaining_window` for a recipient without a
+//   per-recipient override; None when the global cap is disabled (0), including
+//   the no-policy case. Per-recipient override headroom is recipient-targeted
+//   and not projected here (use `check_detailed` per recipient).
+// - outside_active_window: whether `now` sits outside the policy's active
+//   window (`active_from`/`active_until`, both bounds inclusive; §4 account
+//   gate) — false with no policy or an unrestricted window (either bound 0).
 
 #[contracttype]
 pub enum DmsHealthStatus { Ok, Warn, Expired }
@@ -632,6 +673,18 @@ pub struct DmsHealth {
     pub grace_secs: u64,
     pub threshold_secs: u64,
 }
+
+#[contracttype]
+pub enum PolicyRuleId { AmountSign, WindowRequiresWidth, ActiveWindowOrder,
+                        SelfAddressInList, DuplicateAddressInList,
+                        DuplicateRecipientCap, RecipientListTooLong,
+                        RecipientCapSign, RecipientAllowAndBlocked,
+                        ProtocolContractDuplicate, ProtocolFnListInvalid,
+                        DurationExceedsBound, AssetListTooLong,
+                        ProtocolListTooLong }
+
+#[contracttype]
+pub enum ValidationOutcome { Valid, Invalid(PolicyRuleId) }
 
 #[contracttype]
 pub enum CheckResult { Allowed, Blocked(BlockReason) }
@@ -689,6 +742,57 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 # → {"Blocked":"heartbeat_expired"}
 ```
 
+### 7.3 Policy hash — cheap drift detection (`policy_hash`)
+
+Operators and the dashboard need to answer *"has the installed policy changed since I last
+looked?"* without shipping the full `PolicyConfig` each poll and diffing client-side.
+`policy_hash()` provides that check as one value, and doubles as a tamper-evident log anchor
+when recorded alongside `auth_checked` events (see [Policy
+Attestation](docs/research/policy-attestation.md) for the related admin-signature workflow).
+
+```rust
+pub fn policy_hash(env: Env) -> BytesN<32>         // no auth; event-free; write-free
+```
+
+- **No policy case — defined, never a trap.** Before `initialize`, when `revoke_policy()` has
+  removed the policy, or in any other no-policy state, `policy_hash()` returns
+  `NO_POLICY_DIGEST` = `sha256("")`
+  = `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` — the SHA-256 of the
+  empty marker. Off-chain implementers reproduce it trivially; the value is exported by the
+  crate and asserted by `tests/policy_hash_encoding.rs`. The all-zero "nothing enabled"
+  policy is a *real* policy and never collides with this sentinel.
+- **Determinism.** The same policy value yields the same hash across contract instances,
+  deployments, and ledger advances; `set_policy` with an unchanged value keeps the hash
+  stable (the `PolicyRevision` changes; the hash does not). Any change to **any** field —
+  including `paused`, the active window, list membership, or a per-protocol fn list —
+  changes the hash. Reverting a policy restores its previous hash exactly.
+
+**Canonical encoding.** The hash is `SHA-256` over the **ScVal XDR serialization of the
+policy map** — the same bytes an SDK produces when it passes the policy as the `set_policy`
+argument. Determinism rests on two wire-stable invariants:
+
+1. `#[contracttype]` structs encode as `ScVal::Map` with entries in **ascending symbol-key
+   order** — the host map invariant, and the same order §3.2 pins for manual encoders.
+2. ScVal XDR is a canonical byte format: each field has a single XDR type (`i128` → `I128`,
+   `u64` → `U64`, `bool` → `Bool`, `Address` → `ScAddress`, `Option::None` → `Void`,
+   `Vec<Address>` → `ScVec` of `ScAddress`, …), so two conforming encoders never disagree.
+
+Field order is therefore the sorted key order of §3.2's table (`active_from`, `active_until`,
+`allow_any_recipient`, `assets`, `blocked_recipients`, `dms_grace_secs`, `paused`,
+`per_tx_cap`, `protocol_calls_per_window`, `protocols`, `recipient_window_caps`, `recipients`,
+`window_cap`, `window_secs`). An off-chain reproducer builds the policy value it already
+constructs for `set_policy`, XDR-encodes it, and SHA-256s the bytes — no custom serialization
+exists to drift. Notes:
+
+- XDR `Vec`s are **ordered**: two allowlists with equal members in different order are
+  different policies and hash differently (allowlist scan order is policy semantics, §6).
+- `i128` fields carry the standard two's-complement big-endian XDR form (caps are validated
+  `>= 0` by §8, but the encoding itself is defined for negatives).
+- `policy_hash` is a pure read: no auth, no event, no storage mutation (like every persistent
+  read it may refresh entry TTLs under §9.5).
+- Out of scope: sibling repositories. The SDK/dashboard drift-check flow is tracked in its
+  own repository.
+
 ---
 
 ## 8. Config validation (`set_policy`)
@@ -700,8 +804,25 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 > documented there, so the examples cannot rot into invalid configs.
 
 - All amounts `>= 0`; `window_secs` and `dms_grace_secs` are `u64` (no negatives possible).
+- Before scanning list contents, `assets` is bounded to `MAX_POLICY_ASSETS` (256),
+  `protocols` to `MAX_POLICY_PROTOCOLS` (256), and `recipients`, `blocked_recipients`,
+  and `recipient_window_caps` to `MAX_RECIPIENT_ENTRIES` (256). These limits bound
+  authorization scans, validation work, and per-recipient storage.
 - `window_cap != 0` requires `window_secs != 0`.
 - A per-recipient cap `> 0` requires `window_secs != 0`.
+- `window_secs <= MAX_WINDOW_SECS` and `dms_grace_secs <= MAX_DMS_GRACE_SECS`
+  (both `315_360_000` seconds = 86_400 × 3_650 ≈ 10 years, `types::MAX_WINDOW_SECS` /
+  `types::MAX_DMS_GRACE_SECS`, issue #34). Rationale: both fields are `u64`, so a
+  seconds/milliseconds mix-up (e.g. a 90-day window pasted as 7_776_000_000 ms) or a
+  fat-fingered `u64::MAX` reads as a valid config while **effectively disabling pruning
+  forever** — every rolling-window entry (and per-recipient ledger) is retained for the
+  life of the contract, which is unbounded storage growth paid by the operator, and a
+  huge `dms_grace_secs` silently turns the dead-man switch (§5) off. A decade is far
+  beyond any legitimate rolling spend window or DMS grace (it also outlives typical
+  contract deployments), so values above it are treated as a typo'd config and rejected
+  as `InvalidConfig` — fail-closed, policy unchanged. Setting a bound this high keeps
+  the decision conservative: no realistic policy is affected, only clearly accidental
+  ones. `0` remains legal for both fields (feature disabled, as documented).
 - `active_until == 0 || active_until > active_from`.
 - Assets, protocols, recipients, and per-protocol fn lists must be non-empty for their
   respective vectors to matter (empty `assets` = no SAC transfer is ever allowed; empty
@@ -709,9 +830,6 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 - Duplicate addresses within a list are rejected (`assets`, `recipients`,
   `blocked_recipients`, `protocols`).
 - Duplicate recipients within `recipient_window_caps` are rejected.
-- `recipients`, `blocked_recipients`, and `recipient_window_caps` are each bounded to
-  `MAX_RECIPIENT_ENTRIES` (256) entries to keep allowlist/denylist scans and
-  per-recipient storage predictable.
 - `recipients` and `blocked_recipients` must not intersect — a contradictory config is
   rejected.
 - The contract's own address may not appear in **any** of the address lists:
@@ -730,6 +848,46 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 
 Invalid config → `InvalidConfig`, policy unchanged (fail-closed, never partially applied).
 
+### 8.1 Identifying the failing rule: `validate_policy` (issue #35)
+
+The on-chain rejection surface is deliberately stable: any rule above fails
+`set_policy` with the single `InvalidConfig` code, and the policy is left
+uninstalled. To make the *reason* identifiable without exploding the on-chain
+error enum, the contract exposes a read-only dry run:
+
+```rust
+pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+```
+
+It evaluates the *candidate* `config` argument — never the installed policy —
+against the same rules, in the same order, as `set_policy`, and returns
+`Valid` or `Invalid(PolicyRuleId)`, where the payload names the **first** rule
+that failed. `PolicyRuleId` variants map to the bullets above in evaluation
+order:
+
+| `PolicyRuleId` | §8 rule |
+|---|---|
+| `AssetListTooLong` | `assets` over `MAX_POLICY_ASSETS` |
+| `ProtocolListTooLong` | `protocols` over `MAX_POLICY_PROTOCOLS` |
+| `RecipientListTooLong` | `recipients` / `recipient_window_caps` / `blocked_recipients` over `MAX_RECIPIENT_ENTRIES` |
+| `AmountSign` | `per_tx_cap` / `window_cap` negative |
+| `WindowRequiresWidth` | `window_cap != 0` (or a per-recipient cap `> 0`) with `window_secs == 0` |
+| `ActiveWindowOrder` | `active_until != 0 && active_until <= active_from` |
+| `SelfAddressInList` | the contract's own address in `assets`, `protocols`, `recipients`, `blocked_recipients`, or a `recipient_window_caps` entry |
+| `DuplicateAddressInList` | duplicate address in `assets` / `recipients` / `blocked_recipients`, or duplicate fn name within one protocol rule |
+| `DuplicateRecipientCap` | the same recipient twice in `recipient_window_caps` |
+| `RecipientCapSign` | a per-recipient cap negative |
+| `RecipientAllowAndBlocked` | a recipient in both `recipients` and `blocked_recipients` |
+| `ProtocolContractDuplicate` | the same contract in two protocol rules |
+| `ProtocolFnListInvalid` | a protocol rule's fn list empty or containing duplicates |
+| `DurationExceedsBound` | `window_secs` or `dms_grace_secs` over `MAX_WINDOW_SECS` (`315_360_000` s ≈ 10 years; evaluated last so the other variant ordinals stay wire-stable) |
+
+`validate_policy` is a read: no auth, no events, no state writes (read-path
+TTL effects in §9.5 still apply). The `InvalidConfig` code itself is
+unchanged — every decoder matching on it keeps working; surfacing
+`ValidationOutcome` in the SDK/dashboard is a cross-repo follow-up tracked in
+those repositories.
+
 ---
 
 ## 9. Events and telemetry
@@ -740,14 +898,38 @@ filtering by the SDK listener.
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
 | `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | (none) | every `__check_auth` / `check` decision |
-| `heartbeat` | (none) | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
+| `heartbeat` | (none) | `at: u64`, `expires_at: u64` — the attested DMS deadline as it stood at emission time, `at + dms_grace_secs` of the policy current at that moment; `0` when the dead-man switch is disabled (`dms_grace_secs == 0`, or no policy) | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
 | `frozen` | (none) | `by: Address` | admin freeze |
 | `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
-| `policy_set` / `policy_revoked` | (none) | `by: Address` | admin policy changes |
+| `policy_set` / `policy_revoked` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced | admin policy changes |
 | `agent_rotated` | (none) | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
 
+**Policy revision join key (issue #38).** `PolicyRevision` is a persistent
+instance-stored counter (`DataKey::PolicyRevision`, §3) incremented by every
+`set_policy` and `revoke_policy` — starting at 1 after the first `set_policy`
+and never reset by a revoke. `status()` exposes it as `policy_revision`, and
+the `policy_set`, `policy_revoked`, and `auth_checked` events stamp it as
+additive `revision` data. Telemetry consumers can therefore join "which policy
+was in force when this transfer was admitted" on the counter instead of
+wall-clock joins, which are wrong the instant an admin makes two `set_policy`
+calls within one ledger. The fields are additive data on unchanged topics, so
+decoders that ignore unknown map keys keep working; SDK/dashboard decoders
+surfacing the new field are cross-repo follow-ups. Two `auth_checked` events
+sharing a revision were evaluated under the same policy generation; the
+`policy_hash` (§7.3) distinguishes *which* policy that generation installed.
+
 Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
+
+**Heartbeat expiry (`heartbeat.expires_at`).** `expires_at` is the deadline the heartbeat was
+actually attested under, derived from the `dms_grace_secs` of the policy *current at the moment
+the heartbeat is emitted* — not a value the consumer recomputes from `at` using whatever grace
+the policy carries later. A `set_policy` that changes `dms_grace_secs` after a heartbeat does not
+retroactively change that heartbeat's recorded deadline, so a listener replaying the log derives
+the same expiry the contract enforced instead of a drifting recomputation. When the dead-man
+switch is disabled the event carries `expires_at == 0` rather than `at + 0`, so `0` unambiguously
+means "no deadline was attested" and never a real timestamp (ledger timestamps are far above `0`).
+Reads `Policy` at emission time to obtain the grace; a missing policy reads as disabled.
 
 **Key fingerprints (`agent_rotated`).** A fingerprint is `sha256(pubkey)[0..8]` — the first
 8 bytes of the SHA-256 digest of the agent public key, rendered as 16 lowercase hex characters
@@ -805,6 +987,56 @@ Not guarded by v1 (documented, not hidden):
   cannot move funds)
 - DoS on the *account* is not possible (anyone may call read functions); policy writes are
   admin-only. The contract is unaudited; see `SECURITY.md`/README disclaimers.
+
+### 10.1 Signature binding
+
+**What the payload covers.** `__check_auth` step 1 is
+`ed25519_verify(AgentPubkey, signature_payload, sig)` — a pure signature check over a
+digest the **host** computes, never this contract:
+`sha256(HashIdPreimage::SorobanAuthorization { network_id, nonce,
+signature_expiration_ledger, invocation })`, where `invocation` is the complete root
+invocation — every auth context (target contract, function, argument values) the
+transaction will execute under this account. What the binding therefore covers:
+
+| Payload field | Bound meaning | If altered |
+|---|---|---|
+| `network_id` | chain domain | a testnet signature verifies on no other network |
+| `nonce` | single-use label, unique per address | host rejects reuse once consumed |
+| `signature_expiration_ledger` | validity bound in ledgers | entry fails after that ledger passes |
+| `invocation` (root) | contract + function + args of every context | digest changes ⇒ signature no longer verifies |
+
+**Replay analysis.**
+
+- *Across transactions: impossible by construction.* A signature captured for tx A
+  verifies only against A's digest. Replaying it inside tx B's auth entry makes the
+  host recompute B's digest — different invocation, nonce, or expiry ⇒ different bytes
+  ⇒ `ed25519_verify` traps **before** any policy evaluation, so a replayed signature
+  never reaches the decision table. Pinned by
+  `captured_signature_cannot_authorize_different_tx` and
+  `check_auth_binds_signature_to_the_exact_payload` (`src/integration_tests.rs`).
+- *The same transaction twice: host-side.* A byte-identical resubmission reuses A's
+  nonce (unique per address, rejected by the host after first consumption) and dies at
+  `signature_expiration_ledger` regardless. Division of labor, stated plainly: nonce
+  and expiry replay defense is **host** construction — this contract only ever checks
+  the signature over the digest the host hands it.
+- *Agent signature ≠ admin authority.* An agent signature clears step 1 only for auth
+  entries whose credentials address is **this account**. The admin write path
+  (`set_policy`, `revoke_policy`, `freeze`, `unfreeze`, `rotate_agent_key`) runs under
+  `require_auth(Admin)` — a different address, a different auth entry, a different
+  payload — and an agent-signed entry never satisfies it
+  (`agent_signature_does_not_confer_admin_authority`). The converse is the
+  admin-compromise bullet above: the admin cannot produce the agent's signature either,
+  so it may widen policy but still cannot move funds.
+
+**Leaked payload + sig, mid-flight.** Anyone holding `(payload, sig)` before inclusion
+can submit **exactly** tx A themselves — front-running the already-authorized
+invocation. That is not an escalation: amount, recipient, and function are inside the
+digest, so nothing can be edited without invalidating the signature; policy is
+re-evaluated at execution, so caps, allowlists, pause, and freeze still bind the
+replayed transaction; the nonce is consumed on first use; and
+`signature_expiration_ledger` bounds how long the leak stays usable. A leaked pair
+cannot authorize a policy change, a different recipient, or a larger amount — those
+are different digests, and the admin path never consults the agent's signature at all.
 
 ---
 

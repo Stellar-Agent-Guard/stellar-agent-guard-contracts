@@ -1,0 +1,56 @@
+# Dependabot keeps the RUSTSEC surface fresh and Actions pins current.
+# Weekly cadence; PRs are capped so the security-sensitive review queue
+# stays triageable. Every PR must still pass the full `ci` gate
+# (branch protection on `main` enforces this) — see CONTRIBUTING.md.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    # Root manifest plus the tool/bench members (tools/agent-tx, benches)
+    # are picked up via the workspace lockfile from "/".
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    target-branch: "main"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      # soroban-sdk majors are isolated on purpose: a major bump can break
+      # the CustomAccountInterface ABI and the auth-context semantics quoted
+      # in SPEC §1.1, so it must land alone for a focused review + the
+      # SPEC §1.1 re-verification ratchet (CONTRIBUTING.md). Do NOT fold it
+      # into the grouped minor/patch set below.
+      soroban-sdk:
+        patterns:
+          - "soroban-sdk"
+      # Everything else (minor + patch only) is grouped to keep PR noise low.
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "soroban-sdk"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    target-branch: "main"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

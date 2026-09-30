@@ -1,34 +1,61 @@
 //! Comprehensive event payload audit tests for every event emitted by the contract.
 //! Asserts exact topic counts, topic symbols, and data payload shapes per SPEC §9.
 
-use crate::types::{PolicyConfig, ProtocolRule};
+use crate::types::PolicyConfig;
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use soroban_sdk::auth::{Context, CustomAccountInterface};
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::testutils::{Events as _, Ledger as _};
 use soroban_sdk::xdr::{
     self, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs, Limited, Limits,
     ScBytes, ScSymbol, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
     SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, WriteXdr,
 };
-use soroban_sdk::{
-    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val,
-};
-use std::format;
+use soroban_sdk::{contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, Val};
 
 const SIG_EXPIRATION_LEDGER: u32 = 6_000_000;
+
+/// Read the `u64` value of a named data-map entry from an event already
+/// validated to be a `ScVal::Map` payload (SPEC §9 event data shape).
+fn map_u64_field(event: &xdr::ContractEvent, field: &str) -> u64 {
+    let xdr::ContractEventBody::V0(v0) = &event.body;
+    let ScVal::Map(Some(map)) = &v0.data else {
+        panic!("event data must be a Map");
+    };
+    let entry = map
+        .0
+        .iter()
+        .find(|entry| {
+            entry.key == ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from(field)).unwrap())
+        })
+        .unwrap_or_else(|| panic!("event data must carry `{field}`"));
+    match &entry.val {
+        ScVal::U64(v) => *v,
+        other => panic!("event field `{field}` must be U64, got {other:?}"),
+    }
+}
+
+/// A `ScVal::Symbol` for an event's first topic (the `event_*` name that
+/// `#[contractevent]` prepends, SPEC §9).
+fn event_name(name: &str) -> ScVal {
+    ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from(name)).unwrap())
+}
 
 #[contract]
 pub struct MockAdmin;
 
+// The module is a lint-clean event-shape audit: the mock admin's trait params
+// are deliberately unused, and the monolithic audit test exceeds
+// `too_many_lines` by design (one narrative walk over every event).
+
 #[contractimpl]
-#[allow(clippy::needless_pass_by_value, clippy::used_underscore_binding)]
 impl CustomAccountInterface for MockAdmin {
     type Signature = ();
     type Error = crate::types::Error;
 
+    #[allow(clippy::used_underscore_binding)] // trait-required params, deliberately unused
     fn __check_auth(
         _env: Env,
         _signature_payload: soroban_sdk::crypto::Hash<32>,
@@ -183,11 +210,13 @@ impl EventAuditHarness {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one narrative walk over every event shape
 fn audit_event_payloads_and_topics() {
     let mut h = EventAuditHarness::new();
 
     // 1. Initialized event (emitted during new() via initialize)
-    let events = h.env.events().all().events();
+    let all = h.env.events().all();
+    let events = all.events();
     let init_event = events
         .iter()
         .find(|e| match &e.body {
@@ -218,11 +247,31 @@ fn audit_event_payloads_and_topics() {
         _ => panic!("event_initialized data must be a Map"),
     }
 
-    // 2. Heartbeat event
+    // 2. Heartbeat event. A guarded heartbeat routes through __check_auth,
+    // so a policy must be installed first — otherwise the decision path
+    // blocks with `no_policy` and no heartbeat event is emitted.
+    let heartbeat_policy = PolicyConfig {
+        per_tx_cap: 0,
+        window_secs: 60,
+        window_cap: 0,
+        assets: vec![&h.env],
+        protocols: vec![&h.env],
+        recipients: vec![&h.env],
+        recipient_window_caps: vec![&h.env],
+        blocked_recipients: vec![&h.env],
+        allow_any_recipient: false,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
+    };
+    h.set_policy(&heartbeat_policy);
     h.env.ledger().set_timestamp(2_000);
     h.heartbeat();
 
-    let events = h.env.events().all().events();
+    let all = h.env.events().all();
+    let events = all.events();
     let hb_event = events
         .iter()
         .find(|e| match &e.body {
@@ -239,10 +288,14 @@ fn audit_event_payloads_and_topics() {
     assert_eq!(hb_v0.topics.len(), 1, "event_heartbeat must have 1 topic");
     match &hb_v0.data {
         ScVal::Map(Some(map)) => {
-            assert_eq!(map.0.len(), 1);
+            assert_eq!(map.0.len(), 2, "event_heartbeat carries at + expires_at");
             assert_eq!(
                 map.0[0].key,
                 ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("at")).unwrap())
+            );
+            assert_eq!(
+                map.0[1].key,
+                ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("expires_at")).unwrap())
             );
         }
         _ => panic!("event_heartbeat data must be a Map"),
@@ -250,7 +303,8 @@ fn audit_event_payloads_and_topics() {
 
     // 3. Frozen event
     h.freeze();
-    let events = h.env.events().all().events();
+    let all = h.env.events().all();
+    let events = all.events();
     let frozen_event = events
         .iter()
         .find(|e| match &e.body {
@@ -278,7 +332,8 @@ fn audit_event_payloads_and_topics() {
 
     // 4. Unfrozen event
     h.unfreeze();
-    let events = h.env.events().all().events();
+    let all = h.env.events().all();
+    let events = all.events();
     let unfrozen_event = events
         .iter()
         .find(|e| match &e.body {
@@ -334,7 +389,8 @@ fn audit_event_payloads_and_topics() {
         protocol_calls_per_window: 0,
     };
     h.set_policy(&dummy_policy);
-    let events = h.env.events().all().events();
+    let all = h.env.events().all();
+    let events = all.events();
     let ps_event = events
         .iter()
         .find(|e| match &e.body {
@@ -351,19 +407,33 @@ fn audit_event_payloads_and_topics() {
     assert_eq!(ps_v0.topics.len(), 1, "event_policy_set must have 1 topic");
     match &ps_v0.data {
         ScVal::Map(Some(map)) => {
-            assert_eq!(map.0.len(), 1);
+            assert_eq!(
+                map.0.len(),
+                2,
+                "event_policy_set must carry by + revision (issue #38)"
+            );
             assert_eq!(
                 map.0[0].key,
                 ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("by")).unwrap())
             );
+            assert_eq!(
+                map.0[1].key,
+                ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("revision")).unwrap())
+            );
         }
         _ => panic!("event_policy_set data must be a Map"),
     }
+    assert_eq!(
+        map_u64_field(ps_event, "revision"),
+        2,
+        "set_policy stamps the incremented revision (heartbeat policy was 1) (issue #38)"
+    );
 
     // 6. PolicyRevoked event
     h.revoke_policy();
-    let events = h.env.events().all().events();
-    let pr_event = events
+    let all = h.env.events().all();
+    let events = all.events();
+    let revoked_event = events
         .iter()
         .find(|e| match &e.body {
             xdr::ContractEventBody::V0(v0) => {
@@ -375,20 +445,139 @@ fn audit_event_payloads_and_topics() {
         })
         .expect("event_policy_revoked not found");
 
-    let xdr::ContractEventBody::V0(pr_v0) = &pr_event.body;
+    let xdr::ContractEventBody::V0(revoked_v0) = &revoked_event.body;
     assert_eq!(
-        pr_v0.topics.len(),
+        revoked_v0.topics.len(),
         1,
         "event_policy_revoked must have 1 topic"
     );
-    match &pr_v0.data {
+    match &revoked_v0.data {
         ScVal::Map(Some(map)) => {
-            assert_eq!(map.0.len(), 1);
+            assert_eq!(
+                map.0.len(),
+                2,
+                "event_policy_revoked must carry by + revision (issue #38)"
+            );
             assert_eq!(
                 map.0[0].key,
                 ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("by")).unwrap())
             );
+            assert_eq!(
+                map.0[1].key,
+                ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("revision")).unwrap())
+            );
         }
         _ => panic!("event_policy_revoked data must be a Map"),
     }
+    assert_eq!(
+        map_u64_field(revoked_event, "revision"),
+        3,
+        "revoke_policy increments the counter (issue #38)"
+    );
+}
+
+/// Issue #38 acceptance: the revision counter advances set → revoke → set,
+/// and every `auth_checked` event stamps the revision in force at decision
+/// time — including the default-deny path after a revoke, where no policy
+/// exists but the rejection must still be attributable to a generation.
+#[test]
+#[allow(clippy::similar_names)] // ps_event/ps2_event, auth_event/auth2_event are the point
+fn policy_revision_sequence_is_incremental_and_stamped_on_auth_events() {
+    let mut h = EventAuditHarness::new();
+    let cfg = PolicyConfig {
+        per_tx_cap: 100,
+        window_secs: 60,
+        window_cap: 500,
+        assets: vec![&h.env],
+        protocols: vec![&h.env],
+        recipients: vec![&h.env],
+        recipient_window_caps: vec![&h.env],
+        blocked_recipients: vec![&h.env],
+        allow_any_recipient: false,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
+    };
+
+    // set → heartbeat → revoke → set → heartbeat: the counter must march
+    // 1, 2, 3 with no gaps or resets, so each generation is a unique,
+    // monotone join key, and a guarded decision under each generation stamps
+    // that generation's revision on its `auth_checked` event.
+    // `env.events().all()` holds only the most recent top-level invocation's
+    // events, so each step is asserted against the snapshot taken right
+    // after it.
+    h.set_policy(&cfg);
+    let all = h.env.events().all();
+    let events = all.events();
+    let ps_event = events
+        .iter()
+        .find(|e| matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&event_name("event_policy_set"))))
+        .expect("event_policy_set not found");
+    assert_eq!(
+        map_u64_field(ps_event, "revision"),
+        1,
+        "first set_policy stamps revision 1"
+    );
+
+    h.heartbeat(); // authorized under generation 1
+    let all = h.env.events().all();
+    let events = all.events();
+    let auth_event = events
+        .iter()
+        .find(|e| matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&event_name("event_auth_checked"))))
+        .expect("event_auth_checked not found");
+    assert_eq!(
+        map_u64_field(auth_event, "revision"),
+        1,
+        "auth_checked under the first policy stamps revision 1"
+    );
+
+    h.revoke_policy();
+    let all = h.env.events().all();
+    let events = all.events();
+    let pr_event = events
+        .iter()
+        .find(|e| matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&event_name("event_policy_revoked"))))
+        .expect("event_policy_revoked not found");
+    assert_eq!(
+        map_u64_field(pr_event, "revision"),
+        2,
+        "revoke_policy increments to 2"
+    );
+
+    h.set_policy(&cfg);
+    let all = h.env.events().all();
+    let events = all.events();
+    let ps2_event = events
+        .iter()
+        .find(|e| matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&event_name("event_policy_set"))))
+        .expect("event_policy_set not found");
+    assert_eq!(
+        map_u64_field(ps2_event, "revision"),
+        3,
+        "second set_policy increments to 3 (no reset after revoke)"
+    );
+
+    h.heartbeat(); // authorized under generation 3
+    let all = h.env.events().all();
+    let events = all.events();
+    let auth2_event = events
+        .iter()
+        .find(|e| matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&event_name("event_auth_checked"))))
+        .expect("event_auth_checked not found");
+    assert_eq!(
+        map_u64_field(auth2_event, "revision"),
+        3,
+        "auth_checked after re-install stamps revision 3 — the join key distinguishes generations"
+    );
+
+    // status() must agree with the event stamp for the current generation.
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard)
+            .status()
+            .policy_revision,
+        3
+    );
 }
