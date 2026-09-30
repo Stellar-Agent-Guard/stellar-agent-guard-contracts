@@ -37,7 +37,10 @@ pub use types::NO_POLICY_DIGEST;
 pub use types::{
     CheckDetail, Error, PolicyConfig, ProtocolRule, RecipientCap, RecipientWindowState,
 };
-use types::{CheckResult, DataKey, Status, WindowState, MAX_RECIPIENT_ENTRIES};
+use types::{
+    CheckResult, DataKey, Status, WindowState, MAX_DMS_GRACE_SECS, MAX_RECIPIENT_ENTRIES,
+    MAX_WINDOW_SECS,
+};
 use window::Ledger;
 
 // ── Contract events (SPEC §9). Each event is its own type; topic layout
@@ -219,6 +222,14 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
         return Err(Error::InvalidConfig);
     }
     if cfg.window_cap > 0 && cfg.window_secs == 0 {
+        return Err(Error::InvalidConfig);
+    }
+    // Sane upper bounds on every duration knob (issue #34): `window_secs` and
+    // `dms_grace_secs` are `u64`, so a seconds/millis mix-up or a fat-fingered
+    // `u64::MAX` silently disables pruning (or the dead-man switch) forever
+    // while still reading as a "valid" config. Values beyond ~10 years are
+    // rejected outright — fail-closed, policy unchanged.
+    if cfg.window_secs > MAX_WINDOW_SECS || cfg.dms_grace_secs > MAX_DMS_GRACE_SECS {
         return Err(Error::InvalidConfig);
     }
     if cfg.active_until != 0 && cfg.active_until <= cfg.active_from {

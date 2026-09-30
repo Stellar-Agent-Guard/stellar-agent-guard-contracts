@@ -2136,3 +2136,92 @@ fn heartbeat_event_uses_grace_current_at_emission_not_a_stale_one() {
     let (third_at, third_expiry) = last_heartbeat_payload(&h.env).expect("third heartbeat event");
     assert_eq!((third_at, third_expiry), (1_020, 0));
 }
+
+// ── Issue #34: sane upper bounds on `window_secs` / `dms_grace_secs` ─────
+
+/// SPEC §8 (issue #34): both duration fields are `u64`, so a seconds/millis
+/// mix-up or `u64::MAX` would read as a valid config while silently disabling
+/// pruning (or the dead-man switch) forever. Anything above
+/// `MAX_WINDOW_SECS` / `MAX_DMS_GRACE_SECS` (`315_360_000` s ≈ 10 years) is
+/// rejected as `InvalidConfig`, fail-closed: the previously installed policy
+/// (if any) stays unchanged.
+#[test]
+fn window_and_dms_upper_bounds_rejected() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // `set_policy` returns `()` and signals rejection by panicking through
+    // `panic_with_error!` (same pattern as `self_address_rejected_in_every_list`):
+    // assert the panic *and* the fail-closed invariant.
+    let expect_invalid = |cfg: &PolicyConfig, what: &str| {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_policy(cfg);
+        }));
+        assert!(
+            res.is_err(),
+            "`{what}` must fail set_policy with InvalidConfig"
+        );
+        assert!(
+            client.policy().is_none(),
+            "`{what}` must leave the policy uninstalled (fail-closed)"
+        );
+    };
+
+    // The motivating case: `u64::MAX` — "effectively forever".
+    let mut p = h.base_policy();
+    p.window_secs = u64::MAX;
+    expect_invalid(&p, "window_secs = u64::MAX");
+
+    // One second past the bound is already rejected (inclusive bound).
+    let mut p = h.base_policy();
+    p.window_secs = crate::types::MAX_WINDOW_SECS + 1;
+    expect_invalid(&p, "window_secs = MAX + 1");
+
+    // Same rule for the dead-man switch grace: `u64::MAX` silently turns §5 off.
+    let mut p = h.base_policy();
+    p.dms_grace_secs = u64::MAX;
+    expect_invalid(&p, "dms_grace_secs = u64::MAX");
+
+    let mut p = h.base_policy();
+    p.dms_grace_secs = crate::types::MAX_DMS_GRACE_SECS + 1;
+    expect_invalid(&p, "dms_grace_secs = MAX + 1");
+
+    // Sanity: the same env still installs an in-bounds policy cleanly, proving
+    // the rejections above came from the bound and not from a broken harness.
+    client.set_policy(&h.base_policy());
+    assert!(client.policy().is_some());
+}
+
+/// SPEC §8 (issue #34): the bound is inclusive — exactly `MAX_WINDOW_SECS` /
+/// `MAX_DMS_GRACE_SECS` installs cleanly — and `0` stays legal for both
+/// fields (feature disabled), so no legitimate policy regresses.
+#[test]
+fn window_and_dms_upper_bounds_accept_boundary() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // Exactly at the bound: accepted, stored verbatim.
+    let mut p = h.base_policy();
+    p.window_secs = crate::types::MAX_WINDOW_SECS;
+    client.set_policy(&p);
+    assert_eq!(
+        client.policy().expect("policy installed").window_secs,
+        crate::types::MAX_WINDOW_SECS
+    );
+
+    let mut p = h.base_policy();
+    p.dms_grace_secs = crate::types::MAX_DMS_GRACE_SECS;
+    client.set_policy(&p);
+    assert_eq!(
+        client.policy().expect("policy installed").dms_grace_secs,
+        crate::types::MAX_DMS_GRACE_SECS
+    );
+
+    // 0 remains legal for both fields.
+    let mut p = h.base_policy();
+    p.window_secs = 0;
+    p.dms_grace_secs = 0;
+    client.set_policy(&p);
+    let stored = client.policy().expect("policy installed");
+    assert_eq!((stored.window_secs, stored.dms_grace_secs), (0, 0));
+}

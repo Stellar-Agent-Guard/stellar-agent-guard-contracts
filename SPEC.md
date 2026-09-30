@@ -787,6 +787,19 @@ exists to drift. Notes:
 - All amounts `>= 0`; `window_secs` and `dms_grace_secs` are `u64` (no negatives possible).
 - `window_cap != 0` requires `window_secs != 0`.
 - A per-recipient cap `> 0` requires `window_secs != 0`.
+- `window_secs <= MAX_WINDOW_SECS` and `dms_grace_secs <= MAX_DMS_GRACE_SECS`
+  (both `315_360_000` seconds = 86_400 × 3_650 ≈ 10 years, `types::MAX_WINDOW_SECS` /
+  `types::MAX_DMS_GRACE_SECS`, issue #34). Rationale: both fields are `u64`, so a
+  seconds/milliseconds mix-up (e.g. a 90-day window pasted as 7_776_000_000 ms) or a
+  fat-fingered `u64::MAX` reads as a valid config while **effectively disabling pruning
+  forever** — every rolling-window entry (and per-recipient ledger) is retained for the
+  life of the contract, which is unbounded storage growth paid by the operator, and a
+  huge `dms_grace_secs` silently turns the dead-man switch (§5) off. A decade is far
+  beyond any legitimate rolling spend window or DMS grace (it also outlives typical
+  contract deployments), so values above it are treated as a typo'd config and rejected
+  as `InvalidConfig` — fail-closed, policy unchanged. Setting a bound this high keeps
+  the decision conservative: no realistic policy is affected, only clearly accidental
+  ones. `0` remains legal for both fields (feature disabled, as documented).
 - `active_until == 0 || active_until > active_from`.
 - Assets, protocols, recipients, and per-protocol fn lists must be non-empty for their
   respective vectors to matter (empty `assets` = no SAC transfer is ever allowed; empty
