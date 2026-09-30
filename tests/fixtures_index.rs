@@ -7,6 +7,7 @@
 //! the index must appear in the README, and each truncated `deadbeef…`-style
 //! reference must resolve to an indexed hash. Any mismatch fails `cargo test`,
 //! which is the `ci` status check.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test/example code: panics and unwraps are assertions, not shipped behaviour
 
 use std::collections::BTreeSet;
 use std::fs;
