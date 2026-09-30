@@ -12,14 +12,60 @@ contract; assume the worst about the current code.
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in this project, please report it
-privately to the maintainers via Telegram (the ecosystem norm):
+**Primary — GitHub private vulnerability reporting.** Open a draft security
+advisory from this repository's **Security → Advisories → Report a
+vulnerability** (private: visible only to you and the maintainers):
 
-- **Telegram**: [t.me/stellar_dev](https://t.me/stellar_dev)
+<https://github.com/aigbagbobila/stellar-agent-guard-contracts/security/advisories/new>
 
-We will acknowledge receipt within 48 hours and work to address the issue
-promptly. Please do not disclose the vulnerability publicly until we've had
-a chance to address it.
+This is the preferred path: it is private, creates a trackable `GHSA` advisory,
+and keeps the whole discussion and fix in one auditable place. It requires the
+maintainer to have enabled **Private vulnerability reporting** once (see the
+[maintainer checklist](#maintainer-checklist-outside-repo-actions) below).
+
+**Fallback — email.** If you cannot use the advisory flow, email the maintainer
+at **`aigbagbobila@users.noreply.github.com`** (the address linked to their
+GitHub account). If your report is sensitive, say so and ask for a PGP key in
+your first message; we will provide one before you send details.
+
+**Community — Telegram, for non-sensitive questions only.** The
+[Telegram group](https://t.me/+EzSusj-2vVhhNmI0) remains the community channel,
+but it is **not** a private or trackable disclosure path. Do not post
+vulnerability details there.
+
+**Response window.** We acknowledge receipt within **48 hours** and aim to give a
+remediation plan or a status update within **7 days**. Please do not disclose
+publicly until a fix is released, or 90 days from your report — whichever comes
+first.
+
+## Scope
+
+**In scope (this repository):**
+
+- The guard contract source in `src/` — `__check_auth` policy enforcement,
+  per-transaction and rolling-window caps, recipient/asset/protocol allowlists,
+  pause, admin freeze, and dead-man-switch logic.
+- The agent-side tooling under `tools/agent-tx/` (auth-entry construction and
+  signing).
+- Build/release integrity of the contract artifacts published from this repo.
+
+**Out of scope — report to the right place instead:**
+
+- **Deployed instances.** A misconfigured *policy* on a running (testnet or
+  mainnet) instance is an operator-configuration issue, not a contract
+  vulnerability. Report it to that instance's operator.
+- **Sibling repositories.** `stellar-agent-guard-sdk` and
+  `stellar-agent-guard-dashboard` are separate repositories with their own
+  `SECURITY.md` and disclosure process; report issues there.
+- **Third-party dependencies.** Report upstream. Our release SBOM (below)
+  documents exactly which crates and versions a deployed instance contains.
+
+## Bug bounty
+
+There is **no bug bounty programme at this time**. Reports are handled on a
+best-effort, goodwill basis by the maintainers. This is stated up front so
+researchers can decide whether to invest; if a programme launches, it will be
+announced here and in the README.
 
 ## Supported Versions
 
@@ -82,3 +128,17 @@ To verify what a deployment contains:
 - Read functions are public (no DoS on reads); policy writes are admin-only.
 - This contract is **unaudited**. An audit is a prerequisite for mainnet use;
   track it via the issue backlog.
+
+## Maintainer checklist (outside-repo actions)
+
+These cannot be done from a pull request and must be performed by a maintainer
+with admin rights on the repository:
+
+- [ ] **Enable Private vulnerability reporting**: **Settings → Code security and
+      analysis → Private vulnerability reporting → Enable**. This turns on the
+      Security-tab "Report a vulnerability" button and the advisory API linked in
+      [Reporting a Vulnerability](#reporting-a-vulnerability).
+- [ ] **Confirm the security email**: the fallback in this document uses the
+      maintainer's GitHub-linked address. Replace it with a monitored security
+      mailbox (e.g. `security@…`) if one exists, and keep it in sync here.
+- [ ] **State the bug-bounty position** as it evolves (currently: none).
