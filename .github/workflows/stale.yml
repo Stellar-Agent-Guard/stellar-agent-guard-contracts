@@ -1,4 +1,4 @@
-﻿name: stale
+name: stale
 
 # Draft PRs only. Ready-for-review PRs and issues are never auto-closed:
 # the backlog is curated by maintainers, not by inactivity timers.
@@ -15,7 +15,7 @@ jobs:
   stale:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/stale@v9
+      - uses: actions/stale@v11
         with:
           days-before-stale: 14
           days-before-close: 7
