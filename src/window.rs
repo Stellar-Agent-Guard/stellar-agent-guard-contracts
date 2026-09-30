@@ -409,6 +409,25 @@ mod tests {
     }
 
     #[test]
+    fn admit_saturates_rather_than_trapping_near_i128_max() {
+        // Issue #17 defense-in-depth: the ledger helper is a non-trapping
+        // backstop. Even if a caller hands it an amount that pushes the cached
+        // total past the i128 ceiling, it saturates instead of aborting under
+        // `overflow-checks = true` / `panic = "abort"`. The decision engine is
+        // the layer that turns this case into a deliberate stable error.
+        let env = Env::default();
+        let mut total = i128::MAX - 1;
+        let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
+        entries.push_back(SpendEntry {
+            ts: 0,
+            amount: total,
+        });
+        admit_to_ledger(&mut total, &mut entries, 1, 10);
+        assert_eq!(total, i128::MAX);
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
     fn prune_then_admit_coalesces_with_trailing_same_second_entry() {
         let env = Env::default();
         let mut ledger = Ledger::empty(&env);
