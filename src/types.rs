@@ -315,6 +315,8 @@ pub enum DataKey {
     LastHeartbeat,
     /// Persistent: admin-initiated freeze flag.
     AdminFrozen,
+    /// Persistent: unix seconds when DMS auto-freeze was explicitly recorded.
+    AutoFrozenAt,
     /// Persistent: incrementing counter for policy changes.
     PolicyRevision,
 }

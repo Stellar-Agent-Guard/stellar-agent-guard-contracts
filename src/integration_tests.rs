@@ -814,6 +814,61 @@ fn unfreeze_while_dms_fresh_emits_rearmed_dms_false() {
 }
 
 #[test]
+fn refresh_deadman_records_auto_freeze_and_emits_event() {
+    let mut h = Harness::new();
+    let mut p = h.base_policy();
+    p.dms_grace_secs = 60;
+    h.set_time(1_000_000);
+    h.install_policy(&p);
+    
+    // Within grace, refresh_deadman does nothing
+    h.set_time(1_000_010);
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).refresh_deadman();
+    // Verify no event emitted
+    let mut events = std::vec::Vec::new();
+    for e in h.env.events().all().events() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &e.body;
+        let want_event = soroban_sdk::xdr::ScVal::Symbol(soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("event_dms_auto_frozen")).unwrap());
+        if v0.topics.first() == Some(&want_event) {
+            events.push(v0.topics.clone());
+        }
+    }
+    assert_eq!(events.len(), 0, "No event should be emitted when not expired");
+    
+    // Grace elapsed, it should record and emit
+    h.set_time(1_000_100);
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).refresh_deadman();
+    
+    let mut events2 = std::vec::Vec::new();
+    for e in h.env.events().all().events() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &e.body;
+        let want_event = soroban_sdk::xdr::ScVal::Symbol(soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("event_dms_auto_frozen")).unwrap());
+        if v0.topics.first() == Some(&want_event) {
+            events2.push(v0.topics.clone());
+        }
+    }
+    assert_eq!(events2.len(), 1, "Should emit exactly one auto-freeze event");
+    
+    // Calling it again should no-op
+    PolicyEngineClient::new(&h.env, &h.guard).refresh_deadman();
+    let mut events3 = std::vec::Vec::new();
+    for e in h.env.events().all().events() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &e.body;
+        let want_event = soroban_sdk::xdr::ScVal::Symbol(soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("event_dms_auto_frozen")).unwrap());
+        if v0.topics.first() == Some(&want_event) {
+            events3.push(v0.topics.clone());
+        }
+    }
+    assert_eq!(events3.len(), 0, "Second call should be a no-op (no new events)");
+
+    // Ensure subsequent spends are still identically blocked (no change to lazy evaluation)
+    let recv = h.recv.clone();
+    h.transfer_expect_blocked(&recv, 5);
+}
+
+#[test]
 fn admin_freeze_blocks_immediately_and_unfreeze_restores() {
     let mut h = Harness::new();
     let recv = h.recv.clone();
