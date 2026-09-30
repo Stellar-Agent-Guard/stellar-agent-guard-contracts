@@ -52,11 +52,19 @@ struct EventAuthChecked {
     context_index: u32,
 }
 
-/// Agent heartbeat: data `at` (unix seconds).
+/// Agent heartbeat: data `at` (unix seconds) and `expires_at` — the
+/// attested dead-man-switch deadline as it stood at emission time, derived
+/// from the *current* policy's `dms_grace_secs` (`at + dms_grace_secs`).
+/// `0` when the dead-man switch is disabled (`dms_grace_secs == 0`, which is
+/// also how a missing policy reads). Recording the deadline on the event means
+/// a consumer no longer recomputes it from whatever the policy happens to be
+/// after a later `set_policy`; the event states the deadline it was attested
+/// under (SPEC §9).
 #[contractevent]
 #[derive(Clone)]
 struct EventHeartbeat {
     at: u64,
+    expires_at: u64,
 }
 
 /// Admin lifecycle events: data `by` (the admin address that acted).
@@ -300,8 +308,8 @@ fn emit_auth(env: &Env, allowed: bool, reason: Option<Error>, context_index: u32
     .publish(env);
 }
 
-fn emit_heartbeat(env: &Env, at: u64) {
-    EventHeartbeat { at }.publish(env);
+fn emit_heartbeat(env: &Env, at: u64, expires_at: u64) {
+    EventHeartbeat { at, expires_at }.publish(env);
 }
 
 fn emit_initialized(env: &Env, by: &Address) {
@@ -430,6 +438,9 @@ impl PolicyEngine {
     /// host verifies the registered agent's signature and the engine applies
     /// the account gates, so a heartbeat after the grace window expired — or
     /// while admin-frozen — is rejected.
+    ///
+    /// Reads and writes: `Policy` (read, for the DMS grace at emission time)
+    /// and `LastHeartbeat` (read + write).
     pub fn heartbeat(env: Env) {
         env.current_contract_address().require_auth();
         let now = env.ledger().timestamp();
@@ -442,7 +453,19 @@ impl PolicyEngine {
             return;
         }
         persist_set(&env, &DataKey::LastHeartbeat, &now);
-        emit_heartbeat(&env, now);
+        // Read the policy fresh here, at emission time, so the recorded
+        // deadline reflects the grace actually in force for this heartbeat and
+        // not a value cached from an earlier call. A missing policy or a zero
+        // `dms_grace_secs` means the dead-man switch is disabled, which the
+        // event records as `expires_at == 0` (SPEC §9).
+        let grace =
+            persist_get::<PolicyConfig>(&env, &DataKey::Policy).map_or(0, |cfg| cfg.dms_grace_secs);
+        let expires_at = if grace == 0 {
+            0
+        } else {
+            now.saturating_add(grace)
+        };
+        emit_heartbeat(&env, now, expires_at);
     }
 
     pub fn freeze(env: Env) {
