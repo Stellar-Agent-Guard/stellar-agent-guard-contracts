@@ -18,13 +18,10 @@
 //!   material.
 
 use crate::types::{
-    CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule, WindowState,
+    CheckResult, DataKey, Error as GuardError, PolicyConfig, PolicyRuleId, ProtocolRule,
+    RecipientCap, ValidationOutcome, WindowState,
 };
 use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
-    CheckResult, DataKey, Error as GuardError, PolicyConfig, PolicyRuleId, ProtocolRule,
-    RecipientCap, ValidationOutcome,
-};
-use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
@@ -172,6 +169,8 @@ struct AuthMeters {
     memory_read_entries: i32,
     /// `MemCmp` charges for the whole frame.
     memcmp: i64,
+}
+
 /// Number of events named `name` emitted by the **most recent** top-level
 /// invocation (SPEC §9).
 ///
