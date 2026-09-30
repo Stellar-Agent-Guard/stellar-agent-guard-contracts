@@ -2096,7 +2096,7 @@ fn authorization_reads_each_storage_key_exactly_once() {
     let no_policy = bare.measure_blocking_authorization(&bare_recv, 5);
     assert_eq!(
         no_policy.memory_read_entries,
-        constant + 3,
+        constant + 2,
         "the no-policy short circuit reads Policy and PolicyRevision for its diagnostic event"
     );
     std::println!(
