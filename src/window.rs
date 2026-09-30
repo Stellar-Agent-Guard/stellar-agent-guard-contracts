@@ -359,6 +359,21 @@ fn admit_to_protocol_call_ledger(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ledger_second_changes_window_membership_at_boundary() {
+        let env = Env::default();
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit(100, 7);
+
+        ledger.prune(100, 1);
+        assert_eq!(ledger.total, 7);
+
+        // With a one-second window, timestamp t expires when now reaches t+1.
+        ledger.prune(101, 1);
+        assert_eq!(ledger.total, 0);
+        assert!(ledger.entries.is_empty());
+    }
     use soroban_sdk::{vec, Address, Env};
 
     fn led(env: &Env, entries: &[(u64, i128)]) -> SingleLedger {

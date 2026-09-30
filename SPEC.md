@@ -183,6 +183,21 @@ pub struct ProtocolCallEntry { pub ts: u64, pub count: u32 }  // coalesced call 
 
 ### 3.1 The window is genuinely rolling — not a fixed bucket
 
+**Clock and pre-flight freshness.** `now` is the Soroban ledger's unix timestamp
+(`env.ledger().timestamp()`), not the submitter's wall clock. The host supplies that
+timestamp when the transaction executes; the contract cannot select or backdate it. Ledger
+timestamps have one-second granularity, so events whose execution timestamps fall in the same
+second are tied for window membership and are ordered by the host's transaction execution,
+not by a sub-second wall-clock ordering. A policy or pre-flight `check()` result therefore
+describes the ledger-time snapshot used by that invocation; it is advisory, not a reservation
+of capacity. Between simulation and execution, another transaction may consume the remaining
+cap or the ledger timestamp may advance across an active/window boundary. Re-run `check()`
+immediately before signing/broadcasting if more than one ledger has elapsed, and always handle
+the authoritative execution result (which can still differ if state changes afterward).
+
+A test-env boundary example is covered by `window::tests::ledger_second_changes_window_membership_at_boundary`:
+a spend admitted at second `t` remains live at `t`, then expires at `t + window_secs`.
+
 A fixed 86,400-second bucket (reset-at-midnight style) is a **different guarantee** from a
 rolling window and is rejected here. Under a fixed bucket, spend at 23:59 and spend at 00:01
 are never counted together even though they are two minutes apart; under a rolling window, any
