@@ -717,7 +717,7 @@ impl PolicyEngine {
             Some(cfg) => {
                 // Prune a local copy of the ledger so remaining headroom never
                 // counts expired entries. No storage write: this is a read.
-                let mut ledger = load_ledger(&env);
+                let (mut ledger, _) = load_window(&env);
                 if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
                     ledger.prune(now, cfg.window_secs);
                 }
