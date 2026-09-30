@@ -665,6 +665,69 @@ fn rolling_window_cap_blocks_and_recovers_after_expiry() {
 }
 
 #[test]
+fn disabled_window_cap_writes_no_window_entries() {
+    // Issue #20: `window_cap = 0` disables the rolling window, so a caps-only
+    // policy (per_tx_cap set, window off) must not accrue spend rows —
+    // otherwise every allowed transfer would grow persistent storage forever.
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100; // caps-only policy
+    p.window_cap = 0; // window disabled
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    for _ in 0..5 {
+        h.transfer(&recv, 10); // N allowed transfers
+    }
+
+    let window = h.env.as_contract(&h.guard, || {
+        h.env
+            .storage()
+            .persistent()
+            .get::<DataKey, crate::types::WindowState>(&DataKey::Window)
+    });
+    // The ledger is either absent or entirely empty: no global rows, no cached
+    // total, and no per-recipient ledgers left behind.
+    if let Some(w) = window {
+        assert_eq!(w.total, 0);
+        assert!(w.entries.is_empty(), "window disabled: no spend rows");
+        assert!(w.recipients.is_empty());
+    }
+}
+
+#[test]
+fn enabled_window_cap_accrues_with_per_tx_cap_disabled() {
+    // Issue #20, converse: with `per_tx_cap = 0` the rolling window still
+    // accrues and enforces.
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 0; // per-tx cap disabled
+    p.window_secs = 60;
+    p.window_cap = 100;
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    h.transfer(&recv, 40);
+    h.transfer(&recv, 30); // same second -> coalesces into a single entry
+
+    let window = h
+        .env
+        .as_contract(&h.guard, || {
+            h.env
+                .storage()
+                .persistent()
+                .get::<DataKey, crate::types::WindowState>(&DataKey::Window)
+        })
+        .expect("an enabled window must persist its ledger");
+    assert_eq!(window.total, 70);
+    assert_eq!(window.entries.len(), 1);
+
+    h.transfer_expect_blocked(&recv, 31); // 70 + 31 = 101 > 100
+}
+
+#[test]
 fn recipient_allowlist_blocked() {
     let mut h = Harness::new();
     let recv = h.recv.clone();
