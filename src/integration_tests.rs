@@ -1985,10 +1985,12 @@ fn authorization_reads_each_storage_key_exactly_once() {
     //               DataKey::AdminFrozen          │ each once, all four inside
     //               DataKey::LastHeartbeat        │ `AuthSnapshot::load`
     //               DataKey::Window                ┘
+    //               DataKey::PolicyRevision       once per auth_checked event
     //
-    // Totals measured here: 468 MemCmp charges for an allowed authorization
-    // (down from 524 before the snapshot), 81 for the default-deny short
-    // circuit (unchanged — the removed read was on the allowed path only).
+    // The real-frame footprint also includes PolicyRevision, read by event
+    // emission after each decision. The isolated snapshot measurement below
+    // counts only the four decision keys and compares them with an independent
+    // four-read reference.
 
     // ── Calibration: the read quantum is constant and positive ───────────
     // A storage read charges a fixed number of `MemCmp` comparisons, so the
@@ -2061,10 +2063,9 @@ fn authorization_reads_each_storage_key_exactly_once() {
     );
     assert_eq!(
         allowed.memory_read_entries,
-        constant + 4,
-        "__check_auth must read exactly the four snapshot keys \
-         (Policy, AdminFrozen, LastHeartbeat, Window) and nothing else; \
-         measured {}",
+        constant + 5,
+        "__check_auth must read the four snapshot keys once and PolicyRevision \
+         for auth_checked event metadata; measured {} storage keys",
         allowed.memory_read_entries - constant
     );
 
@@ -2073,7 +2074,7 @@ fn authorization_reads_each_storage_key_exactly_once() {
     let again = h.measure_authorization(&recv, 6);
     assert_eq!(
         again.memory_read_entries,
-        constant + 4,
+        constant + 5,
         "the read set must not depend on how many authorizations came before"
     );
     std::println!(
@@ -2087,15 +2088,16 @@ fn authorization_reads_each_storage_key_exactly_once() {
 
     // ── The default-deny short circuit reads less ───────────────────────
     // With no policy installed the snapshot stops at the `?` after
-    // `DataKey::Policy`, so the frame must not touch the other three keys.
+    // `DataKey::Policy`, so it does not touch the other three decision keys.
+    // The diagnostic auth_checked event still reads PolicyRevision.
     let mut bare = Harness::new();
     bare.set_time(1_000);
     let bare_recv = bare.recv.clone();
     let no_policy = bare.measure_blocking_authorization(&bare_recv, 5);
     assert_eq!(
         no_policy.memory_read_entries,
-        constant + 1,
-        "the no-policy short circuit must read DataKey::Policy and stop"
+        constant + 3,
+        "the no-policy short circuit reads Policy and PolicyRevision for its diagnostic event"
     );
     std::println!(
         "__check_auth (no policy): memory_read_entries={} memcmp={}",
