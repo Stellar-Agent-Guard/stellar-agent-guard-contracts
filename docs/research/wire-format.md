@@ -46,7 +46,7 @@ null
 
 Returns account status snapshot.
 
-### Example (live output):
+### Example (live output, before the #29 additive fields):
 
 ```json
 {
@@ -59,10 +59,36 @@ Returns account status snapshot.
 }
 ```
 
+### Additive operational fields (issue #29):
+
+`status()` additionally returns three operational fields. They are additive —
+older decoders keep working because no existing key was renamed or removed:
+
+```json
+{
+  "paused": false,
+  "window_remaining": "150",
+  "outside_active_window": false
+}
+```
+
+- `paused` — the installed policy's admin kill switch; `false` when no policy
+  is installed (default-deny has nothing to pause).
+- `window_remaining` — global rolling-window headroom (`window_cap - spent`,
+  expired entries pruned); `null` when the global cap is disabled, including
+  the no-policy case. It mirrors `check_detailed().remaining_window` for a
+  recipient without a per-recipient override. Note `Option<i128>` serializes
+  as `null`/`"<i128-as-string>"` per the convention above.
+- `outside_active_window` — `true` when `now` is outside the policy's
+  `active_from`/`active_until` bounds (both inclusive); `false` with no policy
+  or an unrestricted window.
+
 ### Field naming convention:
 - All fields are **snake_case** (matching Rust struct field names exactly)
 - `bool` fields serialize as JSON booleans (`true`/`false`)
 - `u64` fields serialize as JSON numbers (or strings if >2^53, but timestamps fit in 53 bits)
+- `Option<i128>` fields serialize as `null` for `None`, or a **string** for `Some`
+  (same i128-as-string rule as `PolicyConfig` amounts)
 
 ---
 

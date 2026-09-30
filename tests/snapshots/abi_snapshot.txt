@@ -38,6 +38,7 @@ pub fn heartbeat(env: Env)
 pub fn freeze(env: Env)
 pub fn unfreeze(env: Env)
 pub fn policy(env: Env) -> Option<PolicyConfig>
+pub fn policy_hash(env: Env) -> BytesN<32>
 pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus
 pub fn status(env: Env) -> Status
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
@@ -92,6 +93,9 @@ struct Status
   heartbeat_expired: bool
   last_heartbeat: u64
   now: u64
+  paused: bool
+  window_remaining: Option<i128>
+  outside_active_window: bool
 enum CheckResult
   Allowed
   Blocked(Symbol)

@@ -1,7 +1,7 @@
 //! Shared types: policy model, storage keys, errors, and the pure parsed-call
 //! representation that the decision engine operates on.
 
-use soroban_sdk::{contracterror, contracttype, Address, Symbol, Vec};
+use soroban_sdk::{contracterror, contracttype, Address, Bytes, Env, Symbol, Vec};
 
 /// Warning threshold percentage for dead-man switch health evaluation (80%).
 pub const DMS_WARN_THRESHOLD_PERCENT: u64 = 80;
@@ -115,8 +115,8 @@ pub struct PolicyConfig {
 /// changed without updating the snapshot test in `tests/debug_policy_config.rs`.
 /// This is the *human-readable* format for logs, test fixtures, and dashboard
 /// inspect scripts — it is NOT the canonical encoding for `policy_hash`.
-/// Canonical encoding for hashing must be a separate, unambiguous serialization
-/// (e.g., XDR with deterministic field tags); see SPEC §8/§9 discussion.
+/// The canonical encoding hashed by `policy_hash` is the `ScVal` XDR form of the
+/// policy map (sorted symbol keys; see SPEC §7.3).
 impl core::fmt::Debug for PolicyConfig {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PolicyConfig")
@@ -170,6 +170,10 @@ pub enum ParsedCall {
     Unknown { contract: Address, fname: Symbol },
 }
 
+/// Operational snapshot returned by the auth-free `status()` read (SPEC §7).
+/// Additive-growth contract: new fields may be appended, but existing fields
+/// are never renamed or removed (see docs/research/wire-format.md).
+#[allow(clippy::struct_excessive_bools)] // wire-format snapshot: the bool field set is fixed by the public ABI, not a design choice
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
@@ -179,6 +183,20 @@ pub struct Status {
     pub heartbeat_expired: bool,
     pub last_heartbeat: u64,
     pub now: u64,
+    /// The installed policy's admin kill switch (`cfg.paused`). `false` when
+    /// no policy is installed (default-deny has nothing to pause).
+    pub paused: bool,
+    /// Global rolling-window headroom: `window_cap - spent` within the current
+    /// window, computed on the lazily pruned ledger so expired entries never
+    /// count. `None` when the global `window_cap` is disabled (0) — including
+    /// the no-policy case. Per-recipient override headroom is recipient-targeted
+    /// and deliberately not projected here; use `check_detailed` for that.
+    pub window_remaining: Option<i128>,
+    /// Whether `now` falls outside the policy's active window (`active_from` /
+    /// `active_until`, the §4 account gate that blocks with
+    /// `outside_active_window`). `false` when no policy is installed or the
+    /// window is unrestricted (either bound 0).
+    pub outside_active_window: bool,
 }
 
 #[contracttype]
@@ -186,6 +204,40 @@ pub struct Status {
 pub enum CheckResult {
     Allowed,
     Blocked(Symbol),
+}
+
+/// The documented `policy_hash()` value when no policy is installed (SPEC
+/// §7.3): SHA-256 over the zero-length byte string — the "hash of the empty
+/// marker" — so the no-policy case is a defined, never-trapping value that
+/// off-chain implementers can reproduce trivially (`sha256("")`). It is also
+/// the value restored by `revoke_policy()`.
+pub const NO_POLICY_DIGEST: [u8; 32] = [
+    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
+    0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
+];
+
+/// Canonical encoding hashed by `policy_hash` (SPEC §7.3): the **`ScVal` XDR**
+/// serialization of the policy map — the same bytes a Soroban SDK produces
+/// when it passes the policy as the `set_policy` argument.
+///
+/// Determinism comes from two wire-stable invariants:
+/// 1. `#[contracttype]` structs encode as `ScVal::Map` with entries in
+///    **ascending symbol-key order** (the host map invariant — the same order
+///    SPEC §3.2 pins for manual encoders), and
+/// 2. `ScVal` XDR is a canonical byte format: every field has a single XDR type
+///    (`i128` → `I128`, `u64` → `U64`, `Option::None` → `Void`, …), so two
+///    conforming encoders never disagree on the bytes.
+///
+/// Any field change therefore changes the stream and the hash; a policy that
+/// is unchanged across ledgers/instances hashes identically. Off-chain,
+/// SDKs/dashboards reproduce the hash by SHA-256-ing the XDR bytes of the
+/// map they already build for `set_policy` (or by decoding with standard XDR
+/// tooling). Exposed for tests and off-chain-reproduction tooling; not part
+/// of the contract ABI.
+#[allow(clippy::must_use_candidate)]
+pub fn policy_canonical_encoding(env: &Env, cfg: &PolicyConfig) -> Bytes {
+    use soroban_sdk::xdr::ToXdr;
+    cfg.to_xdr(env)
 }
 
 impl Error {

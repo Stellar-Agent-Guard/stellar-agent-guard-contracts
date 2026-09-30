@@ -239,10 +239,14 @@ fn audit_event_payloads_and_topics() {
     assert_eq!(hb_v0.topics.len(), 1, "event_heartbeat must have 1 topic");
     match &hb_v0.data {
         ScVal::Map(Some(map)) => {
-            assert_eq!(map.0.len(), 1);
+            assert_eq!(map.0.len(), 2, "event_heartbeat carries at + expires_at");
             assert_eq!(
                 map.0[0].key,
                 ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("at")).unwrap())
+            );
+            assert_eq!(
+                map.0[1].key,
+                ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("expires_at")).unwrap())
             );
         }
         _ => panic!("event_heartbeat data must be a Map"),
