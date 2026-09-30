@@ -1,0 +1,33 @@
+{
+  "$comment": "Committed copy of the SDK's human-readable reason vocabulary (stellar-agent-guard-sdk: src/reasons.ts explainReason). The SDK repo asserts ITS copy against THIS file (companion SDK issue: parity gate on the sdk side). tests/reason_parity.rs keeps this file in lockstep with Error::reason() in src/types.rs, and scripts/check-reason-parity.sh re-checks it standalone (CI, after tests). Add a reason here and in src/types.rs in the same PR — this file failing is the deliberate friction that forces both sides to move together.",
+  "schema_version": 1,
+  "source": {
+    "contract_reasons": "src/types.rs :: Error::reason()",
+    "sdk_vocabulary": "stellar-agent-guard-sdk :: explainReason",
+    "sdk_side_gate": "see docs/issues/sdk-reason-parity-gate.md — the SDK repo asserts its shipped map against this file (companion issue text; file in the SDK tracker)",
+    "issue": "https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/41"
+  },
+  "reasons": {
+    "unauthorized": "Signature verification failed or the caller lacks authority for this action.",
+    "already_initialized": "initialize was called on an account that is already initialized.",
+    "not_initialized": "The account has no registered agent key yet; all authorizations are default-denied.",
+    "invalid_config": "set_policy was given a config that fails validation; the previous policy is unchanged.",
+    "invalid_amount": "The transfer amount is zero or negative.",
+    "admin_frozen": "The policy admin has frozen the account; nothing moves until unfreeze.",
+    "heartbeat_expired": "The dead-man switch fired: the agent has been silent longer than the grace period.",
+    "no_policy": "No policy is installed (revoked or never set); the account is default-deny.",
+    "paused": "The installed policy's kill switch is set.",
+    "outside_active_window": "The current time is outside the policy's active_from/active_until window.",
+    "asset_not_allowed": "The SAC token contract being called is not in the policy's assets allowlist.",
+    "recipient_not_allowed": "The recipient is not in the policy's recipients allowlist.",
+    "recipient_blocked": "The recipient is on the policy's explicit denylist; the denylist wins over the allowlist and any escape hatch.",
+    "per_tx_cap_exceeded": "The transfer amount exceeds the per-transaction cap.",
+    "window_cap_exceeded": "The transfer would exceed the rolling-window spend cap.",
+    "protocol_not_allowed": "The contract being called is not in the policy's protocols allowlist.",
+    "function_not_allowed": "The function is not in the protocol rule's function allowlist (or is a non-transfer function on an asset).",
+    "unknown_contract": "The contract (or call shape) is not recognized; the account is default-deny about what it cannot reason about.",
+    "self_function_not_allowed": "A self-call to a function other than heartbeat.",
+    "create_contract_not_allowed": "Contract creation authorized by the account is denied in v1.",
+    "protocol_call_rate_exceeded": "The rolling-window protocol call rate limit would be exceeded."
+  }
+}

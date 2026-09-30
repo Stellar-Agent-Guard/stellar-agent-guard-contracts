@@ -145,6 +145,16 @@ Pre-flight simulation of an SAC transfer decision. Returns an enum with two vari
 | `unknown_contract` | `UnknownContract` |
 | `self_function_not_allowed` | `SelfFunctionNotAllowed` |
 | `create_contract_not_allowed` | `CreateContractNotAllowed` |
+| `protocol_call_rate_exceeded` | `ProtocolCallRateExceeded` |
+
+> **Vocabulary parity (issue #41).** This table is kept identical to
+> `Error::reason()` in `src/types.rs`, the committed SDK vocabulary copy
+> [`tests/fixtures/sdk-reasons.json`](../../tests/fixtures/sdk-reasons.json),
+> and the glossary in [`docs/reason-glossary.md`](../reason-glossary.md).
+> `tests/reason_parity.rs` (inside `cargo test`) and
+> `scripts/check-reason-parity.sh` (a CI step after tests) fail on any
+> missing/extra/renamed reason, so a new contract reason cannot land without
+> updating all of these lists in the same PR.
 
 ---
 

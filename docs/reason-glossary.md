@@ -28,6 +28,14 @@ vocabulary. For each reason this table gives the seat-specific read:
 > Blocked reasons from *rejected* frames live in the client-side event log /
 > diagnostics, not in persisted ledger events (SPEC §9, issue #37) — the
 > auditor column assumes that evidence source.
+>
+> **Parity gate (issue #41).** This table's reason symbols are kept in
+> lockstep with the contract (`src/types.rs :: Error::reason()`), the committed
+> SDK vocabulary copy (`tests/fixtures/sdk-reasons.json`), and the fixture
+> evidence (`tests/fixtures/index.json`): `tests/reason_parity.rs` and
+> `scripts/check-reason-parity.sh` fail CI on missing/extra/renamed reasons, so
+> a new contract reason cannot ship without an SDK-side explanation entry and
+> a row in this glossary.
 
 | reason symbol | code | what was attempted | agent guidance | operator action | auditor note | SPEC ref |
 |---|---|---|---|---|---|---|

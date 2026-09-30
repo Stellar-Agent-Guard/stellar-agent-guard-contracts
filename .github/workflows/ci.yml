@@ -37,6 +37,15 @@ jobs:
       - name: Unit + integration tests
         run: cargo test
 
+      # Reason-symbol parity gate (issue #41): the contract's auth_checked
+      # reason vocabulary must match the committed SDK vocabulary copy and the
+      # fixture evidence. `cargo test` already enforces the contract↔vocabulary
+      # half (tests/reason_parity.rs); this standalone run adds the fixture-
+      # evidence check and a human-readable diff without needing a Rust build
+      # (e.g. for reason-only PRs in the SDK repo's CI).
+      - name: Reason parity check (contract ↔ SDK vocabulary ↔ fixtures)
+        run: ./scripts/check-reason-parity.sh
+
       - name: Contract build (wasm32v1-none)
         run: cargo build --release --target wasm32v1-none
 
