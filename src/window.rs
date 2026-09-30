@@ -518,6 +518,43 @@ mod tests {
     }
 
     #[test]
+    fn max_window_entries_merges_forward_at_exact_bound() {
+        // Issue #19: the merge backstop must trigger only once the write would
+        // exceed the named bound, keep the newer timestamp, and stay bounded.
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let mut total = 0i128;
+        let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
+
+        // Fill to exactly MAX_WINDOW_ENTRIES with distinct seconds: no merge.
+        for i in 0..MAX_WINDOW_ENTRIES as u64 {
+            admit_to_ledger(&mut total, &mut entries, i, 1);
+        }
+        assert_eq!(entries.len() as usize, MAX_WINDOW_ENTRIES);
+        assert_eq!(total, MAX_WINDOW_ENTRIES as i128);
+        assert_eq!(entries.first().unwrap().ts, 0);
+        assert_eq!(
+            entries.get(entries.len() - 1).unwrap().ts,
+            (MAX_WINDOW_ENTRIES - 1) as u64
+        );
+
+        // The next distinct second crosses the bound and merges the two oldest
+        // entries forward into one entry at the NEWER timestamp.
+        admit_to_ledger(&mut total, &mut entries, MAX_WINDOW_ENTRIES as u64, 1);
+        assert_eq!(entries.len() as usize, MAX_WINDOW_ENTRIES);
+        assert_eq!(total, (MAX_WINDOW_ENTRIES + 1) as i128);
+        let head = entries.first().unwrap();
+        assert_eq!(head.ts, 1, "merged ts is the newer of {{0, 1}}");
+        assert_eq!(head.amount, 2, "merged amount is the sum");
+        // The tail and the ascending order are untouched.
+        assert_eq!(entries.get(1).unwrap().ts, 2);
+        assert_eq!(
+            entries.get(entries.len() - 1).unwrap().ts,
+            MAX_WINDOW_ENTRIES as u64
+        );
+    }
+
+    #[test]
     fn from_entries_recomputes_total() {
         let env = Env::default();
         let v = vec![

@@ -456,7 +456,7 @@ pub fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ProtocolRule, RecipientCap};
+    use crate::types::{ProtocolRule, RecipientCap, MAX_WINDOW_ENTRIES};
     use soroban_sdk::{auth::ContractContext, vec, Address, Env, IntoVal, Symbol, Val, Vec};
 
     fn addr(env: &Env, n: u8) -> Address {
@@ -1570,5 +1570,72 @@ mod tests {
         // Only 2 protocol calls should be counted
         assert_eq!(l.protocol_call_total, 2);
         assert_eq!(l.total, 100); // asset transfer counted separately
+    }
+
+    #[test]
+    fn backstop_merge_never_admits_what_true_rolling_sum_would_reject() {
+        // Issue #19: drive the ledger to exactly MAX_WINDOW_ENTRIES and one
+        // past it, then assert the merge-forward backstop never *loosens*
+        // enforcement: any admission the merged (over-counted) ledger allows
+        // is an admission the true, un-merged rolling sum would also allow.
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.window_secs = 5_000;
+        let mut l = Ledger::empty(&env);
+
+        // Exactly MAX_WINDOW_ENTRIES distinct seconds (amount 1 each): the
+        // bound is not exceeded, so no merge has happened yet.
+        for ts in 0..(MAX_WINDOW_ENTRIES as u64) {
+            l.admit(ts, 1);
+        }
+        assert_eq!(l.entries.len() as usize, MAX_WINDOW_ENTRIES);
+
+        // One more distinct second crosses the bound: the two oldest entries
+        // merge forward into a single entry at the NEWER timestamp.
+        l.admit(MAX_WINDOW_ENTRIES as u64, 1);
+        assert_eq!(l.entries.len() as usize, MAX_WINDOW_ENTRIES);
+        let head = l.entries.first().unwrap();
+        assert_eq!(head.ts, 1, "merged ts must be the newer of the two");
+        assert_eq!(head.amount, 2);
+
+        // Prune at the exact point where the true (un-merged) ts-0 spend has
+        // expired; the merged entry keeps ts 1, so that amount is retained.
+        p.window_cap = (MAX_WINDOW_ENTRIES as i128) + 1;
+        l.prune(p.window_secs, p.window_secs);
+        let true_rolling_sum = MAX_WINDOW_ENTRIES as i128; // ts 1..=MAX alive
+        assert!(
+            l.total >= true_rolling_sum,
+            "merge must over-count, never under-count"
+        );
+
+        // Property: merged_allows(amount) => true_allows(amount).
+        let mut observed_strictness = false;
+        for amount in [1i128, 2, 3, 5, 8] {
+            let mut trial = l.clone();
+            let verdict = decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut trial,
+                p.window_secs,
+                vec![&env, transfer_ctx(&env, 1, 2, amount)],
+            );
+            let merged_allows = matches!(verdict.first().unwrap(), Decision::Allowed);
+            let true_allows = true_rolling_sum + amount <= p.window_cap;
+            assert!(
+                !merged_allows || true_allows,
+                "post-merge admitted {amount} that the true rolling sum rejects"
+            );
+            if !merged_allows && true_allows {
+                observed_strictness = true;
+            }
+        }
+        assert!(
+            observed_strictness,
+            "expected the over-count to make at least one admission stricter"
+        );
     }
 }
