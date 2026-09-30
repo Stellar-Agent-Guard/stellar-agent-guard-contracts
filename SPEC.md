@@ -806,8 +806,8 @@ filtering by the SDK listener.
 
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
-| `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | (none) | every `__check_auth` / `check` decision — but only **allowed** decisions persist as committed ledger events; a **blocked** one is rolled back with its transaction and reaches observers via diagnostics only (see below) |
-| `heartbeat` | (none) | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
+| `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | (none) | every `__check_auth` / `check` decision |
+| `heartbeat` | (none) | `at: u64`, `expires_at: u64` — the attested DMS deadline as it stood at emission time, `at + dms_grace_secs` of the policy current at that moment; `0` when the dead-man switch is disabled (`dms_grace_secs == 0`, or no policy) | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
 | `frozen` | (none) | `by: Address` | admin freeze |
 | `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
@@ -816,22 +816,15 @@ filtering by the SDK listener.
 
 Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
 
-**Blocked decisions are diagnostics-only — they never appear in the committed event stream.**
-A rejected `__check_auth` fails the host authorization frame, and Soroban rolls back
-everything the frame did, *including* the `auth_checked` event it emitted: the event is
-written before the rollback and is discarded with the rest of the frame's effects. The
-corollary for the table row above — "every decision" does **not** mean "every decision is
-queryable via `getEvents`": an **allowed** decision → committed ledger event; a **blocked**
-decision → diagnostics only. The block is still fully diagnosed before the rollback — the
-same `result: blocked` / `reason: <symbol>` vocabulary surfaces in (1) simulation
-diagnostics (Soroban RPC `simulateTransaction` event output, `agent-tx preflight`),
-(2) the permissionless `check` / `check_detailed` preflights (§7.2) when simulated via
-RPC, and (3) the SDK telemetry listener
-([stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk)),
-whose dual-stream design combines simulation-captured blocks with committed ledger events
-into one feed precisely because a raw RPC `getEvents` listener cannot see blocks. Anyone
-building their own listener must reproduce that duality; assuming `getEvents` yields a
-complete decision history will silently miss every block.
+**Heartbeat expiry (`heartbeat.expires_at`).** `expires_at` is the deadline the heartbeat was
+actually attested under, derived from the `dms_grace_secs` of the policy *current at the moment
+the heartbeat is emitted* — not a value the consumer recomputes from `at` using whatever grace
+the policy carries later. A `set_policy` that changes `dms_grace_secs` after a heartbeat does not
+retroactively change that heartbeat's recorded deadline, so a listener replaying the log derives
+the same expiry the contract enforced instead of a drifting recomputation. When the dead-man
+switch is disabled the event carries `expires_at == 0` rather than `at + 0`, so `0` unambiguously
+means "no deadline was attested" and never a real timestamp (ledger timestamps are far above `0`).
+Reads `Policy` at emission time to obtain the grace; a missing policy reads as disabled.
 
 **Key fingerprints (`agent_rotated`).** A fingerprint is `sha256(pubkey)[0..8]` — the first
 8 bytes of the SHA-256 digest of the agent public key, rendered as 16 lowercase hex characters
