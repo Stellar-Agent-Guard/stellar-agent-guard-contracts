@@ -17,7 +17,10 @@
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
 
-use crate::types::{CheckResult, DataKey, Error as GuardError, PolicyConfig, ProtocolRule};
+use crate::types::{
+    CheckResult, DataKey, Error as GuardError, PolicyConfig, PolicyRuleId, ProtocolRule,
+    RecipientCap, ValidationOutcome,
+};
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -2135,4 +2138,285 @@ fn heartbeat_event_uses_grace_current_at_emission_not_a_stale_one() {
     h.heartbeat();
     let (third_at, third_expiry) = last_heartbeat_payload(&h.env).expect("third heartbeat event");
     assert_eq!((third_at, third_expiry), (1_020, 0));
+}
+
+// ── Issue #35: `validate_policy` per-rule identifiability ─────────────────
+//
+// SPEC §8 validation rules reject a candidate policy at `set_policy`, but the
+// on-chain surface collapses every rejection into the single stable
+// `InvalidConfig` code. The `validate_policy` read is the identifiable
+// counterpart: it dry-runs the same rules over a *candidate* config and names
+// the first failing rule in §8 order, so SDKs and dashboards can preflight a
+// policy without paying a rejected on-chain call. Each test pins one rule via
+// the dry-run read and re-asserts the on-chain path stays fail-closed for the
+// same config (panic + policy never installed).
+
+/// Dry-run names the exact rule, and `set_policy` still rejects fail-closed.
+fn assert_rejects_with(h: &Harness, cfg: &PolicyConfig, want: &PolicyRuleId) {
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(
+        client.validate_policy(cfg),
+        ValidationOutcome::Invalid(want.clone()),
+        "validate_policy must identify the failing rule"
+    );
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.set_policy(cfg);
+    }));
+    assert!(res.is_err(), "set_policy must still reject this config");
+    assert!(
+        client.policy().is_none(),
+        "a rejected config must never be installed (fail-closed)"
+    );
+}
+
+#[test]
+fn validate_policy_reports_amount_sign() {
+    let h = Harness::new();
+
+    let mut p = h.base_policy();
+    p.per_tx_cap = -1;
+    assert_rejects_with(&h, &p, &PolicyRuleId::AmountSign);
+
+    let mut p = h.base_policy();
+    p.window_cap = -1;
+    assert_rejects_with(&h, &p, &PolicyRuleId::AmountSign);
+}
+
+#[test]
+fn validate_policy_reports_window_requires_width() {
+    let h = Harness::new();
+
+    // Global form: a spend cap with no window to spend within.
+    let mut p = h.base_policy();
+    p.window_secs = 0;
+    p.window_cap = 100;
+    assert_rejects_with(&h, &p, &PolicyRuleId::WindowRequiresWidth);
+
+    // Per-recipient form: an override cap with no window is the same rule.
+    let mut p = h.base_policy();
+    p.window_secs = 0;
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        RecipientCap {
+            recipient: h.recv.clone(),
+            cap: 50,
+        },
+    ];
+    assert_rejects_with(&h, &p, &PolicyRuleId::WindowRequiresWidth);
+}
+
+#[test]
+fn validate_policy_reports_active_window_order() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.active_from = 100;
+    p.active_until = 100; // end equal to start is not "after"
+    assert_rejects_with(&h, &p, &PolicyRuleId::ActiveWindowOrder);
+}
+
+#[test]
+fn validate_policy_reports_self_address_in_list() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // assets
+    let mut p = h.base_policy();
+    p.assets = soroban_sdk::vec![&h.env, h.guard.clone()];
+    assert_eq!(
+        client.validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::SelfAddressInList)
+    );
+
+    // protocols
+    let mut p = h.base_policy();
+    p.protocols = soroban_sdk::vec![
+        &h.env,
+        ProtocolRule {
+            contract: h.guard.clone(),
+            fns: None,
+        },
+    ];
+    assert_eq!(
+        client.validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::SelfAddressInList)
+    );
+
+    // recipients
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, h.guard.clone()];
+    assert_eq!(
+        client.validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::SelfAddressInList)
+    );
+
+    // recipient_window_caps
+    let mut p = h.base_policy();
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        RecipientCap {
+            recipient: h.guard.clone(),
+            cap: 10,
+        },
+    ];
+    assert_eq!(
+        client.validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::SelfAddressInList)
+    );
+
+    // blocked_recipients
+    let mut p = h.base_policy();
+    p.blocked_recipients = soroban_sdk::vec![&h.env, h.guard.clone()];
+    assert_eq!(
+        client.validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::SelfAddressInList)
+    );
+}
+
+#[test]
+fn validate_policy_reports_duplicate_address_in_list() {
+    let h = Harness::new();
+
+    let mut p = h.base_policy();
+    p.assets = soroban_sdk::vec![&h.env, h.asset.clone(), h.asset.clone()];
+    assert_rejects_with(&h, &p, &PolicyRuleId::DuplicateAddressInList);
+
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, h.recv.clone(), h.recv.clone()];
+    assert_rejects_with(&h, &p, &PolicyRuleId::DuplicateAddressInList);
+}
+
+#[test]
+fn validate_policy_reports_duplicate_recipient_cap() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        RecipientCap {
+            recipient: h.recv.clone(),
+            cap: 10,
+        },
+        RecipientCap {
+            recipient: h.recv.clone(),
+            cap: 20,
+        },
+    ];
+    assert_rejects_with(&h, &p, &PolicyRuleId::DuplicateRecipientCap);
+}
+
+#[test]
+fn validate_policy_reports_recipient_list_too_long() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // Bound is inclusive: exactly the limit is still valid.
+    let mut at_limit = soroban_sdk::Vec::new(&h.env);
+    for _ in 0..256u32 {
+        at_limit.push_back(Address::generate(&h.env));
+    }
+    let mut p = h.base_policy();
+    p.blocked_recipients = at_limit;
+    assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
+
+    // One more exceeds it; the dry run names the list-length rule.
+    let mut p = h.base_policy();
+    p.blocked_recipients = soroban_sdk::vec![&h.env];
+    for _ in 0..257u32 {
+        p.blocked_recipients.push_back(Address::generate(&h.env));
+    }
+    assert_rejects_with(&h, &p, &PolicyRuleId::RecipientListTooLong);
+}
+
+#[test]
+fn validate_policy_reports_recipient_cap_sign() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        RecipientCap {
+            recipient: h.recv.clone(),
+            cap: -5,
+        },
+    ];
+    assert_rejects_with(&h, &p, &PolicyRuleId::RecipientCapSign);
+}
+
+#[test]
+fn validate_policy_reports_recipient_allow_and_blocked() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.blocked_recipients = soroban_sdk::vec![&h.env, h.recv.clone()];
+    assert_rejects_with(&h, &p, &PolicyRuleId::RecipientAllowAndBlocked);
+}
+
+#[test]
+fn validate_policy_reports_protocol_contract_duplicate() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    let rule = ProtocolRule {
+        contract: h.asset.clone(),
+        fns: None,
+    };
+    p.protocols = soroban_sdk::vec![&h.env, rule.clone(), rule];
+    assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolContractDuplicate);
+}
+
+#[test]
+fn validate_policy_reports_protocol_fn_list_invalid() {
+    let h = Harness::new();
+
+    // An explicit `Some` fn list may not be empty.
+    let mut p = h.base_policy();
+    p.protocols = soroban_sdk::vec![
+        &h.env,
+        ProtocolRule {
+            contract: h.asset.clone(),
+            fns: Some(soroban_sdk::Vec::new(&h.env)),
+        },
+    ];
+    assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolFnListInvalid);
+
+    // ...nor contain duplicate fn names.
+    let mut p = h.base_policy();
+    let fns = soroban_sdk::vec![
+        &h.env,
+        Symbol::new(&h.env, "transfer"),
+        Symbol::new(&h.env, "transfer"),
+    ];
+    p.protocols = soroban_sdk::vec![
+        &h.env,
+        ProtocolRule {
+            contract: h.asset.clone(),
+            fns: Some(fns),
+        },
+    ];
+    assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolFnListInvalid);
+}
+
+#[test]
+fn validate_policy_accepts_valid_config_and_ignores_installed_policy() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // No policy installed: the candidate is judged on its own merits.
+    assert_eq!(
+        client.validate_policy(&h.base_policy()),
+        ValidationOutcome::Valid
+    );
+
+    // Install one, then dry-run the same candidate plus a broken one: the
+    // verdict is about the *argument*, never the installed policy...
+    h.install_policy(&h.base_policy());
+    assert_eq!(
+        client.validate_policy(&h.base_policy()),
+        ValidationOutcome::Valid
+    );
+    let mut broken = h.base_policy();
+    broken.window_cap = -1;
+    assert_eq!(
+        client.validate_policy(&broken),
+        ValidationOutcome::Invalid(PolicyRuleId::AmountSign)
+    );
+
+    // ...and a rejected dry-run never disturbs the installed policy.
+    assert_eq!(client.policy().unwrap().window_cap, 0);
 }
