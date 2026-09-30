@@ -359,6 +359,21 @@ fn admit_to_protocol_call_ledger(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ledger_second_changes_window_membership_at_boundary() {
+        let env = Env::default();
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit(100, 7);
+
+        ledger.prune(100, 1);
+        assert_eq!(ledger.total, 7);
+
+        // With a one-second window, timestamp t expires when now reaches t+1.
+        ledger.prune(101, 1);
+        assert_eq!(ledger.total, 0);
+        assert!(ledger.entries.is_empty());
+    }
     use soroban_sdk::{vec, Address, Env};
 
     fn led(env: &Env, entries: &[(u64, i128)]) -> SingleLedger {
@@ -406,6 +421,25 @@ mod tests {
         assert_eq!(ledger.entries.get(0).unwrap().amount, 12);
         assert_eq!(ledger.entries.get(1).unwrap().ts, 101);
         assert_eq!(ledger.entries.get(1).unwrap().amount, 6);
+    }
+
+    #[test]
+    fn admit_saturates_rather_than_trapping_near_i128_max() {
+        // Issue #17 defense-in-depth: the ledger helper is a non-trapping
+        // backstop. Even if a caller hands it an amount that pushes the cached
+        // total past the i128 ceiling, it saturates instead of aborting under
+        // `overflow-checks = true` / `panic = "abort"`. The decision engine is
+        // the layer that turns this case into a deliberate stable error.
+        let env = Env::default();
+        let mut total = i128::MAX - 1;
+        let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
+        entries.push_back(SpendEntry {
+            ts: 0,
+            amount: total,
+        });
+        admit_to_ledger(&mut total, &mut entries, 1, 10);
+        assert_eq!(total, i128::MAX);
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]
@@ -465,6 +499,27 @@ mod tests {
     }
 
     #[test]
+    fn prune_boundary_is_addition_form_at_zero_timestamp() {
+        // Issue #18: pin the exact expiry boundary. With `now = 0` the
+        // subtraction form `now - window_secs` saturates to 0 and would wrongly
+        // expire an entry recorded at ts 0; the addition form must retain it.
+        let env = Env::default();
+        let mut total = 0i128;
+        let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
+
+        admit_to_ledger(&mut total, &mut entries, 0, 7);
+        // 0 + 1 <= 0 is false -> inside the window, retained.
+        prune_entries(&mut total, &mut entries, 0, 1);
+        assert_eq!(total, 7);
+        assert_eq!(entries.len(), 1);
+
+        // Exactly on the boundary: 0 + 1 <= 1 -> expired, per SPEC §3.1.
+        prune_entries(&mut total, &mut entries, 1, 1);
+        assert_eq!(total, 0);
+        assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
     fn backstop_merge_is_conservative_and_bounded() {
         let env = Env::default();
         env.cost_estimate().budget().reset_unlimited();
@@ -475,6 +530,43 @@ mod tests {
         }
         assert!((entries.len() as usize) <= MAX_WINDOW_ENTRIES);
         assert_eq!(total, (MAX_WINDOW_ENTRIES + 10) as i128);
+    }
+
+    #[test]
+    fn max_window_entries_merges_forward_at_exact_bound() {
+        // Issue #19: the merge backstop must trigger only once the write would
+        // exceed the named bound, keep the newer timestamp, and stay bounded.
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let mut total = 0i128;
+        let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
+
+        // Fill to exactly MAX_WINDOW_ENTRIES with distinct seconds: no merge.
+        for i in 0..MAX_WINDOW_ENTRIES as u64 {
+            admit_to_ledger(&mut total, &mut entries, i, 1);
+        }
+        assert_eq!(entries.len() as usize, MAX_WINDOW_ENTRIES);
+        assert_eq!(total, MAX_WINDOW_ENTRIES as i128);
+        assert_eq!(entries.first().unwrap().ts, 0);
+        assert_eq!(
+            entries.get(entries.len() - 1).unwrap().ts,
+            (MAX_WINDOW_ENTRIES - 1) as u64
+        );
+
+        // The next distinct second crosses the bound and merges the two oldest
+        // entries forward into one entry at the NEWER timestamp.
+        admit_to_ledger(&mut total, &mut entries, MAX_WINDOW_ENTRIES as u64, 1);
+        assert_eq!(entries.len() as usize, MAX_WINDOW_ENTRIES);
+        assert_eq!(total, (MAX_WINDOW_ENTRIES + 1) as i128);
+        let head = entries.first().unwrap();
+        assert_eq!(head.ts, 1, "merged ts is the newer of {{0, 1}}");
+        assert_eq!(head.amount, 2, "merged amount is the sum");
+        // The tail and the ascending order are untouched.
+        assert_eq!(entries.get(1).unwrap().ts, 2);
+        assert_eq!(
+            entries.get(entries.len() - 1).unwrap().ts,
+            MAX_WINDOW_ENTRIES as u64
+        );
     }
 
     #[test]

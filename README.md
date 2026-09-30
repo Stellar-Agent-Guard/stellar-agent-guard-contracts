@@ -366,6 +366,16 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 # → {"Blocked":"heartbeat_expired"}
 ```
 
+`check()` uses the ledger timestamp at the time that invocation executes; it does not use the
+client's wall clock and cannot reserve capacity for a later transaction. Ledger time has
+one-second granularity, so activity sharing a timestamp has ledger-defined ordering rather
+than sub-second ordering. A later transaction can see a different result if another spend
+consumes the cap or time crosses a window/activation boundary. Treat pre-flight results as
+advisory: re-run `check()` if more than one ledger has elapsed before submission, and handle
+the authoritative on-ledger authorization result even after a fresh check. The exact expiry
+boundary (a spend at `t` expiring when `now == t + window_secs`) is demonstrated in the
+`ledger_second_changes_window_membership_at_boundary` test (SPEC §3.1).
+
 For operator triage, `check_detailed` returns the same verdict plus current headroom and
 effective caps without changing spend accounting. A submitted call may extend persistent-entry
 TTLs and incur rent (SPEC §9.5); simulation does not persist those extensions:
@@ -401,7 +411,11 @@ host invokes it automatically on every authorization the account must approve. S
 4. Run the decision table (`decide`) — account-level gates first, then a per-context
    decision loop, then commit window admissions only if every context passed.
 5. Return `Ok(())` to approve the transaction, or `Err(reason)` to reject it — and emit
-   the `auth_checked` event either way.
+   the `auth_checked` event either way. **Observability caveat:** a blocked decision rolls
+   back with its transaction, so its `auth_checked` event never becomes a committed ledger
+   event — blocks reach observers via simulation diagnostics and the SDK telemetry listener
+   (dual-stream), not via raw RPC `getEvents`. See
+   [SPEC §9](SPEC.md#9-events-and-telemetry).
 
 See [How it works](#how-it-works) below for the full flow through `parse_call`/`decide`.
 
@@ -534,7 +548,9 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
 6. **All-or-nothing commit.** Window admissions are staged and only committed to storage
    if *every* context passes — a partially-validating batch can never spend. `Ok(())`
    approves; `Err(reason)` rejects the entire transaction, and the `auth_checked` event
-   records the outcome either way.
+   records the outcome either way — with the same observability caveat as step 5 above:
+   an allowed decision's event is committed, a blocked one exists only in diagnostics
+   (the transaction it rolled back with carried it away). See [SPEC §9](SPEC.md#9-events-and-telemetry).
 
 ## Storage
 

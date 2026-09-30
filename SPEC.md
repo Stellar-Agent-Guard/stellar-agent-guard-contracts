@@ -184,6 +184,21 @@ pub struct ProtocolCallEntry { pub ts: u64, pub count: u32 }  // coalesced call 
 
 ### 3.1 The window is genuinely rolling — not a fixed bucket
 
+**Clock and pre-flight freshness.** `now` is the Soroban ledger's unix timestamp
+(`env.ledger().timestamp()`), not the submitter's wall clock. The host supplies that
+timestamp when the transaction executes; the contract cannot select or backdate it. Ledger
+timestamps have one-second granularity, so events whose execution timestamps fall in the same
+second are tied for window membership and are ordered by the host's transaction execution,
+not by a sub-second wall-clock ordering. A policy or pre-flight `check()` result therefore
+describes the ledger-time snapshot used by that invocation; it is advisory, not a reservation
+of capacity. Between simulation and execution, another transaction may consume the remaining
+cap or the ledger timestamp may advance across an active/window boundary. Re-run `check()`
+immediately before signing/broadcasting if more than one ledger has elapsed, and always handle
+the authoritative execution result (which can still differ if state changes afterward).
+
+A test-env boundary example is covered by `window::tests::ledger_second_changes_window_membership_at_boundary`:
+a spend admitted at second `t` remains live at `t`, then expires at `t + window_secs`.
+
 A fixed 86,400-second bucket (reset-at-midnight style) is a **different guarantee** from a
 rolling window and is rejected here. Under a fixed bucket, spend at 23:59 and spend at 00:01
 are never counted together even though they are two minutes apart; under a rolling window, any
@@ -193,9 +208,11 @@ exactly the burst-boundary cases a spend guard exists to catch.
 Implementation (exact, lazy, bounded):
 
 - Entries are append-ordered by unix ledger time (`env.ledger().timestamp()`, 1s granularity).
-- On every evaluation: while `entries[0].ts <= now - window_secs`, pop from the front and
-  subtract from `total`. Evaluation is lazy — no cron, no background writes; the O(expired)
-  pruning cost amortizes over accesses.
+- On every evaluation: while `entries[0].ts + window_secs <= now`, pop from the front and
+  subtract from `total`. Expiry is tested in this addition form (not the algebraically
+  equivalent `entries[0].ts <= now - window_secs`) so that a low ledger timestamp cannot
+  underflow `now - window_secs` and wrongly expire a still-live entry. Evaluation is lazy — no
+  cron, no background writes; the O(expired) pruning cost amortizes over accesses.
 - A new spend coalesces into the trailing entry when it shares the same second
   (`entries.last().ts == now`), so dense bursts in one second stay one entry.
 - **Boundedness backstop:** `MAX_WINDOW_ENTRIES = 8192`. If a write would exceed it, the two
@@ -217,7 +234,7 @@ Implementation (exact, lazy, bounded):
   for the long-lived-account rent/TTL model.
 
 **Invariant (window):** for every authorization decision, the global `total` after any admission equals the
-sum of `entries[i].amount` over global entries with `ts > now - window_secs`, and a new asset transfer
+sum of `entries[i].amount` over global entries with `ts + window_secs > now`, and a new asset transfer
 is admitted only if the running total (plus amounts already staged in the same request) ≤ the
 effective cap for that transfer. Per-recipient overrides maintain the same invariant in their own
 `RecipientWindowState`; recipients without an override use the global cap. Both the global cap
@@ -807,8 +824,8 @@ filtering by the SDK listener.
 
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
-| `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | `context_index: u32`, `revision: u64` — the `PolicyRevision` in force at decision time | every `__check_auth` / `check` decision |
-| `heartbeat` | (none) | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
+| `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | (none) | every `__check_auth` / `check` decision |
+| `heartbeat` | (none) | `at: u64`, `expires_at: u64` — the attested DMS deadline as it stood at emission time, `at + dms_grace_secs` of the policy current at that moment; `0` when the dead-man switch is disabled (`dms_grace_secs == 0`, or no policy) | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
 | `frozen` | (none) | `by: Address` | admin freeze |
 | `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
@@ -830,6 +847,16 @@ sharing a revision were evaluated under the same policy generation; the
 `policy_hash` (§7.3) distinguishes *which* policy that generation installed.
 
 Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
+
+**Heartbeat expiry (`heartbeat.expires_at`).** `expires_at` is the deadline the heartbeat was
+actually attested under, derived from the `dms_grace_secs` of the policy *current at the moment
+the heartbeat is emitted* — not a value the consumer recomputes from `at` using whatever grace
+the policy carries later. A `set_policy` that changes `dms_grace_secs` after a heartbeat does not
+retroactively change that heartbeat's recorded deadline, so a listener replaying the log derives
+the same expiry the contract enforced instead of a drifting recomputation. When the dead-man
+switch is disabled the event carries `expires_at == 0` rather than `at + 0`, so `0` unambiguously
+means "no deadline was attested" and never a real timestamp (ledger timestamps are far above `0`).
+Reads `Policy` at emission time to obtain the grace; a missing policy reads as disabled.
 
 **Key fingerprints (`agent_rotated`).** A fingerprint is `sha256(pubkey)[0..8]` — the first
 8 bytes of the SHA-256 digest of the agent public key, rendered as 16 lowercase hex characters

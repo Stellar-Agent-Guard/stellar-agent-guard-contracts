@@ -53,6 +53,21 @@ pub fn global_window_remaining(policy: &PolicyConfig, ledger: &Ledger) -> Option
     (policy.window_cap > 0).then_some(remaining)
 }
 
+/// Overflow-checked three-term running sum for a rolling-window projection:
+/// `base + staged + amount`.
+///
+/// Window totals are `i128`, caps are validated `>= 0`, and individual amounts
+/// are validated `> 0`, but nothing stops a crafted amount (or an accumulated
+/// total) from pushing the running sum past `i128::MAX`. The release profile
+/// sets `overflow-checks = true` under `panic = "abort"`, so a raw `+` there
+/// would be an accidental trap — which CONTRIBUTING rule 1 forbids on the
+/// authorization path. `checked_add` turns that case into an explicit `None`;
+/// the caller maps `None` to the stable `WindowCapExceeded` error (a sum that
+/// exceeds `i128` necessarily exceeds any `i128` cap).
+fn checked_window_projection(base: i128, staged: i128, amount: i128) -> Option<i128> {
+    base.checked_add(staged)?.checked_add(amount)
+}
+
 /// Evaluate dead-man switch health given current timestamp, last heartbeat, and policy config.
 pub fn dms_health(
     now: u64,
@@ -332,16 +347,29 @@ pub fn decide(
                         }
                     }
                     // Cumulative against the current windows: existing totals +
-                    // amounts staged earlier in this same request.
-                    let global_projected =
-                        ledger.total.saturating_add(pending).saturating_add(amount);
-                    let recip_projected = ledger
-                        .recipient_total(&to)
-                        .saturating_add(staged_recip)
-                        .saturating_add(amount);
-                    if (cfg.window_cap > 0 && global_projected > cfg.window_cap)
-                        || recip_cap.is_some_and(|cap| recip_projected > cap)
-                    {
+                    // amounts staged earlier in this same request. The sums are
+                    // overflow-checked (`None` = would exceed `i128`), so a
+                    // near-`i128::MAX` amount or accumulated total is a
+                    // deliberate `WindowCapExceeded`, never an arithmetic trap.
+                    let global_projected = checked_window_projection(ledger.total, pending, amount);
+                    let recip_projected = checked_window_projection(
+                        ledger.recipient_total(&to),
+                        staged_recip,
+                        amount,
+                    );
+                    let global_over = cfg.window_cap > 0
+                        && match global_projected {
+                            Some(projected) => projected > cfg.window_cap,
+                            None => true,
+                        };
+                    let recip_over = match recip_cap {
+                        Some(cap) => match recip_projected {
+                            Some(projected) => projected > cap,
+                            None => true,
+                        },
+                        None => false,
+                    };
+                    if global_over || recip_over {
                         Decision::Blocked(Error::WindowCapExceeded)
                     } else {
                         if cfg.window_cap > 0 {
@@ -428,7 +456,7 @@ pub fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ProtocolRule, RecipientCap};
+    use crate::types::{ProtocolRule, RecipientCap, MAX_WINDOW_ENTRIES};
     use soroban_sdk::{auth::ContractContext, vec, Address, Env, IntoVal, Symbol, Val, Vec};
 
     fn addr(env: &Env, n: u8) -> Address {
@@ -715,6 +743,143 @@ mod tests {
             Decision::Blocked(Error::WindowCapExceeded)
         ));
         assert_eq!(l, before);
+    }
+
+    #[test]
+    fn caps_disabled_huge_amount_is_allowed_and_leaves_window_empty() {
+        // Issue #17/#20: with both caps off the window is disabled, so an
+        // amount at the i128 ceiling is a plain allowed transfer — it must
+        // neither trap nor leave any spend accounting behind.
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env); // per_tx_cap 0, window_cap 0
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, transfer_ctx(&env, 1, 2, i128::MAX)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx);
+        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_eq!(l.total, 0);
+        assert_eq!(l.entries.len(), 0);
+    }
+
+    #[test]
+    fn accumulated_total_at_i128_ceiling_blocks_overflow_stably() {
+        // Issue #17: once the rolled total is within reach of i128::MAX, an
+        // amount that would overflow the running sum must block with the
+        // stable `WindowCapExceeded` reason. Saturating arithmetic would
+        // instead clamp to i128::MAX and (at a cap of i128::MAX) admit spend
+        // past the cap; a raw `+` would trap under `overflow-checks`.
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.window_cap = i128::MAX;
+        p.window_secs = 1_000;
+        let mut l = Ledger::empty(&env);
+
+        let d1 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, i128::MAX - 5)],
+        );
+        assert!(matches!(d1.first().unwrap(), Decision::Allowed));
+        assert_eq!(l.total, i128::MAX - 5);
+
+        // 6 more would overflow i128 -> deliberate stable block, no mutation.
+        let before = l.clone();
+        let d2 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 6)],
+        );
+        assert!(matches!(
+            d2.first().unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
+        assert_eq!(l, before);
+
+        // 5 more lands exactly on the ceiling and is still admitted.
+        let d3 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 5)],
+        );
+        assert!(matches!(d3.first().unwrap(), Decision::Allowed));
+        assert_eq!(l.total, i128::MAX);
+
+        // Any further unit at the ceiling overflows -> blocked, not trapped.
+        let before = l.clone();
+        let d4 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 1)],
+        );
+        assert!(matches!(
+            d4.first().unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
+        assert_eq!(l, before);
+    }
+
+    #[test]
+    fn recipient_accumulated_total_at_i128_ceiling_blocks_overflow_stably() {
+        // Issue #17: the per-recipient window projection is checked too, even
+        // when the global window is disabled.
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.window_cap = 0; // global window off
+        p.window_secs = 1_000;
+        p.recipient_window_caps = vec![
+            &env,
+            RecipientCap {
+                recipient: addr(&env, 2),
+                cap: i128::MAX,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+
+        let d1 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, i128::MAX - 5)],
+        );
+        assert!(matches!(d1.first().unwrap(), Decision::Allowed));
+        assert_eq!(l.recipient_total(&addr(&env, 2)), i128::MAX - 5);
+
+        let before = l.clone();
+        let d2 = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 6)],
+        );
+        assert!(matches!(
+            d2.first().unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
+        assert_eq!(l, before, "an overflowing recipient spend must not mutate");
     }
 
     #[test]
@@ -1405,5 +1570,72 @@ mod tests {
         // Only 2 protocol calls should be counted
         assert_eq!(l.protocol_call_total, 2);
         assert_eq!(l.total, 100); // asset transfer counted separately
+    }
+
+    #[test]
+    fn backstop_merge_never_admits_what_true_rolling_sum_would_reject() {
+        // Issue #19: drive the ledger to exactly MAX_WINDOW_ENTRIES and one
+        // past it, then assert the merge-forward backstop never *loosens*
+        // enforcement: any admission the merged (over-counted) ledger allows
+        // is an admission the true, un-merged rolling sum would also allow.
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.window_secs = 5_000;
+        let mut l = Ledger::empty(&env);
+
+        // Exactly MAX_WINDOW_ENTRIES distinct seconds (amount 1 each): the
+        // bound is not exceeded, so no merge has happened yet.
+        for ts in 0..(MAX_WINDOW_ENTRIES as u64) {
+            l.admit(ts, 1);
+        }
+        assert_eq!(l.entries.len() as usize, MAX_WINDOW_ENTRIES);
+
+        // One more distinct second crosses the bound: the two oldest entries
+        // merge forward into a single entry at the NEWER timestamp.
+        l.admit(MAX_WINDOW_ENTRIES as u64, 1);
+        assert_eq!(l.entries.len() as usize, MAX_WINDOW_ENTRIES);
+        let head = l.entries.first().unwrap();
+        assert_eq!(head.ts, 1, "merged ts must be the newer of the two");
+        assert_eq!(head.amount, 2);
+
+        // Prune at the exact point where the true (un-merged) ts-0 spend has
+        // expired; the merged entry keeps ts 1, so that amount is retained.
+        p.window_cap = (MAX_WINDOW_ENTRIES as i128) + 1;
+        l.prune(p.window_secs, p.window_secs);
+        let true_rolling_sum = MAX_WINDOW_ENTRIES as i128; // ts 1..=MAX alive
+        assert!(
+            l.total >= true_rolling_sum,
+            "merge must over-count, never under-count"
+        );
+
+        // Property: merged_allows(amount) => true_allows(amount).
+        let mut observed_strictness = false;
+        for amount in [1i128, 2, 3, 5, 8] {
+            let mut trial = l.clone();
+            let verdict = decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut trial,
+                p.window_secs,
+                vec![&env, transfer_ctx(&env, 1, 2, amount)],
+            );
+            let merged_allows = matches!(verdict.first().unwrap(), Decision::Allowed);
+            let true_allows = true_rolling_sum + amount <= p.window_cap;
+            assert!(
+                !merged_allows || true_allows,
+                "post-merge admitted {amount} that the true rolling sum rejects"
+            );
+            if !merged_allows && true_allows {
+                observed_strictness = true;
+            }
+        }
+        assert!(
+            observed_strictness,
+            "expected the over-count to make at least one admission stricter"
+        );
     }
 }

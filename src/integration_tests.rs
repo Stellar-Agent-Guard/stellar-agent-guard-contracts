@@ -46,6 +46,36 @@ fn fingerprint(pubkey: &[u8; 32]) -> ScVal {
     ScVal::Bytes(ScBytes::try_from(digest[..8].to_vec()).unwrap())
 }
 
+/// `(at, expires_at)` recorded by the most recent `heartbeat` event (SPEC §9).
+/// Returns `None` when no heartbeat event has been published yet.
+fn last_heartbeat_payload(env: &Env) -> Option<(u64, u64)> {
+    let want = ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("event_heartbeat")).unwrap());
+    let recorded = env.events().all();
+    let found = recorded.events().iter().rfind(
+        |e| matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&want)),
+    )?;
+    let xdr::ContractEventBody::V0(v0) = &found.body;
+    let xdr::ScVal::Map(Some(map)) = &v0.data else {
+        panic!("event_heartbeat data must be a Map");
+    };
+    let read = |name: &str| -> u64 {
+        let key = symbol_val(name);
+        let entry = map
+            .0
+            .iter()
+            .find(|e| e.key == key)
+            .unwrap_or_else(|| panic!("event_heartbeat data is missing `{name}`"));
+        let xdr::ScVal::U64(value) = entry.val else {
+            panic!(
+                "event_heartbeat `{name}` must be a U64, got {:?}",
+                entry.val
+            )
+        };
+        value
+    };
+    Some((read("at"), read("expires_at")))
+}
+
 /// Number of `heartbeat` events published by the last contract invocation.
 fn heartbeat_event_count(env: &Env) -> usize {
     let want = ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("event_heartbeat")).unwrap());
@@ -383,6 +413,19 @@ impl Harness {
         PolicyEngineClient::new(&self.env, &self.guard).unfreeze();
     }
 
+    /// `set_policy` once the harness has entered enforcing auth mode: the
+    /// plain `install_policy` relies on mock auth and would be rejected.
+    fn set_policy_enforcing(&mut self, cfg: &PolicyConfig) {
+        let root = self.invocation(
+            &self.guard,
+            "set_policy",
+            std::vec![cfg.clone().into_val(&self.env)],
+        );
+        let entry = self.admin_entry(&root);
+        self.enforce(entry);
+        PolicyEngineClient::new(&self.env, &self.guard).set_policy(cfg);
+    }
+
     fn status(&self) -> crate::types::Status {
         PolicyEngineClient::new(&self.env, &self.guard).status()
     }
@@ -662,6 +705,69 @@ fn rolling_window_cap_blocks_and_recovers_after_expiry() {
     h.transfer_expect_blocked(&recv, 30); // 60 > 50 within a 100s span
     h.set_time(150); // first spend (ts 0) has expired: 150-100 = 50 >= 0
     h.transfer(&recv, 30); // ok again -> window is genuinely rolling
+}
+
+#[test]
+fn disabled_window_cap_writes_no_window_entries() {
+    // Issue #20: `window_cap = 0` disables the rolling window, so a caps-only
+    // policy (per_tx_cap set, window off) must not accrue spend rows —
+    // otherwise every allowed transfer would grow persistent storage forever.
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100; // caps-only policy
+    p.window_cap = 0; // window disabled
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    for _ in 0..5 {
+        h.transfer(&recv, 10); // N allowed transfers
+    }
+
+    let window = h.env.as_contract(&h.guard, || {
+        h.env
+            .storage()
+            .persistent()
+            .get::<DataKey, crate::types::WindowState>(&DataKey::Window)
+    });
+    // The ledger is either absent or entirely empty: no global rows, no cached
+    // total, and no per-recipient ledgers left behind.
+    if let Some(w) = window {
+        assert_eq!(w.total, 0);
+        assert!(w.entries.is_empty(), "window disabled: no spend rows");
+        assert!(w.recipients.is_empty());
+    }
+}
+
+#[test]
+fn enabled_window_cap_accrues_with_per_tx_cap_disabled() {
+    // Issue #20, converse: with `per_tx_cap = 0` the rolling window still
+    // accrues and enforces.
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 0; // per-tx cap disabled
+    p.window_secs = 60;
+    p.window_cap = 100;
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    h.transfer(&recv, 40);
+    h.transfer(&recv, 30); // same second -> coalesces into a single entry
+
+    let window = h
+        .env
+        .as_contract(&h.guard, || {
+            h.env
+                .storage()
+                .persistent()
+                .get::<DataKey, crate::types::WindowState>(&DataKey::Window)
+        })
+        .expect("an enabled window must persist its ledger");
+    assert_eq!(window.total, 70);
+    assert_eq!(window.entries.len(), 1);
+
+    h.transfer_expect_blocked(&recv, 31); // 70 + 31 = 101 > 100
 }
 
 #[test]
@@ -1934,4 +2040,99 @@ fn status_reads_never_write_window_or_emit_events() {
     // And spend accounting was untouched: a further 60 transfer must still fit.
     h.transfer(&recv, 60);
     assert_eq!(h.status().window_remaining, Some(0));
+}
+
+// ── heartbeat `expires_at` (SPEC §9) ───────────────────────────────────
+// The event records the deadline the heartbeat was attested under, derived
+// from the policy current at emission time, so a consumer never has to
+// recompute it from `at` with a later policy's grace.
+
+#[test]
+fn heartbeat_event_reports_expiry_from_current_grace() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.dms_grace_secs = 60;
+    h.install_policy(&policy);
+
+    h.set_time(1_000);
+    h.heartbeat();
+
+    let (at, expires_at) = last_heartbeat_payload(&h.env).expect("heartbeat event");
+    assert_eq!(at, 1_000, "at is the ledger timestamp at emission");
+    assert_eq!(
+        expires_at, 1_060,
+        "with grace=60 the attested deadline is at + 60"
+    );
+}
+
+#[test]
+fn heartbeat_event_reports_zero_expiry_when_dms_disabled() {
+    let mut h = Harness::new();
+    // base_policy leaves dms_grace_secs == 0, which is how "DMS disabled" is
+    // encoded (engine::dms_health returns Ok without consulting the clock).
+    let policy = h.base_policy();
+    assert_eq!(policy.dms_grace_secs, 0);
+    h.install_policy(&policy);
+
+    h.set_time(1_000);
+    h.heartbeat();
+
+    let (at, expires_at) = last_heartbeat_payload(&h.env).expect("heartbeat event");
+    assert_eq!(at, 1_000);
+    assert_eq!(
+        expires_at, 0,
+        "a disabled dead-man switch attests no deadline, so expires_at is 0 (not at + 0)"
+    );
+}
+
+#[test]
+fn heartbeat_event_uses_grace_current_at_emission_not_a_stale_one() {
+    // This is the behaviour the issue exists for: a consumer that recomputed
+    // expiry as `at + <current policy grace>` gets the wrong answer for every
+    // heartbeat emitted before a `set_policy` that changes the grace.
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.dms_grace_secs = 60;
+    h.install_policy(&policy);
+
+    h.set_time(1_000);
+    h.heartbeat();
+    let (first_at, first_expiry) = last_heartbeat_payload(&h.env).expect("first heartbeat event");
+    assert_eq!((first_at, first_expiry), (1_000, 1_060));
+
+    // The admin shortens the grace. The already-emitted event must keep the
+    // deadline it was attested under.
+    let mut tightened = h.base_policy();
+    tightened.dms_grace_secs = 30;
+    h.set_policy_enforcing(&tightened);
+
+    // A later heartbeat is stamped with the grace in force at *its* emission.
+    // Stay inside the tightened 30s window, since a heartbeat past the grace
+    // is (correctly) rejected by the DMS gate before any event is published.
+    h.set_time(1_010);
+    h.heartbeat();
+    let (second_at, second_expiry) =
+        last_heartbeat_payload(&h.env).expect("second heartbeat event");
+    assert_eq!(
+        (second_at, second_expiry),
+        (1_010, 1_040),
+        "a heartbeat must use the grace current at its own emission time"
+    );
+
+    // And the earlier event is untouched: a naive `at + current_grace`
+    // recomputation would read 1_000 + 30 = 1_030, not the attested 1_060.
+    assert_eq!(
+        first_expiry, 1_060,
+        "the earlier heartbeat keeps the deadline it was attested under"
+    );
+
+    // Disabling the switch entirely is the third state: 0 again, distinct from
+    // any real timestamp.
+    let mut disabled = h.base_policy();
+    disabled.dms_grace_secs = 0;
+    h.set_policy_enforcing(&disabled);
+    h.set_time(1_020);
+    h.heartbeat();
+    let (third_at, third_expiry) = last_heartbeat_payload(&h.env).expect("third heartbeat event");
+    assert_eq!((third_at, third_expiry), (1_020, 0));
 }
