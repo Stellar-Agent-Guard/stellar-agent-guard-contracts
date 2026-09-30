@@ -308,6 +308,20 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 #    "window_cap":"150","window_secs":60}
 ```
 
+### `policy_hash` (read) — cheap drift detection
+```rust
+pub fn policy_hash(env: Env) -> BytesN<32>
+```
+No auth. Returns the SHA-256 over the canonical (ScVal XDR)
+encoding of the installed policy, so SDKs/dashboards can detect policy drift by comparing
+one value instead of shipping and diffing the full `PolicyConfig`, and can record the hash
+alongside `auth_checked` events as a tamper-evident log anchor. With no policy installed the
+read returns the documented sentinel `NO_POLICY_DIGEST` = `sha256("")`
+(`e3b0c442…b855`) — never a trap; `revoke_policy()` restores it. The encoding, field order,
+and sentinel are pinned in [SPEC §7.3](SPEC.md#73-policy-hash--cheap-drift-detection-policy_hash)
+and locked by `tests/policy_hash_encoding.rs`; off-chain, reproduce the hash by SHA-256-ing
+the XDR bytes of the same policy value your SDK builds for `set_policy`.
+
 ### `status` (read)
 ```rust
 pub fn status(env: Env) -> Status

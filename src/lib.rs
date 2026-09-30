@@ -30,6 +30,7 @@ use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, TryFromVal, Val,
 };
+pub use types::NO_POLICY_DIGEST;
 pub use types::{
     CheckDetail, Error, PolicyConfig, ProtocolRule, RecipientCap, RecipientWindowState,
 };
@@ -497,6 +498,30 @@ impl PolicyEngine {
         persist_get(&env, &DataKey::Policy)
     }
 
+    /// Canonical encoding fingerprint for cheap policy drift detection
+    /// (`policy_hash`): SHA-256 over the deterministic canonical encoding of
+    /// the installed policy (SPEC §7.3), or `NO_POLICY_DIGEST` (the SHA-256 of
+    /// the empty marker, documented and never trapping) when no policy is
+    /// installed. No auth, event-free, and write-free. A returned hash only
+    /// changes when the *policy* changes — not on any other storage or ledger
+    /// activity — so SDKs/dashboards can detect drift by comparing one 32-byte
+    /// value instead of shipping and diffing the full `PolicyConfig`, and can
+    /// record the value alongside `auth_checked` events as a tamper-evident
+    /// log anchor.
+    ///
+    /// Off-chain reproduction is pinned by SPEC §7.3 (field order, per-field
+    /// encoding, sentinel value) and locked by `tests/policy_hash_encoding.rs`.
+    #[allow(clippy::must_use_candidate)] // public read surface
+    pub fn policy_hash(env: Env) -> BytesN<32> {
+        match persist_get::<PolicyConfig>(&env, &DataKey::Policy) {
+            None => BytesN::from_array(&env, &crate::types::NO_POLICY_DIGEST),
+            Some(cfg) => {
+                let encoding = crate::types::policy_canonical_encoding(&env, &cfg);
+                env.crypto().sha256(&encoding).into()
+            }
+        }
+    }
+
     /// Evaluates dead-man switch health (`Ok`, `Warn` at ≥80% elapsed, or `Expired`).
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus {
@@ -771,6 +796,7 @@ impl CustomAccountInterface for PolicyEngine {
 #[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
 pub mod testutils {
     pub use crate::engine::{contains_addr, decide, parse_call, AccountState, Decision};
+    pub use crate::types::policy_canonical_encoding;
     pub use crate::types::{
         CheckResult, DataKey, Error, PolicyConfig, ProtocolRule, RecipientCap,
         RecipientWindowState, Status, WindowState,
