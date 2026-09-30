@@ -23,9 +23,9 @@ use engine::{cap_metrics, contains_addr, decide, AccountState, Decision};
 use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
 use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
-    IntoVal, Symbol, TryFromVal, Val,
+    IntoVal, Symbol, TryFromVal, Val, Vec,
 };
-pub use types::{CheckDetail, Error, PolicyConfig};
+pub use types::{BatchCheckResult, BatchTransfer, CheckDetail, Error, PolicyConfig};
 use types::{CheckResult, DataKey, Status, WindowState};
 use window::Ledger;
 
@@ -456,6 +456,60 @@ impl PolicyEngine {
             per_tx_cap,
             effective_per_tx_cap,
             effective_window_cap,
+        }
+    }
+
+    /// Pre-flight a payment run without writing storage.
+    ///
+    /// Transfers are evaluated in order against a local copy of the rolling
+    /// window ledger. An allowed transfer is staged before the next item is
+    /// evaluated, so the returned verdicts match the all-or-nothing admission
+    /// rules used by `__check_auth`. The local ledger is discarded afterwards.
+    #[allow(clippy::must_use_candidate)]
+    pub fn check_batch(
+        env: Env,
+        asset: Address,
+        transfers: Vec<BatchTransfer>,
+    ) -> BatchCheckResult {
+        let cfg = persist_get::<PolicyConfig>(&env, &DataKey::Policy);
+        let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
+        let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let now = env.ledger().timestamp();
+        let self_addr = env.current_contract_address();
+        let mut ledger = load_ledger(&env);
+        let mut verdicts = Vec::new(&env);
+        let mut admissible = true;
+
+        for transfer in transfers.iter() {
+            let call = transfer_context(&env, &asset, &transfer.to, transfer.amount);
+            let result = match decide(
+                &env,
+                &self_addr,
+                cfg.as_ref(),
+                &AccountState {
+                    admin_frozen: frozen,
+                    last_heartbeat,
+                },
+                &mut ledger,
+                now,
+                vec![&env, call],
+            ) {
+                Decision::Allowed => {
+                    emit_auth(&env, true, None);
+                    CheckResult::Allowed
+                }
+                Decision::Blocked(error) => {
+                    admissible = false;
+                    emit_auth(&env, false, Some(error));
+                    CheckResult::Blocked(Symbol::new(&env, error.reason()))
+                }
+            };
+            verdicts.push_back(result);
+        }
+
+        BatchCheckResult {
+            verdicts,
+            admissible,
         }
     }
 }

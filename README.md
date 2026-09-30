@@ -293,6 +293,18 @@ When a cap is disabled, its corresponding detail is `None` rather than a sentine
 The SDK and dashboard should consume these fields for pre-signing warnings and blocked-call
 operator reports.
 
+For a payment run, `check_batch` evaluates transfers in order while staging each allowed
+admission in memory. It does not write state, so callers can inspect every per-transfer
+verdict and the overall admissibility before signing the run:
+```rust
+pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
+```
+For example, if a 60-unit transfer is allowed under the remaining window cap, a subsequent
+50-unit transfer can be returned as `WindowCapExceeded` because it is evaluated against the
+first transfer's staged admission. The result is overall inadmissible when any item is blocked;
+the caller must then adjust the run rather than submit a batch that the authorization path would
+reject.
+
 ### `__check_auth` (host-invoked — not callable by anyone)
 ```rust
 fn __check_auth(env: Env, signature_payload: Hash<32>, signatures: BytesN<64>,

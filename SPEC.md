@@ -392,6 +392,10 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // events as an in-path decision so telemetry sees one vocabulary.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
   // Same zero-write pre-flight, with remaining_window and effective cap metrics.
+pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
+  // Zero-write payment-run pre-flight. Evaluates transfers in order, staging each
+  // allowed admission in memory so later items see earlier admissions. Returns one
+  // verdict per item and `admissible: false` if any item is blocked.
 
 // ── Enforcement (host-invoked; not callable by anyone) ────────────────────
 impl CustomAccountInterface for PolicyEngine {
