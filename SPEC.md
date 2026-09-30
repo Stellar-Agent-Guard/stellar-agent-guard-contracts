@@ -806,7 +806,7 @@ filtering by the SDK listener.
 
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
-| `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | (none) | every `__check_auth` / `check` decision |
+| `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | (none) | every `__check_auth` / `check` decision — but only **allowed** decisions persist as committed ledger events; a **blocked** one is rolled back with its transaction and reaches observers via diagnostics only (see below) |
 | `heartbeat` | (none) | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
 | `frozen` | (none) | `by: Address` | admin freeze |
@@ -815,6 +815,23 @@ filtering by the SDK listener.
 | `agent_rotated` | (none) | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
 
 Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
+
+**Blocked decisions are diagnostics-only — they never appear in the committed event stream.**
+A rejected `__check_auth` fails the host authorization frame, and Soroban rolls back
+everything the frame did, *including* the `auth_checked` event it emitted: the event is
+written before the rollback and is discarded with the rest of the frame's effects. The
+corollary for the table row above — "every decision" does **not** mean "every decision is
+queryable via `getEvents`": an **allowed** decision → committed ledger event; a **blocked**
+decision → diagnostics only. The block is still fully diagnosed before the rollback — the
+same `result: blocked` / `reason: <symbol>` vocabulary surfaces in (1) simulation
+diagnostics (Soroban RPC `simulateTransaction` event output, `agent-tx preflight`),
+(2) the permissionless `check` / `check_detailed` preflights (§7.2) when simulated via
+RPC, and (3) the SDK telemetry listener
+([stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk)),
+whose dual-stream design combines simulation-captured blocks with committed ledger events
+into one feed precisely because a raw RPC `getEvents` listener cannot see blocks. Anyone
+building their own listener must reproduce that duality; assuming `getEvents` yields a
+complete decision history will silently miss every block.
 
 **Key fingerprints (`agent_rotated`).** A fingerprint is `sha256(pubkey)[0..8]` — the first
 8 bytes of the SHA-256 digest of the agent public key, rendered as 16 lowercase hex characters
