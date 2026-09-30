@@ -92,6 +92,72 @@ fn heartbeat_event_count(env: &Env) -> usize {
         .count()
 }
 
+/// Number of events named `name` emitted by the **most recent** top-level
+/// invocation (SPEC §9).
+///
+/// `env.events().all()` exposes one invocation's event log, not a cumulative
+/// history: a new top-level call replaces it. Assert event content directly
+/// after the call that should have produced it.
+fn event_count(env: &Env, name: &str) -> usize {
+    let want = symbol_val(name);
+    env.events()
+        .all()
+        .events()
+        .iter()
+        .filter(|e| matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&want)))
+        .count()
+}
+
+/// Was an event named `name` emitted by the most recent invocation with exactly
+/// this topic list?
+///
+/// `#[contractevent]` prepends the event name to the topic list, so `expected`
+/// starts with the event name itself — this asserts the full SPEC §9 topic
+/// layout, not just that "something" was emitted.
+fn has_event_with_topics(env: &Env, name: &str, expected: &[&str]) -> bool {
+    let want = symbol_val(name);
+    env.events()
+        .all()
+        .events()
+        .iter()
+        .filter(|e| matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&want)))
+        .any(|e| {
+            let xdr::ContractEventBody::V0(v0) = &e.body;
+            v0.topics.len() == expected.len()
+                && expected
+                    .iter()
+                    .enumerate()
+                    .all(|(i, topic)| v0.topics.get(i) == Some(&symbol_val(topic)))
+        })
+}
+
+/// The `revision` field of the only event named `name` in the most recent
+/// invocation's log (SPEC §9). Panics when the event is absent, carries no
+/// map, or has no `revision`.
+fn last_event_revision(env: &Env, name: &str) -> u64 {
+    let want = symbol_val(name);
+    let all = env.events().all();
+    let found = all
+        .events()
+        .iter()
+        .rev()
+        .find(|e| matches!(&e.body, xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&want)))
+        .unwrap_or_else(|| panic!("no `{name}` event was emitted"));
+    let xdr::ContractEventBody::V0(v0) = &found.body;
+    let ScVal::Map(Some(map)) = &v0.data else {
+        panic!("`{name}` data must be a Map");
+    };
+    let entry = map
+        .0
+        .iter()
+        .find(|e| e.key == symbol_val("revision"))
+        .unwrap_or_else(|| panic!("`{name}` data must carry revision"));
+    match entry.val {
+        ScVal::U64(revision) => revision,
+        ref other => panic!("`{name}` revision must be a U64, got {other:?}"),
+    }
+}
+
 // ── Test contracts ───────────────────────────────────────────────────────
 
 #[contract]
@@ -431,6 +497,18 @@ impl Harness {
 
     fn status(&self) -> crate::types::Status {
         PolicyEngineClient::new(&self.env, &self.guard).status()
+    }
+
+    /// The persisted rolling-window ledger (SPEC §3), or `None` when the
+    /// `Window` entry does not exist at all. Read as the contract so it sees
+    /// exactly the bytes `__check_auth` would load.
+    fn stored_window(&self) -> Option<crate::types::WindowState> {
+        self.env.as_contract(&self.guard, || {
+            self.env
+                .storage()
+                .persistent()
+                .get::<DataKey, crate::types::WindowState>(&DataKey::Window)
+        })
     }
 
     /// Did the guard emit an `auth_checked` event with `result = allowed`?
@@ -1337,6 +1415,207 @@ fn revoke_policy_is_instant_default_deny() {
     h.env.mock_all_auths();
     h.revoke_policy();
     h.transfer_expect_blocked(&recv, 5);
+}
+
+// ── revoke_policy mid-flight (issue #95) ────────────────────────────────
+//
+// SPEC §7 documents `revoke_policy` as "Removes Policy and Window ->\n// default-deny immediately", and SPEC §3's storage table makes `Window` the\n// account's only rolling spend ledger. The behaviour those two statements\n// jointly promise is *not* pinned by any test, and the interesting part is\n// precisely the interaction an admin could exploit: because the window is\n// **cleared** (not merely paused), an admin cycling revoke -> set_policy starts\n// the account on a fresh window, so spend history does not survive the cycle.\n// That is admin-attested by design (SPEC §7: "fresh window on every policy\n// change"), so the tests below pin it as intentional rather than let it read\n// as an accident.
+//
+// SPEC §4 rule 3 is the gate the cleared policy falls through to: with no\n// `Policy` stored, every context blocks with `Reason::NoPolicy`.
+
+/// Issue #95 (a): after a mid-flight revoke, the next authorization is blocked
+/// with `NoPolicy` — not merely blocked, and not blocked for some unrelated
+/// reason such as a full window. Asserted on both the enforced auth path (the
+/// agent's signature is valid, so only policy can reject it) and the
+/// permissionless pre-flight, which returns the reason as a typed value and
+/// therefore pins *which* gate fired rather than merely "it was denied".
+#[test]
+fn revoke_policy_blocks_subsequent_auth_with_no_policy() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    // An *enabled* window with real spend, so a `WindowCapExceeded` block
+    // would be the competing explanation and the assertion below is meaningful.
+    p.window_secs = 60;
+    p.window_cap = 100;
+    h.install_policy(&p);
+    h.set_time(1_000);
+    h.transfer(&recv, 80);
+    assert_eq!(h.stored_window().map(|w| w.total), Some(80));
+
+    h.env.mock_all_auths();
+    h.revoke_policy();
+    assert!(
+        PolicyEngineClient::new(&h.env, &h.guard).policy().is_none(),
+        "revoke must remove the stored policy (SPEC §7)"
+    );
+
+    // Enforced path: a correctly-signed transfer cannot authorize.
+    h.transfer_expect_blocked(&recv, 5);
+
+    // Pre-flight: the structured reason is `no_policy` (SPEC §4 rule 3), not
+    // `window_cap_exceeded` — the window was cleared along with the policy.
+    let detail = PolicyEngineClient::new(&h.env, &h.guard).check_detailed(&h.asset, &recv, &5);
+    assert_eq!(
+        detail.result,
+        CheckResult::Blocked(Symbol::new(&h.env, "no_policy"))
+    );
+
+    // SPEC §9: the pre-flight commits its `auth_checked` event with the full
+    // topic layout — `blocked` at index 1, the reason at index 2.
+    assert!(
+        has_event_with_topics(
+            &h.env,
+            "event_auth_checked",
+            &["event_auth_checked", "blocked", "no_policy"],
+        ),
+        "post-revoke pre-flight must emit auth_checked(blocked, no_policy)"
+    );
+}
+
+/// Issue #95 (b): the rolling window does not survive a revoke, and a
+/// subsequent `set_policy` therefore starts genuinely empty.
+///
+/// This is the assertion that would catch the uncleared-window defect the
+/// issue asks about: if `revoke_policy` left `Window` behind (or `set_policy`
+/// failed to reset it), the re-installed policy would inherit the 80 already
+/// spent, and the full 80-unit transfer below would be blocked by a 100-unit
+/// cap (80 + 80 > 100). It is admitted only when the ledger really is empty.
+#[test]
+fn revoke_policy_clears_the_window_even_after_spend() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.window_secs = 60;
+    p.window_cap = 100;
+    h.install_policy(&p);
+    h.set_time(1_000);
+    h.transfer(&recv, 80);
+
+    // Precondition: real spend is on the ledger, so "the window was cleared"
+    // is a claim about something that existed.
+    let spent = h
+        .stored_window()
+        .expect("an enabled window persists its ledger");
+    assert_eq!(spent.total, 80);
+    assert!(!spent.entries.is_empty());
+
+    h.env.mock_all_auths();
+    h.revoke_policy();
+    assert!(
+        h.stored_window().is_none(),
+        "revoke must remove the Window entry, not merely stop reading it (SPEC §7)"
+    );
+
+    // Re-install the identical policy. `set_policy` writes a fresh empty
+    // ledger (SPEC §7: "Resets Policy and Window"), so the account is live
+    // again on a window that does not remember the 80.
+    h.set_time(1_010);
+    h.install_policy(&p);
+
+    let fresh = h
+        .stored_window()
+        .expect("set_policy persists a fresh ledger");
+    assert_eq!(
+        fresh.total, 0,
+        "the re-installed window must not inherit prior spend"
+    );
+    assert!(
+        fresh.entries.is_empty(),
+        "no spend entries may survive revoke"
+    );
+    assert!(
+        fresh.recipients.is_empty(),
+        "no per-recipient ledger may survive revoke"
+    );
+
+    // Behavioural proof, not just a storage assertion: the full 80 is
+    // admissible again (a surviving 80 would make this 160 > 100 and block).
+    h.transfer(&recv, 80);
+    // …and the window is genuinely live again, not merely disabled: the next
+    // 80 no longer fits.
+    h.transfer_expect_blocked(&recv, 80);
+}
+
+/// Issue #95 (c): both lifecycle steps emit their event, carrying the
+/// `PolicyRevision` each step produced (SPEC §9, issue #38), so the whole
+/// cycle is auditable from the event log alone.
+///
+/// Each assertion runs immediately after the call that should have produced
+/// it, because `env.events().all()` exposes one invocation's log rather than a
+/// cumulative history.
+#[test]
+fn revoke_then_set_policy_emits_both_lifecycle_events() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.window_secs = 60;
+    p.window_cap = 100;
+
+    // Step 1: the first set_policy emits `policy_set` at revision 1.
+    h.install_policy(&p);
+    assert_eq!(
+        event_count(&h.env, "event_policy_set"),
+        1,
+        "set_policy emits exactly one policy_set event"
+    );
+    assert_eq!(
+        last_event_revision(&h.env, "event_policy_set"),
+        1,
+        "the first set_policy is revision 1 (SPEC §3)"
+    );
+
+    h.set_time(1_000);
+    h.transfer(&recv, 80);
+
+    // Step 2: the revoke emits `policy_revoked` at revision 2, and nothing else
+    // — a `policy_set` here would mean the two lifecycle events are conflated.
+    h.env.mock_all_auths();
+    h.revoke_policy();
+    assert_eq!(
+        event_count(&h.env, "event_policy_revoked"),
+        1,
+        "revoke_policy emits exactly one policy_revoked event"
+    );
+    assert_eq!(
+        event_count(&h.env, "event_policy_set"),
+        0,
+        "revoke_policy must not also emit a policy_set event"
+    );
+    assert_eq!(
+        last_event_revision(&h.env, "event_policy_revoked"),
+        2,
+        "revoke_policy increments the revision counter (SPEC §3, issue #38)"
+    );
+    // SPEC §9: neither lifecycle event carries topic fields — the name alone
+    // is the topic, so `by`/`revision` are data. An extra topic here would mean
+    // the layout drifted from the documented table.
+    assert!(
+        has_event_with_topics(&h.env, "event_policy_revoked", &["event_policy_revoked"]),
+        "event_policy_revoked must carry exactly one topic (SPEC §9)"
+    );
+
+    // Step 3: the post-revoke set_policy emits `policy_set` at revision 3 — the
+    // counter keeps marching across the revoke and is never reset.
+    h.set_time(1_010);
+    h.install_policy(&p);
+    assert_eq!(
+        event_count(&h.env, "event_policy_set"),
+        1,
+        "the post-revoke set_policy emits exactly one policy_set event"
+    );
+    assert_eq!(
+        last_event_revision(&h.env, "event_policy_set"),
+        3,
+        "the post-revoke set_policy advances the counter again (issue #38)"
+    );
+    assert!(
+        has_event_with_topics(&h.env, "event_policy_set", &["event_policy_set"]),
+        "event_policy_set must carry exactly one topic (SPEC §9)"
+    );
+
+    // The cycle is over and the account is enforcing again.
+    h.transfer(&recv, 10);
 }
 
 /// SPEC §8: the contract's own address is rejected in **all three** policy
