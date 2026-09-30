@@ -1288,6 +1288,7 @@ fn print_help() {
         "Preflight exit codes: 0=admitted, 1=blocked (signed simulation), 2=unsigned/inconclusive."
     );
     println!("Troubleshooting: See README.md 'Troubleshooting — Submission Errors' table for error mapping and concrete fix flags (--fee-multiplier, etc.).");
+    println!("The stellar CLI cannot sign auth entries for contract addresses; use agent-tx for heartbeat calls (see tools/agent-tx/README.md).");
 }
 
 // ── Read-only diagnostics (status, policy, check) ───────────────────────

@@ -434,6 +434,29 @@ cargo fmt --check
 ```
 Both builds and all three gates were re-run green on this machine during the README pass.
 
+### Download a released artifact (instead of building)
+
+Each tagged release (`v*`) publishes the contract WASM built by the
+[`release` workflow](.github/workflows/release.yml) — after the full gate
+suite (format, clippy, tests) went green — together with a SHA-256 checksum,
+a build-provenance file (git tag, commit SHA, toolchain version), and a
+CycloneDX SBOM. Prefer this over a local build when you want the exact bytes
+CI blessed:
+
+```bash
+VERSION=v0.1.0  # pick a release from the Releases page
+REPO=aigbagbobila/stellar-agent-guard-contracts
+curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm
+curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm.sha256
+sha256sum -c stellar_agent_guard_contracts.wasm.sha256
+# → stellar_agent_guard_contracts.wasm: OK
+```
+
+Then cross-check `provenance.txt` from the same release (it pins the git tag
+and commit the WASM was built from — rebuild that tag yourself and compare
+hashes for a reproducibility check) and `sbom.cdx.json` for the dependency
+inventory. See [SECURITY.md](SECURITY.md) for the full verification steps.
+
 ## How it works
 
 ```

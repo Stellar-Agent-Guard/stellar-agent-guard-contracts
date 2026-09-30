@@ -806,6 +806,56 @@ Not guarded by v1 (documented, not hidden):
 - DoS on the *account* is not possible (anyone may call read functions); policy writes are
   admin-only. The contract is unaudited; see `SECURITY.md`/README disclaimers.
 
+### 10.1 Signature binding
+
+**What the payload covers.** `__check_auth` step 1 is
+`ed25519_verify(AgentPubkey, signature_payload, sig)` — a pure signature check over a
+digest the **host** computes, never this contract:
+`sha256(HashIdPreimage::SorobanAuthorization { network_id, nonce,
+signature_expiration_ledger, invocation })`, where `invocation` is the complete root
+invocation — every auth context (target contract, function, argument values) the
+transaction will execute under this account. What the binding therefore covers:
+
+| Payload field | Bound meaning | If altered |
+|---|---|---|
+| `network_id` | chain domain | a testnet signature verifies on no other network |
+| `nonce` | single-use label, unique per address | host rejects reuse once consumed |
+| `signature_expiration_ledger` | validity bound in ledgers | entry fails after that ledger passes |
+| `invocation` (root) | contract + function + args of every context | digest changes ⇒ signature no longer verifies |
+
+**Replay analysis.**
+
+- *Across transactions: impossible by construction.* A signature captured for tx A
+  verifies only against A's digest. Replaying it inside tx B's auth entry makes the
+  host recompute B's digest — different invocation, nonce, or expiry ⇒ different bytes
+  ⇒ `ed25519_verify` traps **before** any policy evaluation, so a replayed signature
+  never reaches the decision table. Pinned by
+  `captured_signature_cannot_authorize_different_tx` and
+  `check_auth_binds_signature_to_the_exact_payload` (`src/integration_tests.rs`).
+- *The same transaction twice: host-side.* A byte-identical resubmission reuses A's
+  nonce (unique per address, rejected by the host after first consumption) and dies at
+  `signature_expiration_ledger` regardless. Division of labor, stated plainly: nonce
+  and expiry replay defense is **host** construction — this contract only ever checks
+  the signature over the digest the host hands it.
+- *Agent signature ≠ admin authority.* An agent signature clears step 1 only for auth
+  entries whose credentials address is **this account**. The admin write path
+  (`set_policy`, `revoke_policy`, `freeze`, `unfreeze`, `rotate_agent_key`) runs under
+  `require_auth(Admin)` — a different address, a different auth entry, a different
+  payload — and an agent-signed entry never satisfies it
+  (`agent_signature_does_not_confer_admin_authority`). The converse is the
+  admin-compromise bullet above: the admin cannot produce the agent's signature either,
+  so it may widen policy but still cannot move funds.
+
+**Leaked payload + sig, mid-flight.** Anyone holding `(payload, sig)` before inclusion
+can submit **exactly** tx A themselves — front-running the already-authorized
+invocation. That is not an escalation: amount, recipient, and function are inside the
+digest, so nothing can be edited without invalidating the signature; policy is
+re-evaluated at execution, so caps, allowlists, pause, and freeze still bind the
+replayed transaction; the nonce is consumed on first use; and
+`signature_expiration_ledger` bounds how long the leak stays usable. A leaked pair
+cannot authorize a policy change, a different recipient, or a larger amount — those
+are different digests, and the admin path never consults the agent's signature at all.
+
 ---
 
 ## 11. Testnet proof plan (five scenarios)

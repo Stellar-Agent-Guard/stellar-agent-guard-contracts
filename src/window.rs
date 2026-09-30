@@ -390,17 +390,41 @@ mod tests {
     }
 
     #[test]
-    fn admit_coalesces_same_second() {
+    fn admit_coalesces_three_same_second_spends() {
         let env = Env::default();
-        let mut total = 0i128;
-        let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
-        admit_to_ledger(&mut total, &mut entries, 100, 3);
-        admit_to_ledger(&mut total, &mut entries, 100, 4);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries.first().unwrap().amount, 7);
-        admit_to_ledger(&mut total, &mut entries, 101, 5);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(total, 12);
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit(100, 3);
+        ledger.admit(100, 4);
+        ledger.admit(100, 5);
+        assert_eq!(ledger.entries.len(), 1);
+        assert_eq!(ledger.entries.get(0).unwrap().ts, 100);
+        assert_eq!(ledger.entries.get(0).unwrap().amount, 12);
+
+        ledger.admit(101, 6);
+        assert_eq!(ledger.entries.len(), 2);
+        assert_eq!(ledger.entries.get(0).unwrap().ts, 100);
+        assert_eq!(ledger.entries.get(0).unwrap().amount, 12);
+        assert_eq!(ledger.entries.get(1).unwrap().ts, 101);
+        assert_eq!(ledger.entries.get(1).unwrap().amount, 6);
+    }
+
+    #[test]
+    fn prune_then_admit_coalesces_with_trailing_same_second_entry() {
+        let env = Env::default();
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit(0, 3);
+        ledger.admit(100, 7);
+        assert_eq!(ledger.entries.len(), 2);
+
+        // At the exact expiry boundary, the oldest entry is pruned before
+        // the new spend is admitted at the trailing entry's second.
+        ledger.prune(100, 100);
+        ledger.admit(100, 11);
+
+        assert_eq!(ledger.entries.len(), 1);
+        assert_eq!(ledger.entries.get(0).unwrap().ts, 100);
+        assert_eq!(ledger.entries.get(0).unwrap().amount, 18);
+        assert_eq!(ledger.total, 18);
     }
 
     #[test]
