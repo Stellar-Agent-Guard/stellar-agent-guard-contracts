@@ -127,6 +127,7 @@ TTL on every write; see §9.5).
 | `Window` | `WindowState` | persistent | rolling spend ledger for asset transfers (global + per-recipient) |
 | `LastHeartbeat` | `u64` | persistent | unix seconds of last agent heartbeat (0 = never) |
 | `AdminFrozen` | `bool` | persistent | admin-initiated freeze flag |
+| `PolicyRevision` | `u64` | persistent | policy sequence number; incremented on every `set_policy`/`revoke_policy`, stamped into `policy_set`/`policy_revoked`/`auth_checked` events (§9, issue #38) |
 
 ```rust
 #[contracttype]
@@ -806,13 +807,27 @@ filtering by the SDK listener.
 
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
-| `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | (none) | every `__check_auth` / `check` decision |
+| `auth_checked` | `result: Symbol` (`allowed`/`blocked`), `reason: Symbol` | `context_index: u32`, `revision: u64` — the `PolicyRevision` in force at decision time | every `__check_auth` / `check` decision |
 | `heartbeat` | (none) | `at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
 | `frozen` | (none) | `by: Address` | admin freeze |
 | `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
-| `policy_set` / `policy_revoked` | (none) | `by: Address` | admin policy changes |
+| `policy_set` / `policy_revoked` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced | admin policy changes |
 | `agent_rotated` | (none) | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
+
+**Policy revision join key (issue #38).** `PolicyRevision` is a persistent
+instance-stored counter (`DataKey::PolicyRevision`, §3) incremented by every
+`set_policy` and `revoke_policy` — starting at 1 after the first `set_policy`
+and never reset by a revoke. `status()` exposes it as `policy_revision`, and
+the `policy_set`, `policy_revoked`, and `auth_checked` events stamp it as
+additive `revision` data. Telemetry consumers can therefore join "which policy
+was in force when this transfer was admitted" on the counter instead of
+wall-clock joins, which are wrong the instant an admin makes two `set_policy`
+calls within one ledger. The fields are additive data on unchanged topics, so
+decoders that ignore unknown map keys keep working; SDK/dashboard decoders
+surfacing the new field are cross-repo follow-ups. Two `auth_checked` events
+sharing a revision were evaluated under the same policy generation; the
+`policy_hash` (§7.3) distinguishes *which* policy that generation installed.
 
 Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
 

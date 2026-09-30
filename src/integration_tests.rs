@@ -1547,31 +1547,39 @@ fn batch_events_emit_in_order_with_context_index() {
 
     assert_eq!(auth_events.len(), 3);
 
-    let build_map = |idx: u32| {
-        let key = soroban_sdk::xdr::ScVal::Symbol(
-            soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("context_index")).unwrap(),
-        );
-        let val = soroban_sdk::xdr::ScVal::U32(idx);
-        soroban_sdk::xdr::ScVal::Map(Some(soroban_sdk::xdr::ScMap(
-            soroban_sdk::xdr::VecM::try_from(std::vec::Vec::from([soroban_sdk::xdr::ScMapEntry {
-                key,
-                val,
-            }]))
+    let build_map = |idx: u32, revision: u64| {
+        use soroban_sdk::xdr::{ScMap, ScMapEntry, ScSymbol, ScVal as XdrScVal, VecM};
+        let entry = |key: &str, val: XdrScVal| ScMapEntry {
+            key: XdrScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from(key)).unwrap()),
+            val,
+        };
+        // `auth_checked` data: {context_index, revision} (issue #38: the
+        // policy revision in force at decision time joins the event to the
+        // policy generation that produced it).
+        XdrScVal::Map(Some(ScMap(
+            VecM::try_from(std::vec::Vec::from([
+                entry("context_index", XdrScVal::U32(idx)),
+                entry("revision", XdrScVal::U64(revision)),
+            ]))
             .unwrap(),
         )))
     };
 
+    // The policy was installed once, so every decision in this batch runs
+    // under revision 1 (issue #38).
+    let revision = 1;
+
     // ctx1: allowed
     assert_eq!(auth_events[0].0.get(1).unwrap(), &want_allowed);
-    assert_eq!(auth_events[0].1, build_map(0)); // context_index
+    assert_eq!(auth_events[0].1, build_map(0, revision));
 
     // ctx2: blocked, PerTxCapExceeded
     assert_eq!(auth_events[1].0.get(1).unwrap(), &want_blocked);
-    assert_eq!(auth_events[1].1, build_map(1));
+    assert_eq!(auth_events[1].1, build_map(1, revision));
 
     // ctx3: allowed (even though the batch fails, decide evaluates all contexts and emits for all)
     assert_eq!(auth_events[2].0.get(1).unwrap(), &want_allowed);
-    assert_eq!(auth_events[2].1, build_map(2));
+    assert_eq!(auth_events[2].1, build_map(2, revision));
 }
 
 #[test]

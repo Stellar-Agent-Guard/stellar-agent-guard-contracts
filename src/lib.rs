@@ -19,6 +19,9 @@ mod types;
 mod window;
 
 #[cfg(test)]
+mod event_audit_tests;
+
+#[cfg(test)]
 mod integration_tests;
 
 #[cfg(test)]
@@ -42,6 +45,9 @@ use window::Ledger;
 //    vocabulary without decoding payloads it does not need.
 
 /// Every decision: topic[0]=result (`allowed`/`blocked`), topic[1]=reason.
+/// Data carries `context_index` plus `revision` — the `PolicyRevision`
+/// counter at decision time, so telemetry can join each admission/rejection
+/// to the exact policy generation in force (issue #38).
 #[contractevent]
 #[derive(Clone)]
 struct EventAuthChecked {
@@ -50,6 +56,7 @@ struct EventAuthChecked {
     #[topic]
     reason: Symbol,
     context_index: u32,
+    revision: u64,
 }
 
 /// Agent heartbeat: data `at` (unix seconds).
@@ -84,16 +91,28 @@ struct EventUnfrozen {
     rearmed_dms: bool,
 }
 
+/// Admin policy install: data `by` (the admin address that acted) plus
+/// `revision` — the `PolicyRevision` value this `set_policy` produced (the
+/// counter is incremented before the event is emitted), so telemetry can
+/// correlate every subsequent `auth_checked` event to the policy generation
+/// this call installed (issue #38).
 #[contractevent]
 #[derive(Clone)]
 struct EventPolicySet {
     by: Address,
+    revision: u64,
 }
 
+/// Admin policy revoke: data `by` (the admin address that acted) plus
+/// `revision` — the `PolicyRevision` value this `revoke_policy` produced.
+/// `auth_checked` events after this one carry this revision while the account
+/// sits in default-deny, making the post-revoke rejections attributable
+/// (issue #38).
 #[contractevent]
 #[derive(Clone)]
 struct EventPolicyRevoked {
     by: Address,
+    revision: u64,
 }
 
 /// Agent key rotation: data `by` (the admin that acted) plus truncated
@@ -289,6 +308,13 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
 
 // ── Event emission ───────────────────────────────────────────────────────
 
+/// Reads the current `PolicyRevision` counter (0 before the first policy
+/// action). Event emission never mutates state, so this is a bare read with
+/// no TTL-side write beyond the standard §9.5 thresholded refresh.
+fn current_revision(env: &Env) -> u64 {
+    persist_get::<u64>(env, &DataKey::PolicyRevision).unwrap_or(0)
+}
+
 fn emit_auth(env: &Env, allowed: bool, reason: Option<Error>, context_index: u32) {
     let res = if allowed { "allowed" } else { "blocked" };
     let reason = reason.map_or("", |e| e.reason());
@@ -296,6 +322,7 @@ fn emit_auth(env: &Env, allowed: bool, reason: Option<Error>, context_index: u32
         result: Symbol::new(env, res),
         reason: Symbol::new(env, reason),
         context_index,
+        revision: current_revision(env),
     }
     .publish(env);
 }
@@ -318,10 +345,18 @@ fn emit_unfrozen(env: &Env, by: &Address, rearmed_dms: bool) {
     .publish(env);
 }
 fn emit_policy_set(env: &Env, by: &Address) {
-    EventPolicySet { by: by.clone() }.publish(env);
+    EventPolicySet {
+        by: by.clone(),
+        revision: current_revision(env),
+    }
+    .publish(env);
 }
 fn emit_policy_revoked(env: &Env, by: &Address) {
-    EventPolicyRevoked { by: by.clone() }.publish(env);
+    EventPolicyRevoked {
+        by: by.clone(),
+        revision: current_revision(env),
+    }
+    .publish(env);
 }
 /// Compact key fingerprint: the first 8 bytes of `SHA-256(pubkey)`. Rendered
 /// as 16 lowercase hex characters off-chain (greppable, small event payload);
