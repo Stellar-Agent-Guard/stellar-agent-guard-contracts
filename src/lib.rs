@@ -38,7 +38,10 @@ pub use types::{
     CheckDetail, Error, PolicyConfig, ProtocolRule, RecipientCap, RecipientWindowState,
     ValidationOutcome,
 };
-use types::{CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_RECIPIENT_ENTRIES};
+use types::{
+    CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_DMS_GRACE_SECS,
+    MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
+};
 use window::Ledger;
 
 // ── Contract events (SPEC §9). Each event is its own type; topic layout
@@ -228,14 +231,6 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     if cfg.window_cap > 0 && cfg.window_secs == 0 {
         return Err(PolicyRuleId::WindowRequiresWidth);
     }
-    // Sane upper bounds on every duration knob (issue #34): `window_secs` and
-    // `dms_grace_secs` are `u64`, so a seconds/millis mix-up or a fat-fingered
-    // `u64::MAX` silently disables pruning (or the dead-man switch) forever
-    // while still reading as a "valid" config. Values beyond ~10 years are
-    // rejected outright — fail-closed, policy unchanged.
-    if cfg.window_secs > MAX_WINDOW_SECS || cfg.dms_grace_secs > MAX_DMS_GRACE_SECS {
-        return Err(Error::InvalidConfig);
-    }
     if cfg.active_until != 0 && cfg.active_until <= cfg.active_from {
         return Err(PolicyRuleId::ActiveWindowOrder);
     }
@@ -325,6 +320,16 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
                 }
             }
         }
+    }
+    // Sane upper bounds on every duration knob (issue #34): `window_secs` and
+    // `dms_grace_secs` are `u64`, so a seconds/millis mix-up or a fat-fingered
+    // `u64::MAX` silently disables pruning (or the dead-man switch) forever
+    // while still reading as a "valid" config. Values beyond ~10 years are
+    // rejected outright — fail-closed, policy unchanged. Evaluated last so
+    // the `PolicyRuleId` variant ordinals of the previously documented rules
+    // stay wire-stable.
+    if cfg.window_secs > MAX_WINDOW_SECS || cfg.dms_grace_secs > MAX_DMS_GRACE_SECS {
+        return Err(PolicyRuleId::DurationExceedsBound);
     }
     Ok(())
 }
@@ -879,7 +884,8 @@ pub mod testutils {
     pub use crate::types::policy_canonical_encoding;
     pub use crate::types::{
         CheckResult, DataKey, Error, PolicyConfig, PolicyRuleId, ProtocolRule, RecipientCap,
-        RecipientWindowState, Status, ValidationOutcome, WindowState,
+        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_DMS_GRACE_SECS,
+        MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
     };
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};

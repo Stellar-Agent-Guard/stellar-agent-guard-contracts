@@ -63,6 +63,7 @@ enum PolicyRuleId
   RecipientAllowAndBlocked
   ProtocolContractDuplicate
   ProtocolFnListInvalid
+  DurationExceedsBound
 enum ValidationOutcome
   Valid
   Invalid(PolicyRuleId)

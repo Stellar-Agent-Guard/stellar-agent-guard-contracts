@@ -875,6 +875,7 @@ order:
 | `RecipientAllowAndBlocked` | a recipient in both `recipients` and `blocked_recipients` |
 | `ProtocolContractDuplicate` | the same contract in two protocol rules |
 | `ProtocolFnListInvalid` | a protocol rule's fn list empty or containing duplicates |
+| `DurationExceedsBound` | `window_secs` or `dms_grace_secs` over `MAX_WINDOW_SECS` (`315_360_000` s ≈ 10 years; evaluated last so the other variant ordinals stay wire-stable) |
 
 `validate_policy` is a read: no auth, no events, no state writes (read-path
 TTL effects in §9.5 still apply). The `InvalidConfig` code itself is

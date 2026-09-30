@@ -24,6 +24,15 @@ pub const MAX_WINDOW_ENTRIES: usize = 8192;
 /// bounded and predictable (SPEC §3 / §8).
 pub const MAX_RECIPIENT_ENTRIES: usize = 256;
 
+/// Upper bound on `window_secs` and `dms_grace_secs` (issue #34). `3_650` days
+/// ≈ 10 years: far beyond any legitimate rolling spend window or dead-man
+/// grace, while still catching the classic seconds/milliseconds confusion
+/// (e.g. a 90-day window passed as `7_776_000_000` ms) and "effectively
+/// disables pruning forever" configs such as `u64::MAX`.
+pub const MAX_WINDOW_SECS: u64 = 315_360_000; // 86_400 × 3_650
+/// Same upper bound as `MAX_WINDOW_SECS`, applied to the DMS grace.
+pub const MAX_DMS_GRACE_SECS: u64 = MAX_WINDOW_SECS;
+
 /// Which SPEC §8 validation rule rejected a policy (issue #35). One variant
 /// per distinct rule; variants are listed in the order `validate_config`
 /// evaluates them, and `validate_policy` reports the **first** rule that
@@ -57,6 +66,10 @@ pub enum PolicyRuleId {
     ProtocolContractDuplicate,
     /// A protocol rule's fn list is empty or contains duplicates.
     ProtocolFnListInvalid,
+    /// `window_secs` or `dms_grace_secs` exceeds `MAX_WINDOW_SECS`
+    /// (`315_360_000` s ≈ 10 years; issue #34). Evaluated after the other
+    /// rules so the previously documented variant ordinals stay wire-stable.
+    DurationExceedsBound,
 }
 
 /// Result of the `validate_policy` read (issue #35): whether a candidate
