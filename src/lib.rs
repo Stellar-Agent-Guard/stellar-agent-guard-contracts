@@ -36,11 +36,9 @@ use soroban_sdk::{
 pub use types::NO_POLICY_DIGEST;
 pub use types::{
     CheckDetail, Error, PolicyConfig, ProtocolRule, RecipientCap, RecipientWindowState,
+    ValidationOutcome,
 };
-use types::{
-    CheckResult, DataKey, Status, WindowState, MAX_DMS_GRACE_SECS, MAX_RECIPIENT_ENTRIES,
-    MAX_WINDOW_SECS,
-};
+use types::{CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_RECIPIENT_ENTRIES};
 use window::Ledger;
 
 // ── Contract events (SPEC §9). Each event is its own type; topic layout
@@ -217,12 +215,18 @@ fn has_dup<T: PartialEq + TryFromVal<Env, Val> + IntoVal<Env, Val>>(
     false
 }
 
-fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
+/// Evaluates every SPEC §8 validation rule against `cfg` and returns the
+/// **first** rule that fails (rules are checked in the documented §8 order,
+/// which the `PolicyRuleId` variant order mirrors), or `Ok(())` when every
+/// rule passes. Pure logic over the candidate config — no storage access
+/// beyond `env.current_contract_address()` — so the `validate_policy` read
+/// can call it without touching state (issue #35).
+fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId> {
     if cfg.per_tx_cap < 0 || cfg.window_cap < 0 {
-        return Err(Error::InvalidConfig);
+        return Err(PolicyRuleId::AmountSign);
     }
     if cfg.window_cap > 0 && cfg.window_secs == 0 {
-        return Err(Error::InvalidConfig);
+        return Err(PolicyRuleId::WindowRequiresWidth);
     }
     // Sane upper bounds on every duration knob (issue #34): `window_secs` and
     // `dms_grace_secs` are `u64`, so a seconds/millis mix-up or a fat-fingered
@@ -233,35 +237,35 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
         return Err(Error::InvalidConfig);
     }
     if cfg.active_until != 0 && cfg.active_until <= cfg.active_from {
-        return Err(Error::InvalidConfig);
+        return Err(PolicyRuleId::ActiveWindowOrder);
     }
     let self_addr = env.current_contract_address();
-    if contains_addr(&cfg.assets, &self_addr) {
-        return Err(Error::InvalidConfig);
-    }
-    for i in 0..cfg.protocols.len() {
-        if let Some(rule) = cfg.protocols.get(i) {
-            if rule.contract == self_addr {
-                return Err(Error::InvalidConfig);
-            }
-        }
-    }
     // The deployed address is rejected in all three lists: an asset/protocol
     // self-entry is a nonsensical allowlist (self-calls are governed by the
     // fixed §6.1 rule, not policy), and a self-recipient is a no-op loop that
     // almost certainly signals a mis-pasted address. `self_addr` is fixed at
     // deployment (known before `initialize`), and `set_policy` can only run
     // post-initialize, so this always compares against the real contract ID.
+    if contains_addr(&cfg.assets, &self_addr) {
+        return Err(PolicyRuleId::SelfAddressInList);
+    }
+    for i in 0..cfg.protocols.len() {
+        if let Some(pr) = cfg.protocols.get(i) {
+            if pr.contract == self_addr {
+                return Err(PolicyRuleId::SelfAddressInList);
+            }
+        }
+    }
     if contains_addr(&cfg.recipients, &self_addr)
         || contains_addr(&cfg.blocked_recipients, &self_addr)
     {
-        return Err(Error::InvalidConfig);
+        return Err(PolicyRuleId::SelfAddressInList);
     }
     if has_dup(env, &cfg.assets)
         || has_dup(env, &cfg.recipients)
         || has_dup(env, &cfg.blocked_recipients)
     {
-        return Err(Error::InvalidConfig);
+        return Err(PolicyRuleId::DuplicateAddressInList);
     }
     for i in 0..cfg.recipient_window_caps.len() {
         for j in (i + 1)..cfg.recipient_window_caps.len() {
@@ -270,7 +274,7 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
                 cfg.recipient_window_caps.get(j),
             ) {
                 if a.recipient == b.recipient {
-                    return Err(Error::InvalidConfig);
+                    return Err(PolicyRuleId::DuplicateRecipientCap);
                 }
             }
         }
@@ -279,20 +283,20 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
         || (cfg.recipient_window_caps.len() as usize) > MAX_RECIPIENT_ENTRIES
         || (cfg.blocked_recipients.len() as usize) > MAX_RECIPIENT_ENTRIES
     {
-        return Err(Error::InvalidConfig);
+        return Err(PolicyRuleId::RecipientListTooLong);
     }
     for i in 0..cfg.recipient_window_caps.len() {
         if let Some(rc) = cfg.recipient_window_caps.get(i) {
             if rc.cap < 0 {
-                return Err(Error::InvalidConfig);
+                return Err(PolicyRuleId::RecipientCapSign);
             }
             if rc.cap > 0 && cfg.window_secs == 0 {
-                return Err(Error::InvalidConfig);
+                return Err(PolicyRuleId::WindowRequiresWidth);
             }
             // Same rule as `recipients`: a self-addressed cap entry is a
             // meaningless no-op loop.
             if rc.recipient == self_addr {
-                return Err(Error::InvalidConfig);
+                return Err(PolicyRuleId::SelfAddressInList);
             }
         }
     }
@@ -300,29 +304,37 @@ fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
     for i in 0..cfg.recipients.len() {
         if let Some(recipient) = cfg.recipients.get(i) {
             if contains_addr(&cfg.blocked_recipients, &recipient) {
-                return Err(Error::InvalidConfig);
+                return Err(PolicyRuleId::RecipientAllowAndBlocked);
             }
         }
     }
     let mut contracts: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(env);
     for i in 0..cfg.protocols.len() {
-        if let Some(rule) = cfg.protocols.get(i) {
+        if let Some(pr) = cfg.protocols.get(i) {
             for j in 0..contracts.len() {
                 if let Some(existing) = contracts.get(j) {
-                    if existing == rule.contract {
-                        return Err(Error::InvalidConfig);
+                    if existing == pr.contract {
+                        return Err(PolicyRuleId::ProtocolContractDuplicate);
                     }
                 }
             }
-            contracts.push_back(rule.contract.clone());
-            if let Some(fns) = &rule.fns {
+            contracts.push_back(pr.contract.clone());
+            if let Some(fns) = &pr.fns {
                 if fns.is_empty() || has_dup(env, fns) {
-                    return Err(Error::InvalidConfig);
+                    return Err(PolicyRuleId::ProtocolFnListInvalid);
                 }
             }
         }
     }
     Ok(())
+}
+
+/// SPEC §8 gate used by `set_policy`. Translates the failing §8 rule into the
+/// single stable `InvalidConfig` error code — deliberately unchanged by
+/// issue #35 so the on-chain error surface (and every consumer matching on
+/// it) stays byte-compatible.
+fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
+    first_failing_rule(env, cfg).map_err(|_| Error::InvalidConfig)
 }
 
 // ── Event emission ───────────────────────────────────────────────────────
@@ -565,6 +577,28 @@ impl PolicyEngine {
                 let encoding = crate::types::policy_canonical_encoding(&env, &cfg);
                 env.crypto().sha256(&encoding).into()
             }
+        }
+    }
+
+    /// Dry-runs `set_policy` validation against a candidate policy and reports
+    /// **which** SPEC §8 rule would reject it (issue #35): `Valid` when every
+    /// rule passes, otherwise `Invalid(rule)` naming the first failing rule,
+    /// in the documented §8 evaluation order. Read-only: no auth, no events,
+    /// no writes (beyond the standard §9.5 TTL refresh of read entries). The
+    /// on-chain rejection path is unchanged — `set_policy` still panics with
+    /// the single stable `InvalidConfig` code; this read is the identifiable
+    /// off-chain counterpart so SDKs and dashboards can preflight a policy
+    /// and pinpoint the offending field instead of guessing from one opaque
+    /// error code (see SPEC §8 for the rule → `PolicyRuleId` mapping).
+    ///
+    /// Evaluates the *candidate* argument — never the installed policy — and,
+    /// like `set_policy`, is only meaningful post-`initialize` (the self-list
+    /// rules compare against the contract's own address).
+    #[allow(clippy::must_use_candidate)] // public read surface
+    pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome {
+        match first_failing_rule(&env, &config) {
+            Ok(()) => ValidationOutcome::Valid,
+            Err(rule) => ValidationOutcome::Invalid(rule),
         }
     }
 
@@ -844,8 +878,8 @@ pub mod testutils {
     pub use crate::engine::{contains_addr, decide, parse_call, AccountState, Decision};
     pub use crate::types::policy_canonical_encoding;
     pub use crate::types::{
-        CheckResult, DataKey, Error, PolicyConfig, ProtocolRule, RecipientCap,
-        RecipientWindowState, Status, WindowState,
+        CheckResult, DataKey, Error, PolicyConfig, PolicyRuleId, ProtocolRule, RecipientCap,
+        RecipientWindowState, Status, ValidationOutcome, WindowState,
     };
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};

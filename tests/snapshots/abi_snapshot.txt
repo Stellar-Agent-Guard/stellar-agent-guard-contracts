@@ -39,6 +39,7 @@ pub fn freeze(env: Env)
 pub fn unfreeze(env: Env)
 pub fn policy(env: Env) -> Option<PolicyConfig>
 pub fn policy_hash(env: Env) -> BytesN<32>
+pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
 pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus
 pub fn status(env: Env) -> Status
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
@@ -50,6 +51,21 @@ enum DmsHealthStatus
   Ok
   Warn
   Expired
+enum PolicyRuleId
+  AmountSign
+  WindowRequiresWidth
+  ActiveWindowOrder
+  SelfAddressInList
+  DuplicateAddressInList
+  DuplicateRecipientCap
+  RecipientListTooLong
+  RecipientCapSign
+  RecipientAllowAndBlocked
+  ProtocolContractDuplicate
+  ProtocolFnListInvalid
+enum ValidationOutcome
+  Valid
+  Invalid(PolicyRuleId)
 struct WindowState
   total: i128
   entries: Vec<SpendEntry>

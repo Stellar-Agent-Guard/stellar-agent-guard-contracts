@@ -24,14 +24,52 @@ pub const MAX_WINDOW_ENTRIES: usize = 8192;
 /// bounded and predictable (SPEC §3 / §8).
 pub const MAX_RECIPIENT_ENTRIES: usize = 256;
 
-/// Upper bound on `window_secs` and `dms_grace_secs` (issue #34). `3_650` days
-/// ≈ 10 years: far beyond any legitimate rolling spend window or dead-man
-/// grace, while still catching the classic seconds/milliseconds confusion
-/// (e.g. a 90-day window passed as `7_776_000_000` ms) and "effectively
-/// disables pruning forever" configs such as `u64::MAX`.
-pub const MAX_WINDOW_SECS: u64 = 315_360_000; // 86_400 × 3_650
-/// Same upper bound as `MAX_WINDOW_SECS`, applied to the DMS grace.
-pub const MAX_DMS_GRACE_SECS: u64 = MAX_WINDOW_SECS;
+/// Which SPEC §8 validation rule rejected a policy (issue #35). One variant
+/// per distinct rule; variants are listed in the order `validate_config`
+/// evaluates them, and `validate_policy` reports the **first** rule that
+/// fails.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyRuleId {
+    /// `per_tx_cap` or `window_cap` is negative.
+    AmountSign,
+    /// `window_cap != 0` (or a per-recipient cap `> 0`) requires
+    /// `window_secs != 0`.
+    WindowRequiresWidth,
+    /// `active_until != 0 && active_until <= active_from`.
+    ActiveWindowOrder,
+    /// The contract's own address appears in `assets`, `protocols`,
+    /// `recipients`, `blocked_recipients`, or a `recipient_window_caps` entry.
+    SelfAddressInList,
+    /// A duplicate address within `assets`, `recipients`,
+    /// `blocked_recipients`, or a duplicate fn name within one protocol rule.
+    DuplicateAddressInList,
+    /// The same recipient appears twice in `recipient_window_caps`.
+    DuplicateRecipientCap,
+    /// `recipients`, `recipient_window_caps`, or `blocked_recipients`
+    /// exceeds `MAX_RECIPIENT_ENTRIES`.
+    RecipientListTooLong,
+    /// A per-recipient cap is negative.
+    RecipientCapSign,
+    /// A recipient is listed in both `recipients` and `blocked_recipients`.
+    RecipientAllowAndBlocked,
+    /// The same contract appears in two protocol rules.
+    ProtocolContractDuplicate,
+    /// A protocol rule's fn list is empty or contains duplicates.
+    ProtocolFnListInvalid,
+}
+
+/// Result of the `validate_policy` read (issue #35): whether a candidate
+/// policy would pass `set_policy` and, if not, which §8 rule fails first.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValidationOutcome {
+    /// Every §8 rule passes; `set_policy` would accept this policy.
+    Valid,
+    /// The policy would be rejected; the payload names the first failing
+    /// §8 rule (rules are evaluated in §8 order).
+    Invalid(PolicyRuleId),
+}
 
 /// Per-policy rolling spend ledger for SAC asset transfers and protocol call counts.
 #[contracttype]
