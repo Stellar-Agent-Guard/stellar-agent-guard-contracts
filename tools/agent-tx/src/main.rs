@@ -1060,8 +1060,8 @@ mod tests {
         
         // Add dms_grace_secs (u64) field
         policy_map_entries.push(ScMapEntry {
-            key: ScVal::Symbol(ScSymbol(stellar_xdr::VecM::try_from(b"dms_grace_secs".to_vec()).unwrap())),
-            val: ScVal::U64(Uint64(3600)), // 1 hour grace period
+            key: ScVal::Symbol(ScSymbol("dms_grace_secs".try_into().unwrap())),
+            val: ScVal::U64(3600), // 1 hour grace period
         });
         
         let policy_map = ScMap(
