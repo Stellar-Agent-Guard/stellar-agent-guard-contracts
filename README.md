@@ -85,9 +85,7 @@ non-custodial, no proxy wrappers, tested end-to-end on testnet.
 
 ## Enforcement scope — read this before relying on the caps
 
-Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls, per-call amount/recipient limits are not yet enforced — full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing).
-
-This boundary is an inherent property of the platform (the auth context does not expose arbitrary call arguments generically), not a gap this project hides or overclaims. The classification that produces this boundary (`AssetTransfer` vs `Protocol` vs `Unknown` default-deny) is spelled out in SPEC §6.
+Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces window and pause state, but per-call amount/recipient limits are not yet enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered — full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing). Elaborated with tables in [docs/enforcement-scope.md](docs/enforcement-scope.md).
 
 ## Quick Start
 
@@ -96,7 +94,7 @@ This boundary is an inherent property of the platform (the auth context does not
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 46 tests, isolated (no network)
+cargo test                                      # 68 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only)
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -159,6 +157,7 @@ starts the dead-man-switch clock at install time (a fresh policy gets full grace
 | `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`) |
 | `recipients` | `Vec<Address>` | allowed SAC transfer destinations |
 | `recipient_window_caps` | `Vec<RecipientCap>` | per-recipient rolling-window cap overrides; recipients not listed use the global `window_cap` |
+| `blocked_recipients` | `Vec<Address>` | denied SAC transfer destinations; checked before the allowlist and `allow_any_recipient` |
 | `allow_any_recipient` | `bool` | escape hatch: skip the recipient allowlist (caps still apply) |
 | `active_from` / `active_until` | `u64` | active window (unix seconds); `0` = unrestricted |
 | `paused` | `bool` | admin kill switch |
@@ -180,10 +179,12 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 ```
 Other validation rules (SPEC §8): negative caps, `window_cap > 0` or a positive
 `recipient_window_caps` entry with `window_secs == 0`, duplicate
-assets/recipients/protocol contracts, duplicate recipients in
-`recipient_window_caps`, more than 256 recipients or per-recipient cap entries,
-empty per-protocol fn lists, or the self-address in
-`assets`/`protocols`/`recipients` all fail with `InvalidConfig`.
+assets/recipients/blocked_recipients/protocol contracts, duplicate recipients in
+`recipient_window_caps`, a non-empty intersection between `recipients` and
+`blocked_recipients`, more than 256 `assets`, `protocols`, or `recipients` (and more
+than 256 `blocked_recipients` or per-recipient cap entries), empty per-protocol fn
+lists, or the self-address in `assets`/`protocols`/`recipients`/`blocked_recipients`
+all fail with `InvalidConfig`.
 
 Per-asset caps are additive: an absent `per_asset_caps` entry (or an empty
 vector) leaves the global `per_tx_cap` in force for every asset, so existing
@@ -318,11 +319,30 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 #    "window_cap":"150","window_secs":60}
 ```
 
+### `policy_hash` (read) — cheap drift detection
+```rust
+pub fn policy_hash(env: Env) -> BytesN<32>
+```
+No auth. Returns the SHA-256 over the canonical (ScVal XDR)
+encoding of the installed policy, so SDKs/dashboards can detect policy drift by comparing
+one value instead of shipping and diffing the full `PolicyConfig`, and can record the hash
+alongside `auth_checked` events as a tamper-evident log anchor. With no policy installed the
+read returns the documented sentinel `NO_POLICY_DIGEST` = `sha256("")`
+(`e3b0c442…b855`) — never a trap; `revoke_policy()` restores it. The encoding, field order,
+and sentinel are pinned in [SPEC §7.3](SPEC.md#73-policy-hash--cheap-drift-detection-policy_hash)
+and locked by `tests/policy_hash_encoding.rs`; off-chain, reproduce the hash by SHA-256-ing
+the XDR bytes of the same policy value your SDK builds for `set_policy`.
+
 ### `status` (read)
 ```rust
 pub fn status(env: Env) -> Status
 ```
-No auth. Returns `{ has_policy, admin_frozen, heartbeat_expired, last_heartbeat, now }`. When
+No auth. Returns `{ has_policy, admin_frozen, heartbeat_expired, last_heartbeat, now }` plus
+the additive operational fields `paused` (the policy's kill switch; `false` with no policy),
+`window_remaining` (global `window_cap - spent` on the pruned ledger; `null` when the global
+cap is disabled — mirrors `check_detailed`'s `remaining_window` for recipients without an
+override), and `outside_active_window` (`now` outside the policy's `active_from`/`active_until`
+bounds, both inclusive; `false` with no policy or an unrestricted window). When
 submitted on-ledger, this read may extend persistent-entry TTLs and incur rent; simulation does
 not persist those extensions (SPEC §9.5).
 Verified live:
@@ -335,10 +355,15 @@ Note the deployed account now reads `heartbeat_expired: true` — the 60s DMS gr
 after the Phase-1 fixture runs, exactly as the design specifies: a silent account freezes
 itself with zero transactions.
 
-### `check` (read / pre-flight)
+### `check` — Preflight / simulate a transfer (read, permissionless)
 ```rust
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
 ```
+> **SDK discoverability alias:** `check` is the permissionless **preflight** /
+> **simulate** entrypoint — search for "preflight", "simulate", or
+> `simulate_transfer` to find this section. These are documentation aliases
+> only: the on-chain ABI is frozen as `check` (and `check_detailed`); there is
+> no `simulate_transfer` function to invoke.
 No auth. A pre-flight replica of the SAC-transfer decision path: lets agents/SDKs simulate a
 transfer *before* signing, emitting the same `auth_checked` events as an in-path decision so
 telemetry sees one vocabulary. Submitting it on-ledger may extend persistent-entry TTLs and
@@ -351,6 +376,16 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
   --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX --amount 50
 # → {"Blocked":"heartbeat_expired"}
 ```
+
+`check()` uses the ledger timestamp at the time that invocation executes; it does not use the
+client's wall clock and cannot reserve capacity for a later transaction. Ledger time has
+one-second granularity, so activity sharing a timestamp has ledger-defined ordering rather
+than sub-second ordering. A later transaction can see a different result if another spend
+consumes the cap or time crosses a window/activation boundary. Treat pre-flight results as
+advisory: re-run `check()` if more than one ledger has elapsed before submission, and handle
+the authoritative on-ledger authorization result even after a fresh check. The exact expiry
+boundary (a spend at `t` expiring when `now == t + window_secs`) is demonstrated in the
+`ledger_second_changes_window_membership_at_boundary` test (SPEC §3.1).
 
 For operator triage, `check_detailed` returns the same verdict plus current headroom and
 effective caps without changing spend accounting. A submitted call may extend persistent-entry
@@ -387,7 +422,11 @@ host invokes it automatically on every authorization the account must approve. S
 4. Run the decision table (`decide`) — account-level gates first, then a per-context
    decision loop, then commit window admissions only if every context passed.
 5. Return `Ok(())` to approve the transaction, or `Err(reason)` to reject it — and emit
-   the `auth_checked` event either way.
+   the `auth_checked` event either way. **Observability caveat:** a blocked decision rolls
+   back with its transaction, so its `auth_checked` event never becomes a committed ledger
+   event — blocks reach observers via simulation diagnostics and the SDK telemetry listener
+   (dual-stream), not via raw RPC `getEvents`. See
+   [SPEC §9](SPEC.md#9-events-and-telemetry).
 
 See [How it works](#how-it-works) below for the full flow through `parse_call`/`decide`.
 
@@ -438,6 +477,29 @@ cargo clippy --all-targets --all-features
 cargo fmt --check
 ```
 Both builds and all three gates were re-run green on this machine during the README pass.
+
+### Download a released artifact (instead of building)
+
+Each tagged release (`v*`) publishes the contract WASM built by the
+[`release` workflow](.github/workflows/release.yml) — after the full gate
+suite (format, clippy, tests) went green — together with a SHA-256 checksum,
+a build-provenance file (git tag, commit SHA, toolchain version), and a
+CycloneDX SBOM. Prefer this over a local build when you want the exact bytes
+CI blessed:
+
+```bash
+VERSION=v0.1.0  # pick a release from the Releases page
+REPO=aigbagbobila/stellar-agent-guard-contracts
+curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm
+curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm.sha256
+sha256sum -c stellar_agent_guard_contracts.wasm.sha256
+# → stellar_agent_guard_contracts.wasm: OK
+```
+
+Then cross-check `provenance.txt` from the same release (it pins the git tag
+and commit the WASM was built from — rebuild that tag yourself and compare
+hashes for a reproducibility check) and `sbom.cdx.json` for the dependency
+inventory. See [SECURITY.md](SECURITY.md) for the full verification steps.
 
 ## How it works
 
@@ -490,13 +552,16 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).
 5. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
+   denylist (checked before the allowlist and before `allow_any_recipient`), recipient
    allowlist, per-tx cap, and the rolling-window projection (existing total + amounts
    staged earlier in the same request). Protocol calls get contract + per-function
    allowlisting. Everything else is denied by default.
 6. **All-or-nothing commit.** Window admissions are staged and only committed to storage
    if *every* context passes — a partially-validating batch can never spend. `Ok(())`
    approves; `Err(reason)` rejects the entire transaction, and the `auth_checked` event
-   records the outcome either way.
+   records the outcome either way — with the same observability caveat as step 5 above:
+   an allowed decision's event is committed, a blocked one exists only in diagnostics
+   (the transaction it rolled back with carried it away). See [SPEC §9](SPEC.md#9-events-and-telemetry).
 
 ## Storage
 
@@ -517,6 +582,8 @@ maximum TTL on writes and refreshed to maximum when a read finds less than half 
 TTL remaining (`persist_get`; SPEC §9.5). The `Window` ledger is bounded at
 `MAX_WINDOW_ENTRIES = 8192` — beyond that, the two oldest entries merge *forward*
 (conservative over-count), so the `window_cap` ceiling is never exceeded (SPEC §3.1).
+Each successful admission that triggers the merge emits `event_window_merged` with the ledger
+kind, retained timestamp, and merged spend amount or protocol call count (SPEC §9).
 See [Storage rent and TTL cost model](docs/rent-and-ttl.md) for approximate XLM costs,
 who pays extension rent, and the underfunded-expiry failure mode.
 
@@ -612,6 +679,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 | Per-asset per-transaction spend caps (override global `per_tx_cap`) | ✅ |
 | Rolling window spend cap | ✅ |
 | Recipient allowlist (SAC transfers) | ✅ |
+| Recipient denylist / blocklist (SAC transfers) | ✅ |
 | Protocol/function allowlist (any call) | ✅ |
 | Dead-man switch (freeze on missed heartbeat) | ✅ |
 | Admin unfreeze | ✅ |
@@ -620,11 +688,11 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-46 tests (unit + integration) cover the policy decision engine — including the regression
+68 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `46 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green this session: `68 passed; 0 failed`.
 
 ```bash
 cargo test

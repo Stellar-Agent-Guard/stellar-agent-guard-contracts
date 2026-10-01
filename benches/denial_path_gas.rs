@@ -59,11 +59,13 @@ fn base_policy(env: &Env) -> PolicyConfig {
         protocols: Vec::new(env),
         recipients: vec![env, addr(env, 2)],
         recipient_window_caps: Vec::new(env),
+        blocked_recipients: Vec::new(env),
         allow_any_recipient: false,
         active_from: 0,
         active_until: 0,
         paused: false,
         dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
     }
 }
 

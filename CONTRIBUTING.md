@@ -29,6 +29,11 @@ cargo build --release --target wasm32v1-none
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
 
+The `stellar` CLI cannot sign Soroban authorization entries whose address is a
+contract. Heartbeat testing uses the guard contract's own address, so the CLI
+cannot submit a heartbeat; use `agent-tx` for this path. See the
+[`agent-tx` usage guide](tools/agent-tx/README.md) for commands and options.
+
 ## Clean Build Artifacts
 
 ```bash
@@ -94,6 +99,14 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    and — for enforcement changes — how it was verified (tests, and testnet
    evidence where applicable).
 
+## Keeping your PR mergeable
+
+This repo has a security-sensitive backlog and several PRs touching `engine.rs` in parallel; merge conflicts pile up fast. Keep your branch cheap to rebase:
+
+- **One logical unit per PR.** A bug fix, a doc change, a workflow --- each its own branch and PR. Small branches have a small conflict surface.
+- **Rebase onto `main` early and often**, not just once before opening the PR.
+- **Draft PRs get a nudge, not a close.** A draft that hasn't moved in 14 days gets a warning comment; if it's still stalled 7 days later it's closed (see `.github/workflows/stale.yml`). Issues are never auto-closed --- the backlog is curated by maintainers.
+
 ## Project Structure
 
 ```
@@ -104,7 +117,12 @@ src/
   types.rs           # Policy model, storage keys, errors, parsed-call enum
   integration_tests.rs # Host-routed tests incl. real Ed25519 auth signatures
 examples/
-  agent_pubkey.rs    # Derive raw Ed25519 pubkey from a Stellar secret key
+  agent_pubkey.rs    # Derive raw Ed25519 pubkey (hex) from a Stellar secret key,
+                     #   off-chain only: deterministic SEP-0023/RFC 8032
+                     #   derivation, but it does NOT prove the agent runtime
+                     #   signs with that key (see the file's trust-boundary docs)
+  agent-loop.md      # Narrative example of the 24/7 agent runtime loop
+                     #   (heartbeat, pre-flight, blocked-reason handling, DMS)
 tools/
   agent-tx/          # Sign+submit helper for the custom-account address
 tests/fixtures/      # Real testnet evidence (tx hashes, contract IDs, events)
@@ -124,3 +142,11 @@ When bumping `soroban-sdk` version in `Cargo.toml`, you **must** re-verify
 SPEC §1.1 quotes against the new SDK source (`src/auth.rs`, `src/custom_account.rs`).
 Update the version comment in `Cargo.toml` and the SPEC §1.1 header accordingly.
 This is the mechanical ratchet preventing silent auth-semantics drift.
+
+Dependabot (`.github/dependabot.yml`, weekly, Cargo + GitHub Actions) files
+update PRs against `main` the same as any contributor PR: they must pass the
+full `ci` gate (`cargo fmt --check`, clippy with `-D warnings`, `cargo test`,
+both builds) — branch protection on `main` requires the `ci` check, so a
+dependabot PR cannot merge green-skipped. `soroban-sdk` majors are isolated in
+their own group because they can break the ABI; review those with the SPEC §1.1
+re-verification above.

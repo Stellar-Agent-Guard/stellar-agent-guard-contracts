@@ -193,11 +193,13 @@ fn policy_config_from_json(env: &Env, block: &JsonValue, index: usize) -> Policy
         protocols: protocols(env, block, index),
         recipients: addr_list(env, block, "recipients", index),
         recipient_window_caps: recipient_window_caps(env, block, index),
+        blocked_recipients: soroban_sdk::Vec::new(env),
         allow_any_recipient: bool_field(block, "allow_any_recipient", index),
         active_from: u64_field(block, "active_from", index),
         active_until: u64_field(block, "active_until", index),
         paused: bool_field(block, "paused", index),
         dms_grace_secs: u64_field(block, "dms_grace_secs", index),
+        protocol_calls_per_window: 0,
     }
 }
 
