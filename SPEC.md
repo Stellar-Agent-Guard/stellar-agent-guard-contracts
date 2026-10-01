@@ -208,6 +208,7 @@ exactly the burst-boundary cases a spend guard exists to catch.
 Implementation (exact, lazy, bounded):
 
 - Entries are append-ordered by unix ledger time (`env.ledger().timestamp()`, 1s granularity).
+- On every evaluation: expired entries are bulk-pruned using binary search over the timestamp-sorted entries to find the first live entry, dropping expired prefixes in O(log n) time instead of sequential O(k) pops. Evaluation is lazy — no cron, no background writes.
 - On every evaluation: while `entries[0].ts + window_secs <= now`, pop from the front and
   subtract from `total`. Expiry is tested in this addition form (not the algebraically
   equivalent `entries[0].ts <= now - window_secs`) so that a low ledger timestamp cannot
