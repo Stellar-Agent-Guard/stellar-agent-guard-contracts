@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "description": "Machine-readable index of the Phase 1 testnet evidence recorded in prose in README.md. Same facts, stable shape: scenario -> tx hash -> ledger -> expected reason -> contract ID. Field schema is documented in README.md (section 'Machine-readable index'); tests/fixtures_index.rs fails CI when this file and README.md drift apart.",
+  "network": {
+    "name": "testnet",
+    "protocol": 28,
+    "passphrase": "Test SDF Network ; September 2015",
+    "rpc": "https://soroban-testnet.stellar.org",
+    "horizon": "https://horizon-testnet.stellar.org",
+    "recorded_on": "2026-09-08",
+    "ledger_range_note": "ledgers ~4565xxx-4566xxx"
+  },
+  "contracts": {
+    "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+    "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"
+  },
+  "accounts": [
+    {
+      "role": "admin",
+      "address": "GD5S5O2MZ6FSMFH6QILG37KSQNRVR3RPSWBTTV4JOUJ7J6TWLLL5LAVS",
+      "key_alias": "guard_admin"
+    },
+    {
+      "role": "agent",
+      "address": "GAOLI6NMXG5X3GZ2ASTIMX24IQQW7CSGHVSOU7HOWFCH73RBZXGAKSPP",
+      "key_alias": "guard_agent"
+    },
+    {
+      "role": "allowed_recipient",
+      "address": "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX",
+      "key_alias": "guard_recv"
+    },
+    {
+      "role": "non_allowlisted_recipient",
+      "address": "GDMVA2IQH63BYCFZMOVDYCUDGJZYSUCDGCVFDPU5BLTHFUEZ6BF5EPP7",
+      "key_alias": "guard_other"
+    }
+  ],
+  "setup_transactions": [
+    {
+      "step": "upload_guard_wasm",
+      "label": "Upload guard WASM",
+      "tx": "d43edd086ac9b376371f33b72ad89b37a9b6b4d43bf34dfea9717a29688b887c",
+      "ledger": null
+    },
+    {
+      "step": "create_guard_contract",
+      "label": "Create guard contract",
+      "tx": "a968bc517af34b0cb1ed53a4523d1cb8b9e562e9a9b1e8367acfabcbf18211b1",
+      "ledger": null
+    },
+    {
+      "step": "create_token_sac",
+      "label": "Create token (SAC)",
+      "tx": "19f1e36cf4c67feab4e6eb490b4ef424a7fbcc978fcbfa2cad96a079e93ec828",
+      "ledger": null
+    },
+    {
+      "step": "mint_to_guard",
+      "label": "Mint 100_000 to guard",
+      "tx": "bdeab1808f83c8db3c7a8cf675690afa7039a7aaae5e92fdc9fb7d6700adfeb2",
+      "ledger": null
+    },
+    {
+      "step": "initialize_guard",
+      "label": "Initialize guard (agent pubkey)",
+      "tx": "cb17b7b1c65bff74b6bc99f67fe3cf1070c7a28f14bdd71527ba60c9d4a81264",
+      "ledger": null
+    },
+    {
+      "step": "policy_scenarios_1_to_4",
+      "label": "Policy (scenarios 1-4)",
+      "tx": "6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174",
+      "ledger": null
+    },
+    {
+      "step": "trustline_recipient",
+      "label": "Trustline (recipient)",
+      "tx": "81479a058dd03457fb91e7b129f941eef64e0bc0752a7f0a5fb3928d5f644fb4",
+      "ledger": null
+    },
+    {
+      "step": "policy_dms_grace_60s",
+      "label": "Policy (DMS grace 60s)",
+      "tx": "1ddad388f914e267b282855ddc8e5478fabfb8542e7798e4402447e5341e3f9a",
+      "ledger": null
+    },
+    {
+      "step": "unfreeze_dms_reversal",
+      "label": "Unfreeze (DMS reversal)",
+      "tx": "dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5",
+      "ledger": null
+    }
+  ],
+  "scenarios": [
+    {
+      "id": 1,
+      "title": "Allowed transaction",
+      "outcome": "allowed",
+      "expected_reason": "allowed",
+      "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+      "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7",
+      "policy_tx": "6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174",
+      "recipient": "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX",
+      "amount": 50,
+      "tx": "4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8",
+      "ledger": 4566285,
+      "recorded_utc": "08:10:12Z",
+      "event_topics": ["event_auth_checked", "allowed"],
+      "notes": [
+        "Horizon reported successful: true; funds moved guard -> allowed recipient.",
+        "Event auth_checked/allowed emitted by the guard during enforced preflight; SAC transfer event fired on-chain."
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Per-tx cap violation",
+      "outcome": "blocked",
+      "expected_reason": "per_tx_cap_exceeded",
+      "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+      "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7",
+      "policy_tx": "6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174",
+      "recipient": "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX",
+      "amount": 1100,
+      "tx": null,
+      "ledger": null,
+      "recorded_utc": null,
+      "event_topics": ["event_auth_checked", "blocked", "per_tx_cap_exceeded"],
+      "notes": [
+        "1100 > per_tx_cap 1000; blocked pre-broadcast by __check_auth during the enforced simulation, so no transaction hash exists."
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Rolling-window cap violation",
+      "outcome": "blocked",
+      "expected_reason": "window_cap_exceeded",
+      "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+      "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7",
+      "policy_tx": "6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174",
+      "recipient": "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX",
+      "amount": 110,
+      "tx": null,
+      "ledger": null,
+      "recorded_utc": null,
+      "event_topics": ["event_auth_checked", "blocked", "window_cap_exceeded"],
+      "notes": [
+        "After scenario 1 spent 50 in the window, 50 + 110 = 160 > window_cap 150 inside the 60s rolling window; blocked pre-broadcast.",
+        "Genuinely rolling window (SPENT entries carry spent_ts; expired entries pruned at evaluation time, src/window.rs)."
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Allowlist violation",
+      "outcome": "blocked",
+      "expected_reason": "recipient_not_allowed",
+      "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+      "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7",
+      "policy_tx": "6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174",
+      "recipient": "GDMVA2IQH63BYCFZMOVDYCUDGJZYSUCDGCVFDPU5BLTHFUEZ6BF5EPP7",
+      "amount": 10,
+      "tx": null,
+      "ledger": null,
+      "recorded_utc": null,
+      "event_topics": ["event_auth_checked", "blocked", "recipient_not_allowed"],
+      "notes": [
+        "Recipient is not in the policy's recipients allowlist; blocked pre-broadcast, the transfer never reached the token contract."
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Dead-man switch - trigger FROZEN, then reversal UNFROZEN",
+      "outcome": "blocked",
+      "expected_reason": "heartbeat_expired",
+      "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+      "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7",
+      "policy_tx": "1ddad388f914e267b282855ddc8e5478fabfb8542e7798e4402447e5341e3f9a",
+      "recipient": null,
+      "amount": 10,
+      "tx": null,
+      "ledger": null,
+      "recorded_utc": null,
+      "event_topics": ["event_auth_checked", "blocked", "heartbeat_expired"],
+      "notes": [
+        "DMS policy (dms_grace_secs 60) installed at tx 1ddad388..., transfer attempted ~65s later with no heartbeat; blocked pre-broadcast.",
+        "Only the admin unfreeze() attestation can restore the account; heartbeats are blocked once expired (SPEC section 5)."
+      ],
+      "reversal": {
+        "action": "unfreeze",
+        "by": "GD5S5O2MZ6FSMFH6QILG37KSQNRVR3RPSWBTTV4JOUJ7J6TWLLL5LAVS",
+        "tx": "dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5",
+        "ledger": null,
+        "event_topics": ["event_unfrozen"]
+      },
+      "post_reversal": {
+        "outcome": "allowed",
+        "expected_reason": "allowed",
+        "amount": 10,
+        "tx": "b39457afa59f20d6ac90cd137e917c7efd51e27af4913c6c6308a6e5d0eff512",
+        "ledger": 4566327,
+        "recorded_utc": "08:13:42Z",
+        "notes": ["Immediately after the unfreeze the agent's transfer succeeded on-chain (Horizon successful: true)."]
+      }
+    }
+  ],
+  "supplemental_transactions": [
+    {
+      "label": "debug-era transfer (non-canonical bring-up run)",
+      "tx": "6f5dd410d62e8d83b4d70330d3541ac40678f05b545a4584cbf8e4dce6d07d9b",
+      "ledger": 4565852,
+      "outcome": "allowed",
+      "expected_reason": "allowed",
+      "canonical_scenario": null,
+      "notes": [
+        "Recorded in README prose only: same shape as scenario 1, landed while the submission tool was still being brought up. Not one of the five canonical scenarios."
+      ]
+    }
+  ]
+}

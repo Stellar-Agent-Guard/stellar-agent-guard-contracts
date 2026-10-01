@@ -18,6 +18,16 @@ The `dms_grace_secs` field in `PolicyConfig` sets the grace window in seconds. I
 - Recommended production value: several days.
 - Recommended testnet value: small (e.g., 60s) so the freeze is observable.
 
+### Health advisory and warning threshold (`dms_health`)
+
+In addition to automatic enforcement upon expiry, the contract provides an advisory read helper `dms_health()`. This evaluates the current ledger time against `LastHeartbeat` and `dms_grace_secs` to return one of three health statuses:
+
+- `Ok`: Elapsed time is below 80% of the grace period (or grace is disabled).
+- `Warn`: Elapsed time has reached or exceeded 80% (`DMS_WARN_THRESHOLD_PERCENT`) of the grace period but has not yet expired.
+- `Expired`: Grace period has fully elapsed, or the account has never heartbeated (`LastHeartbeat = 0`).
+
+SDKs and dashboards can poll `dms_health()` to alert operators before the account freezes.
+
 ### Automatic freeze (lazy, no background write)
 
 The freeze is **automatic and lazy**. There is no stored "auto-frozen" flag — the engine derives the freeze from `LastHeartbeat` and ledger time on every authorization:
