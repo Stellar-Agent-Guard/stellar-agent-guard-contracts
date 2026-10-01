@@ -480,6 +480,9 @@ calls whose semantics and arguments are known:
 - `transfer` args: `(from, to, amount)` — the account is `from`; recipient = args[1], amount = args[2].
 - `transfer_from` args: `(from, spender, to, amount)` — the account is `from`; recipient = args[2], amount = args[3].
 
+Note on multi-asset batches: the window total is a unit-less sum across assets until per-asset caps
+land; operators should use single-asset policies for meaningful windows.
+
 **Exact arity required; extra args deny -- we do not partially parse.** A call whose argument list does not match the SAC schema exactly (`transfer` = 3, `transfer_from` = 4) is rejected with `UnknownContract` and never reaches the cap/allowlist evaluation. We only enforce what we fully understand; a context carrying extra trailing values is treated as a call we cannot reason about (conservative default-deny).
 
 Rules applied (in order; the denylist is checked before the allowlist/escape hatch):
@@ -831,6 +834,7 @@ exists to drift. Notes:
   the decision conservative: no realistic policy is affected, only clearly accidental
   ones. `0` remains legal for both fields (feature disabled, as documented).
 - `active_until == 0 || active_until > active_from`.
+- Policies may be installed with an `active_until` already elapsed or an `active_from` far in the past; this is allowed as a feature to park accounts in a dormant/pre-active state (subsequent transfers evaluate to `OutsideActiveWindow` until ledger time falls within the active window).
 - Assets, protocols, recipients, and per-protocol fn lists must be non-empty for their
   respective vectors to matter (empty `assets` = no SAC transfer is ever allowed; empty
   `recipients` with `allow_any_recipient == false` = no recipient allowed).

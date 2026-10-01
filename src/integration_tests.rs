@@ -1879,6 +1879,19 @@ fn self_address_rejected_in_every_list() {
 }
 
 #[test]
+fn expired_at_install_policy_results_in_outside_active_window() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.active_from = 100;
+    p.active_until = 500;
+    h.install_policy(&p);
+    // Ledger time is past active_until (600 > 500), parked in dormant/expired state.
+    h.set_time(600);
+    h.transfer_expect_blocked(&recv, 5);
+}
+
+#[test]
 fn error_and_block_reason_round_trip() {
     let all_errors = [
         GuardError::Unauthorized,
