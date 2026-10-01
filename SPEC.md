@@ -629,9 +629,11 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // spend accounting, but a submitted call may refresh TTLs under §9.5.
     // Simulation before signing does not persist those rent bumps.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
-  // Same preflight / simulate path, with remaining_window and effective cap metrics.
-  // `remaining_window` reflects the effective cap for the queried recipient
-  // (per-recipient override if configured, otherwise global cap).
+  // Same zero-write pre-flight, with remaining_window and effective cap metrics.
+pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
+  // Zero-write payment-run pre-flight. Evaluates transfers in order, staging each
+  // allowed admission in memory so later items see earlier admissions. Returns one
+  // verdict per item and `admissible: false` if any item is blocked.
 
 // ── Enforcement (host-invoked; not callable by anyone) ────────────────────
 impl CustomAccountInterface for PolicyEngine {

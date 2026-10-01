@@ -18,8 +18,8 @@
 //!   material.
 
 use crate::types::{
-    CheckResult, DataKey, Error as GuardError, PolicyConfig, PolicyRuleId, ProtocolRule,
-    RecipientCap, ValidationOutcome, WindowState,
+    BatchTransfer, CheckResult, DataKey, Error as GuardError, PolicyConfig, PolicyRuleId,
+    ProtocolRule, RecipientCap, ValidationOutcome, WindowState,
 };
 use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
 
@@ -913,6 +913,50 @@ fn blocked_detailed_check_reports_headroom_without_writing_window() {
         PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 1)
     });
     assert_eq!(second.remaining_window, Some(60));
+}
+
+#[test]
+fn batch_check_stages_admissions_and_matches_auth_outcome() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+    h.set_time(1_000);
+
+    let first = BatchTransfer {
+        to: h.recv.clone(),
+        amount: 60,
+    };
+    let second = BatchTransfer {
+        to: h.recv.clone(),
+        amount: 50,
+    };
+    let batch = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_batch(
+            h.env.clone(),
+            h.asset.clone(),
+            soroban_sdk::vec![&h.env, first.clone(), second.clone()],
+        )
+    });
+    assert_eq!(batch.verdicts.len(), 2);
+    assert_eq!(batch.verdicts.get(0), Some(CheckResult::Allowed));
+    assert_eq!(
+        batch.verdicts.get(1),
+        Some(CheckResult::Blocked(Symbol::new(
+            &h.env,
+            "window_cap_exceeded",
+        )))
+    );
+    assert!(!batch.admissible);
+
+    h.transfer(&h.recv.clone(), first.amount);
+    let second_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.transfer(&h.recv.clone(), second.amount);
+    }));
+    assert!(
+        second_result.is_err(),
+        "the same staged window must reject the second transfer"
+    );
 }
 
 #[test]

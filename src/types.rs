@@ -363,6 +363,22 @@ pub struct CheckDetail {
     pub effective_window_cap: Option<i128>,
 }
 
+/// One transfer evaluated by [`PolicyEngine::check_batch`](crate::PolicyEngine::check_batch).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchTransfer {
+    pub to: Address,
+    pub amount: i128,
+}
+
+/// Per-transfer verdicts and the all-or-nothing result of a batch pre-flight.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchCheckResult {
+    pub verdicts: Vec<CheckResult>,
+    pub admissible: bool,
+}
+
 // Storage layout (SPEC §3). `Initialized`/`Admin`/`AgentPubkey` live in
 // instance storage (auto-TTL on every invocation); the rest live in
 // persistent storage with TTL extensions on writes and thresholded refreshes
