@@ -1911,6 +1911,7 @@ fn error_and_block_reason_round_trip() {
         GuardError::WindowCapExceeded,
         GuardError::ProtocolNotAllowed,
         GuardError::FunctionNotAllowed,
+        GuardError::AssetFnNotAllowed,
         GuardError::UnknownContract,
         GuardError::SelfFunctionNotAllowed,
         GuardError::CreateContractNotAllowed,
