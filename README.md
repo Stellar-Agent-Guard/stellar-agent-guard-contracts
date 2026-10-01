@@ -447,6 +447,39 @@ When submitting transactions via `agent-tx` (run `agent-tx --help` for usage and
 | `mainnet` | `https://soroban.stellar.org` |
 | `futurenet` | `https://rpc-futurenet.stellar.org` |
 
+#### Network presets in `agent-tx`
+
+The submission helper resolves its endpoint from a named preset — both the RPC URL
+*and* the network passphrase, which is what the signed auth payload commits to — so
+`--network` replaces the raw URL instead of adding a flag to remember:
+
+```bash
+agent-tx status --guard C...                    # no flag needed: testnet is the default
+agent-tx status --guard C... --network futurenet
+agent-tx preflight --guard C... --asset C... --to G... --amount 1100 --network testnet
+```
+
+| `--network` | Endpoint | Network passphrase |
+|---|---|---|
+| `testnet` (default) | `https://soroban-testnet.stellar.org` | `Test SDF Network ; September 2015` |
+| `futurenet` | `https://rpc-futurenet.stellar.org` | `Test SDF Future Network ; October 2022` |
+| `mainnet` | `https://soroban.stellar.org` | `Public Global Stellar Network ; September 2015` |
+
+- `--rpc-url <url>` still overrides the endpoint for a custom or self-hosted node.
+  Passing `--network` *and* `--rpc-url` together is an error that names both flags
+  rather than a silent precedence rule. A preset's own URL given through `--rpc-url`
+  is recognised, and gets that preset's passphrase.
+- `--network-passphrase <phrase>` overrides the passphrase — for a local
+  `stellar standalone` instance or a fork.
+- Selecting mainnet, by preset or by URL, prints a one-line reminder to stderr: this
+  contract is unaudited and gates real funds (see [SECURITY.md](SECURITY.md)).
+- Every address flag (`--guard`, `--asset`/`--token`, `--to`, and the `guards add`
+  address and admin) is validated as a StrKey of the right kind before any network
+  call, so a truncated or mistyped ID fails locally instead of burning a simulation.
+  The leading character is a *key type*, not a network (`G` account, `C` contract),
+  so no prefix check can catch a testnet ID aimed at mainnet — the preset plus the
+  passphrase decide where a call lands.
+
 ### Build from source
 ```bash
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
