@@ -16,9 +16,12 @@ pub fn set_policy(env: Env, config: PolicyConfig)
 
 1. Validates the config (see [Configuration validation](#configuration-validation) below). Invalid config fails with `InvalidConfig` and leaves the policy unchanged (fail-closed).
 2. Stores the new `PolicyConfig` in persistent storage.
-3. Resets the rolling window to empty (`Ledger::empty`).
-4. Sets `LastHeartbeat = now` — a fresh policy gets full dead-man-switch grace.
-5. Emits `EventPolicySet`.
+3. Increments `PolicyRevision` (0 before the first policy action; never reset by `revoke_policy`).
+4. Resets the rolling window to empty (`Ledger::empty`).
+5. Sets `LastHeartbeat = now` — a fresh policy gets full dead-man-switch grace.
+6. Emits `EventPolicySet`, whose data carries `by` and the new `revision` value — the
+   join key telemetry uses to attribute `auth_checked` events to the exact policy
+   generation in force (issue #38).
 
 ## PolicyConfig fields
 
@@ -46,7 +49,8 @@ The following rules are checked before anything is written. Invalid config retur
 - No duplicate addresses in `assets` or `recipients`
 - No duplicate protocol contracts
 - Empty per-protocol `fns` lists are rejected
-- Self-address may not appear in `assets` or `protocols`
+- Self-address may not appear in `assets`, `protocols`, **or `recipients`** — the account
+  paying itself is a no-op loop that almost certainly signals a mis-pasted address
 
 ## Example
 
@@ -90,6 +94,7 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 | Key | Type | Action |
 |---|---|---|
 | `Policy` | `PolicyConfig` | Write |
+| `PolicyRevision` | `u64` | Increment |
 | `Window` | `WindowState` | Reset to empty |
 | `LastHeartbeat` | `u64` | Set to now |
 

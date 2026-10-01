@@ -3,10 +3,14 @@ name: Release
 # Cut a release by pushing a version tag:
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# The job builds the deployable WASM and attaches it to a GitHub Release
-# together with a CycloneDX SBOM (sbom.cdx.json) that inventories every crate
-# and version compiled into that WASM build — the artifact an auditor or bug
-# bounty reviewer needs to know exactly what shipped. See SECURITY.md.
+# The `gates` job runs the same suite as CI (format, clippy, tests); the
+# `release` job only runs when the gates are green, so a failed gate blocks
+# release creation. On success the deployable WASM is published to the GitHub
+# Release together with its SHA-256 checksum, a build-provenance file
+# (toolchain version + commit SHA), and a CycloneDX SBOM (sbom.cdx.json) that
+# inventories every crate and version compiled into that WASM build — the
+# artifact an auditor or bug bounty reviewer needs to know exactly what
+# shipped. See README ("Installation") and SECURITY.md for the verifier side.
 on:
   push:
     tags: ["v*"]
@@ -17,10 +21,42 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  gates:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-release-gates-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (all + pedantic deny, all targets/features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Unit + integration tests
+        run: cargo test
+
+  release:
+    # Failed gates block release creation: this job never starts unless
+    # `gates` is green.
+    needs: [gates]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -49,18 +85,33 @@ jobs:
       - name: Generate CycloneDX SBOM (WASM target)
         run: cargo cyclonedx --format json --describe binaries --target wasm32v1-none
 
-      - name: Stage release assets
+      - name: Stage release assets, checksums, and provenance
         run: |
+          set -euo pipefail
           mkdir -p dist
-          cp target/wasm32v1-none/release/*.wasm dist/
+          cp target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm dist/
+          (cd dist && sha256sum stellar_agent_guard_contracts.wasm > stellar_agent_guard_contracts.wasm.sha256)
           # `--describe binaries` emits one SBOM per binary target; this crate
           # has exactly one (the shipped cdylib), renamed to a stable asset name.
           cp ./*-cdylib.cdx.json dist/sbom.cdx.json
+          {
+            echo "package: stellar-agent-guard-contracts"
+            echo "tag: ${{ github.ref_name }}"
+            echo "commit: ${{ github.sha }}"
+            echo "build command: cargo build --release --target wasm32v1-none"
+            echo "rustc: $(rustc --version)"
+            echo "cargo: $(cargo --version)"
+            echo "runner: ${{ runner.os }} / ${{ runner.arch }}"
+            echo "wasm sha256: $(cut -d' ' -f1 dist/stellar_agent_guard_contracts.wasm.sha256)"
+          } > dist/provenance.txt
+          cat dist/provenance.txt
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.wasm
+            dist/stellar_agent_guard_contracts.wasm
+            dist/stellar_agent_guard_contracts.wasm.sha256
+            dist/provenance.txt
             dist/sbom.cdx.json
           generate_release_notes: true
