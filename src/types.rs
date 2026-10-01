@@ -416,6 +416,7 @@ pub enum Error {
     CreateContractNotAllowed = 28,
     RecipientBlocked = 29,
     ProtocolCallRateExceeded = 30,
+    ListedAssetAdminOrMintAttempt = 31,
 }
 
 impl Error {
@@ -444,6 +445,7 @@ impl Error {
             Self::SelfFunctionNotAllowed => "self_function_not_allowed",
             Self::CreateContractNotAllowed => "create_contract_not_allowed",
             Self::ProtocolCallRateExceeded => "protocol_call_rate_exceeded",
+            Self::ListedAssetAdminOrMintAttempt => "listed_asset_admin_or_mint_attempt",
         }
     }
 }

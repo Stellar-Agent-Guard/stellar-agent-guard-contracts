@@ -217,6 +217,24 @@ fn parse_call_inner(
                 };
             }
             if is_asset {
+                let fn_mint = Symbol::new(env, "mint");
+                let fn_burn = Symbol::new(env, "burn");
+                let fn_clawback = Symbol::new(env, "clawback");
+                let fn_set_admin = Symbol::new(env, "set_admin");
+                let fn_pause = Symbol::new(env, "pause");
+                let fn_unpause = Symbol::new(env, "unpause");
+                if fn_name == &fn_mint
+                    || fn_name == &fn_burn
+                    || fn_name == &fn_clawback
+                    || fn_name == &fn_set_admin
+                    || fn_name == &fn_pause
+                    || fn_name == &fn_unpause
+                {
+                    return ParsedCall::AssetOther {
+                        asset: contract.clone(),
+                        fname: fn_name.clone(),
+                    };
+                }
                 return ParsedCall::AssetOther {
                     asset: contract.clone(),
                     fname: fn_name.clone(),
@@ -317,7 +335,7 @@ pub fn decide(
             }
             ParsedCall::CreateContract => Decision::Blocked(Error::CreateContractNotAllowed),
             ParsedCall::Unknown { .. } => Decision::Blocked(Error::UnknownContract),
-            ParsedCall::AssetOther { .. } => Decision::Blocked(Error::FunctionNotAllowed),
+            ParsedCall::AssetOther { .. } => Decision::Blocked(Error::ListedAssetAdminOrMintAttempt),
             ParsedCall::AssetTransfer { to, amount, .. } => {
                 if amount <= 0 {
                     Decision::Blocked(Error::InvalidAmount)
@@ -678,6 +696,56 @@ mod tests {
             d.first().unwrap(),
             Decision::Blocked(Error::UnknownContract)
         ));
+    }
+
+    #[test]
+    fn listed_sac_abuse_functions_blocked_explicitly() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = Some(base_policy(&env));
+        let abuse_fns = vec![
+            &env,
+            Symbol::new(&env, "mint"),
+            Symbol::new(&env, "burn"),
+            Symbol::new(&env, "clawback"),
+            Symbol::new(&env, "set_admin"),
+            Symbol::new(&env, "pause"),
+            Symbol::new(&env, "unpause"),
+        ];
+        for f in abuse_fns.iter() {
+            let mut l = Ledger::empty(&env);
+            let ctx = vec![
+                &env,
+                Context::Contract(ContractContext {
+                    contract: addr(&env, 1),
+                    fn_name: f.clone(),
+                    args: Vec::new(&env),
+                }),
+            ];
+            let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx);
+            assert!(matches!(
+                d,
+                Decision::Blocked(Error::ListedAssetAdminOrMintAttempt)
+            ));
+        }
+    }
+
+    #[test]
+    fn unlisted_sac_abuse_functions_remain_unknown_contract() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = Some(base_policy(&env));
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![
+            &env,
+            Context::Contract(ContractContext {
+                contract: addr(&env, 7),
+                fn_name: Symbol::new(&env, "mint"),
+                args: Vec::new(&env),
+            }),
+        ];
+        let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx);
+        assert!(matches!(d, Decision::Blocked(Error::UnknownContract)));
     }
 
     #[test]
@@ -1637,5 +1705,58 @@ mod tests {
             observed_strictness,
             "expected the over-count to make at least one admission stricter"
         );
+    }
+
+    #[test]
+    fn listed_sac_abuse_functions_blocked_explicitly() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = Some(base_policy(&env));
+        let abuse_fns = vec![
+            &env,
+            Symbol::new(&env, "mint"),
+            Symbol::new(&env, "burn"),
+            Symbol::new(&env, "clawback"),
+            Symbol::new(&env, "set_admin"),
+            Symbol::new(&env, "pause"),
+            Symbol::new(&env, "unpause"),
+        ];
+        for f in abuse_fns.iter() {
+            let mut l = Ledger::empty(&env);
+            let ctx = vec![
+                &env,
+                Context::Contract(ContractContext {
+                    contract: addr(&env, 1),
+                    fn_name: f.clone(),
+                    args: Vec::new(&env),
+                }),
+            ];
+            let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx);
+            assert!(matches!(
+                d.first().unwrap(),
+                Decision::Blocked(Error::ListedAssetAdminOrMintAttempt)
+            ));
+        }
+    }
+
+    #[test]
+    fn unlisted_sac_abuse_functions_remain_unknown_contract() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = Some(base_policy(&env));
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![
+            &env,
+            Context::Contract(ContractContext {
+                contract: addr(&env, 7),
+                fn_name: Symbol::new(&env, "mint"),
+                args: Vec::new(&env),
+            }),
+        ];
+        let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx);
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::UnknownContract)
+        ));
     }
 }

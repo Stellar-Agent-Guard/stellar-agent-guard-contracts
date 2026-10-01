@@ -500,8 +500,8 @@ Rules applied (in order; the denylist is checked before the allowlist/escape hat
 5. Amount validity: `amount > 0` or block `InvalidAmount`.
 
 An asset contract listed in `assets` invoked with any other function (e.g. `mint`, `burn`,
-`set_admin`, `clawback` — none of which the account should ever call as authorizer) is blocked
-(`FunctionNotAllowed`). Asset addresses *not* listed in `assets` are blocked
+`clawback`, `set_admin`, `pause`, `unpause` — none of which the account should ever call as authorizer) is blocked
+(`ListedAssetAdminOrMintAttempt`). Asset addresses *not* listed in `assets` are blocked
 (`AssetNotAllowed`) — an agent cannot silently move balances on an unregistered SAC. This keeps
 the "we know what we're enforcing" promise exact.
 
@@ -591,6 +591,8 @@ To close the CheckResult/Error duality gap, every contract `Error` variant maps 
 | 27 | `SelfFunctionNotAllowed` | `self_function_not_allowed` | No | Auth-path only: self-calls are part of `__check_auth` context dispatch. |
 | 28 | `CreateContractNotAllowed` | `create_contract_not_allowed` | No | Auth-path only: contract creation host functions occur in auth contexts. |
 | 29 | `RecipientBlocked` | `recipient_blocked` | Yes | Recipient is on the explicit denylist.
+| 30 | `ProtocolCallRateExceeded` | `protocol_call_rate_exceeded` | Yes | The protocol-call rolling limit was exceeded. |
+| 31 | `ListedAssetAdminOrMintAttempt` | `listed_asset_admin_or_mint_attempt` | No | Auth-path only: a listed asset was invoked with an administrative or minting function. |
 
 // ── Policy management (admin only) ────────────────────────────────────────
 pub fn set_policy(env: Env, config: PolicyConfig)
@@ -715,6 +717,7 @@ pub enum Error {            // values stable; see tests/fixtures
     UnknownContract = 26, SelfFunctionNotAllowed = 27,
     CreateContractNotAllowed = 28,
     RecipientBlocked = 29,
+    ListedAssetAdminOrMintAttempt = 31,
 }
 ```
 
