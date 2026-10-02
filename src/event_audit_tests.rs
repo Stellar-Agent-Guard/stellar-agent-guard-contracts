@@ -614,7 +614,7 @@ fn window_merge_event_emits_once_at_the_entry_bound() {
         ledger.merges.is_empty(),
         "no merge or event below the bound"
     );
-    assert!(env.events().all().events().is_empty());
+    assert_eq!(env.events().all().events(), []);
 
     ledger.admit(crate::types::MAX_WINDOW_ENTRIES as u64, 1);
     assert_eq!(ledger.merges.len(), 1);

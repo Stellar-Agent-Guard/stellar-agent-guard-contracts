@@ -530,6 +530,30 @@
         ]
       },
       "spec_ref": "§6.3"
+    },
+    {
+      "code": 31,
+      "error_variant": "DecisionInvariantViolation",
+      "symbol": "decision_invariant_violation",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "decision_invariant_violation"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.3"
     }
   ]
 }

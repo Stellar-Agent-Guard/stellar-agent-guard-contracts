@@ -498,6 +498,7 @@ fn key_fingerprint(env: &Env, pubkey: &BytesN<32>) -> BytesN<8> {
         .sha256(&Bytes::from_array(env, &pubkey.to_array()))
         .into();
     let mut fingerprint = [0u8; 8];
+    // `digest` is fixed at 32 bytes, so this constant 0..8 range is in bounds.
     fingerprint.copy_from_slice(&digest[..8]);
     BytesN::from_array(env, &fingerprint)
 }
@@ -813,7 +814,8 @@ impl PolicyEngine {
     ///
     /// # Panics
     ///
-    /// This function panics if the policy engine's `decide` evaluation returns an empty list of verdicts.
+    /// This function surfaces `DecisionInvariantViolation` if the policy
+    /// engine returns no verdict for the single submitted preflight context.
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
         let Some(snapshot) = AuthSnapshot::load(&env) else {
@@ -857,7 +859,10 @@ impl PolicyEngine {
             now,
             vec![&env, call],
         );
-        let result = match verdicts.first().unwrap() {
+        let Some(verdict) = verdicts.first() else {
+            panic_with_error!(&env, Error::DecisionInvariantViolation);
+        };
+        let result = match verdict {
             Decision::Allowed => {
                 emit_auth(&env, true, None, 0);
                 CheckResult::Allowed
@@ -960,14 +965,17 @@ impl CustomAccountInterface for PolicyEngine {
         let mut all_passed = true;
         let mut first_error = None;
         for (i, v) in verdicts.iter().enumerate() {
+            let Ok(context_index) = u32::try_from(i) else {
+                panic_with_error!(&env, Error::DecisionInvariantViolation);
+            };
             match v {
-                Decision::Allowed => emit_auth(&env, true, None, u32::try_from(i).unwrap()),
+                Decision::Allowed => emit_auth(&env, true, None, context_index),
                 Decision::Blocked(e) => {
                     all_passed = false;
                     if first_error.is_none() {
                         first_error = Some(*e);
                     }
-                    emit_auth(&env, false, Some(*e), u32::try_from(i).unwrap());
+                    emit_auth(&env, false, Some(*e), context_index);
                 }
             }
         }
@@ -983,7 +991,10 @@ impl CustomAccountInterface for PolicyEngine {
             }
             Ok(())
         } else {
-            Err(first_error.unwrap())
+            match first_error {
+                Some(error) => Err(error),
+                None => panic_with_error!(&env, Error::DecisionInvariantViolation),
+            }
         }
     }
 }

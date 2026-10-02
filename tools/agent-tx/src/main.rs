@@ -22,20 +22,27 @@
 //! agent-tx preflight --guard C... --asset C... --to G... --amount 50 [--secret S...]
 //! ```text
 //! agent-tx transfer --guard C... --token C... --to G... --amount 50 \
-//!     --agent-secret S... [--expect-blocked] [--rpc-url ...] [--network-passphrase "..."]
+//!     --agent-secret S... [--expect-blocked] [--network testnet|futurenet|mainnet] [--rpc-url ...] [--network-passphrase "..."]
 //! agent-tx heartbeat --guard C... --agent-secret S... [--expect-blocked]
 //! ```
 //!
 //! `--expect-blocked` treats a policy rejection at step 4 as success and prints
 //! the on-chain-equivalent diagnostic events (the contract's own `auth_checked`
 //! blocked event with the reason symbol).
+//!
+//! Every address-typed flag is validated as a StrKey, and the endpoint is
+//! resolved from a named preset, *before* the first RPC request — see
+//! `strkey.rs` and `network.rs`, the two helpers that hold those rules.
+
+mod network;
+mod strkey;
 
 use ed25519_dalek::{Signer, SigningKey};
+use network::{Endpoint, Network};
 use sha2::{Digest, Sha256};
 use stellar_xdr::*;
+use strkey::KeyKind;
 
-const DEFAULT_RPC: &str = "https://soroban-testnet.stellar.org";
-const DEFAULT_PASSPHRASE: &str = "Test SDF Network ; September 2015";
 const INCLUSION_FEE: u32 = 100;
 
 // ── strkey (base32 + CRC16-XModem) ───────────────────────────────────────
@@ -906,17 +913,55 @@ fn verify_guard(rpc: &Rpc, guard_addr: &str, _passphrase: &str) -> Result<(), St
     Ok(())
 }
 
-fn cmd_guards_add<I: Iterator<Item = String>>(args: &mut I) -> Result<(), String> {
-    let alias = args.next().ok_or("missing alias")?;
-    let address = args.next().ok_or("missing address")?;
-    let admin = args.next().ok_or("missing admin")?;
-    let rpc_url = args.next().unwrap_or_else(|| DEFAULT_RPC.to_string());
-    let passphrase = args
-        .next()
-        .unwrap_or_else(|| DEFAULT_PASSPHRASE.to_string());
+fn cmd_guards_add(cli: &mut Cli) -> Result<(), String> {
+    let alias = cli.positional("an alias")?;
+    let address = cli.positional("a guard contract address (C...)")?;
+    let admin = cli.positional("an admin account address (G...)")?;
+    // Validate the two addresses first: `verify_guard` below is the first
+    // place `guards add` talks to the network (issue #52).
+    strkey::validate_key("guards add address", KeyKind::Contract, &address)?;
+    strkey::validate_key("guards add admin", KeyKind::Account, &admin)?;
 
-    let rpc = Rpc { url: rpc_url };
-    verify_guard(&rpc, &address, &passphrase)?;
+    // The endpoint may be named with `--network`/`--rpc-url`, or, as
+    // historically, by trailing positional URL and passphrase arguments.
+    let mut network = None;
+    let mut rpc_url = None;
+    let mut passphrase = None;
+    let mut positionals: Vec<String> = Vec::new();
+    while let Some(token) = cli.next() {
+        match token.as_str() {
+            "--network" => network = Some(cli.value("--network")?),
+            "--rpc-url" => rpc_url = Some(cli.value("--rpc-url")?),
+            "--network-passphrase" => passphrase = Some(cli.value("--network-passphrase")?),
+            other if other.starts_with("--") => return Err(cli.unknown(other)),
+            other => positionals.push(other.to_string()),
+        }
+    }
+    if positionals.len() > 2 {
+        return Err(format!(
+            "unexpected arguments after `guards add <alias> <address> <admin>`: {}",
+            positionals[2..].join(" ")
+        ));
+    }
+    let legacy_url = positionals.first().map(String::as_str);
+    if legacy_url.is_some() && rpc_url.is_some() {
+        return Err(
+            "conflicting endpoint: `guards add` was given both a positional RPC URL and --rpc-url"
+                .to_string(),
+        );
+    }
+    let endpoint = network::resolve_endpoint(
+        network.as_deref(),
+        rpc_url.as_deref().or(legacy_url),
+        passphrase
+            .as_deref()
+            .or(positionals.get(1).map(String::as_str)),
+    )?;
+
+    let rpc = Rpc {
+        url: endpoint.rpc_url,
+    };
+    verify_guard(&rpc, &address, &endpoint.passphrase)?;
 
     let mut reg = load_registry();
     if reg.guards.iter().any(|g| g.alias == alias) {
@@ -964,8 +1009,8 @@ fn cmd_guards_list() {
     }
 }
 
-fn cmd_guards_remove<I: Iterator<Item = String>>(args: &mut I) -> Result<(), String> {
-    let alias = args.next().ok_or("missing alias")?;
+fn cmd_guards_remove(cli: &mut Cli) -> Result<(), String> {
+    let alias = cli.positional("an alias")?;
     let mut reg = load_registry();
     let idx = reg
         .guards
@@ -981,8 +1026,8 @@ fn cmd_guards_remove<I: Iterator<Item = String>>(args: &mut I) -> Result<(), Str
     Ok(())
 }
 
-fn cmd_guards_set_default<I: Iterator<Item = String>>(args: &mut I) -> Result<(), String> {
-    let alias = args.next().ok_or("missing alias")?;
+fn cmd_guards_set_default(cli: &mut Cli) -> Result<(), String> {
+    let alias = cli.positional("an alias")?;
     let mut reg = load_registry();
     if !reg.guards.iter().any(|g| g.alias == alias) {
         return Err("alias not found".into());
@@ -1057,19 +1102,17 @@ mod tests {
     fn extract_dms_grace_secs_from_policy_map() {
         // Test that we can extract dms_grace_secs from a PolicyConfig map
         let mut policy_map_entries = vec![];
-        
+
         // Add dms_grace_secs (u64) field
         policy_map_entries.push(ScMapEntry {
-            key: ScVal::Symbol(ScSymbol(stellar_xdr::VecM::try_from(b"dms_grace_secs".to_vec()).unwrap())),
-            val: ScVal::U64(Uint64(3600)), // 1 hour grace period
+            key: ScVal::Symbol(ScSymbol("dms_grace_secs".try_into().unwrap())),
+            val: ScVal::U64(3600), // 1 hour grace period
         });
-        
-        let policy_map = ScMap(
-            stellar_xdr::VecM::try_from(policy_map_entries).unwrap()
-        );
-        
+
+        let policy_map = ScMap(stellar_xdr::VecM::try_from(policy_map_entries).unwrap());
+
         let policy_val = ScVal::Map(Some(policy_map));
-        
+
         // Extract and verify
         let dms_grace = extract_dms_grace_secs(&policy_val);
         assert_eq!(dms_grace, 3600, "should extract dms_grace_secs=3600");
@@ -1080,16 +1123,19 @@ mod tests {
         // Test that extract_dms_grace_secs returns 0 when field is missing
         let empty_map = ScMap(stellar_xdr::VecM::try_from(vec![]).unwrap());
         let policy_val = ScVal::Map(Some(empty_map));
-        
+
         let dms_grace = extract_dms_grace_secs(&policy_val);
-        assert_eq!(dms_grace, 0, "should return 0 when dms_grace_secs is not in map");
+        assert_eq!(
+            dms_grace, 0,
+            "should return 0 when dms_grace_secs is not in map"
+        );
     }
 
     #[test]
     fn extract_dms_grace_secs_handles_void_policy() {
         // Test that extract_dms_grace_secs handles Void (no policy) gracefully
         let policy_val = ScVal::Void;
-        
+
         let dms_grace = extract_dms_grace_secs(&policy_val);
         assert_eq!(dms_grace, 0, "should return 0 for Void policy");
     }
@@ -1099,25 +1145,34 @@ mod tests {
         // Test the logic: heartbeat_expired if (now - last_heartbeat) > dms_grace_secs
         // When last_heartbeat=50, dms_grace_secs=60, now=100:
         // 100 - 50 = 50, which is NOT > 60, so heartbeat should NOT be expired
-        
+
         let now = 100u32;
         let last_heartbeat = 50u64;
         let dms_grace_secs = 60u64;
-        
+
         let heartbeat_expired = now.saturating_sub(last_heartbeat as u32) as u64 > dms_grace_secs;
-        assert!(!heartbeat_expired, "heartbeat should not be expired: (100-50)=50 is not > 60");
-        
+        assert!(
+            !heartbeat_expired,
+            "heartbeat should not be expired: (100-50)=50 is not > 60"
+        );
+
         // Test case 2: now=150, last_heartbeat=50, dms_grace_secs=60
         // 150 - 50 = 100, which IS > 60, so heartbeat SHOULD be expired
         let now2 = 150u32;
         let heartbeat_expired2 = now2.saturating_sub(last_heartbeat as u32) as u64 > dms_grace_secs;
-        assert!(heartbeat_expired2, "heartbeat should be expired: (150-50)=100 is > 60");
-        
+        assert!(
+            heartbeat_expired2,
+            "heartbeat should be expired: (150-50)=100 is > 60"
+        );
+
         // Test case 3: last_heartbeat=0 (never heartbeated) with dms_grace_secs > 0
         // Should be expired immediately
         let last_heartbeat_zero = 0u64;
         let is_never_heartbeated = last_heartbeat_zero == 0;
-        assert!(is_never_heartbeated, "should detect never-heartbeated state");
+        assert!(
+            is_never_heartbeated,
+            "should detect never-heartbeated state"
+        );
     }
 
     #[test]
@@ -1216,7 +1271,7 @@ mod tests {
         };
         let args = Args {
             rpc: Rpc { url: String::new() },
-            passphrase: DEFAULT_PASSPHRASE.to_string(),
+            passphrase: Network::Testnet.passphrase().to_string(),
             guard: "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
                 .parse()
                 .unwrap(),
@@ -1245,7 +1300,7 @@ mod tests {
         };
         let args = Args {
             rpc: Rpc { url: String::new() },
-            passphrase: DEFAULT_PASSPHRASE.to_string(),
+            passphrase: Network::Testnet.passphrase().to_string(),
             guard: "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
                 .parse()
                 .unwrap(),
@@ -1257,6 +1312,428 @@ mod tests {
         assert_eq!(rpc.sequence_reads.get(), 1);
         assert_eq!(rpc.simulations.get(), 1);
         assert_eq!(rpc.sequence.get(), 7);
+    }
+
+    // ── Input validation and network presets (issues #52, #54) ───────────
+
+    /// A loopback JSON-RPC server that records the `method` of every request it
+    /// serves. Pointing `--rpc-url` at one lets a test assert whether a code
+    /// path actually talked to the network.
+    struct MockRpc {
+        url: String,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl MockRpc {
+        fn start() -> Self {
+            use std::io::{BufRead, BufReader, Read, Write};
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+            let url = format!("http://{}", listener.local_addr().expect("local addr"));
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let served = std::sync::Arc::clone(&requests);
+            std::thread::spawn(move || {
+                // A bounded loop: the server must not outlive the test binary.
+                for _ in 0..8 {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        return;
+                    };
+                    let mut header_reader =
+                        BufReader::new(stream.try_clone().expect("clone stream for headers"));
+                    let mut content_length = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if header_reader.read_line(&mut line).expect("read header") == 0 {
+                            break;
+                        }
+                        let trimmed = line.trim_end();
+                        if trimmed.is_empty() {
+                            break;
+                        }
+                        if trimmed.to_ascii_lowercase().starts_with("content-length:") {
+                            content_length = trimmed[15..].trim().parse().unwrap_or(0);
+                        }
+                    }
+                    let mut body = vec![0u8; content_length];
+                    if header_reader.read_exact(&mut body).is_ok() {
+                        let method = serde_json::from_str::<serde_json::Value>(
+                            &String::from_utf8_lossy(&body),
+                        )
+                        .ok()
+                        .and_then(|value| value["method"].as_str().map(str::to_string))
+                        .unwrap_or_default();
+                        served.lock().expect("record lock").push(method);
+                    }
+                    let payload = r#"{"jsonrpc":"2.0","id":1,"result":{"sequence":1}}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                }
+            });
+            Self { url, requests }
+        }
+
+        fn methods(&self) -> Vec<String> {
+            self.requests.lock().expect("record lock").clone()
+        }
+    }
+
+    fn argv(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    const VALID_GUARD: &str = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7";
+    const VALID_TOKEN: &str = "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7";
+    const VALID_RECIPIENT: &str = "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX";
+    const VALID_SECRET: &str = "SBRVOEN5IIWAROJVJI2OHN2IYD2H3S75UOM3UKY7RQ42JRDPH5KRHQC4";
+
+    #[test]
+    fn malformed_addresses_are_rejected_without_a_network_request() {
+        let mock = MockRpc::start();
+        // Each case breaks a different rule on the flag that carries it: wrong
+        // key type, truncated, mistyped checksum, empty.
+        let cases: &[(&str, &str)] = &[
+            ("--guard", VALID_RECIPIENT),
+            ("--guard", &VALID_GUARD[..48]),
+            (
+                "--guard",
+                "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU8",
+            ),
+            ("--guard", ""),
+        ];
+        for (flag, value) in cases {
+            let args = argv(&["status", flag, value, "--rpc-url", &mock.url]);
+            let (cmd, rest) = args.split_first().expect("subcommand");
+            let err = parse_request(cmd, rest).expect_err(&format!("{flag} '{value}' accepted"));
+            assert!(err.contains(flag), "{err}");
+            assert!(
+                err.contains("expected") && err.contains("checksum"),
+                "{err} must name the rule broken"
+            );
+        }
+
+        // The same rules apply to the other address-typed flags, and to a
+        // secret in any of its two spellings.
+        let spend_cases: &[(&str, &str)] = &[
+            ("--to", &VALID_RECIPIENT.to_lowercase()),
+            ("--to", VALID_SECRET),
+            ("--asset", VALID_SECRET),
+            ("--agent-secret", VALID_GUARD),
+            ("--secret", VALID_TOKEN),
+        ];
+        for (flag, value) in spend_cases {
+            let args = argv(&[
+                "check",
+                "--guard",
+                VALID_GUARD,
+                "--asset",
+                VALID_TOKEN,
+                "--to",
+                VALID_RECIPIENT,
+                "--amount",
+                "5",
+                flag,
+                value,
+                "--rpc-url",
+                &mock.url,
+            ]);
+            let (cmd, rest) = args.split_first().expect("subcommand");
+            let err = parse_request(cmd, rest).expect_err(&format!("{flag} '{value}' accepted"));
+            assert!(err.contains(flag), "{err}");
+        }
+        assert!(
+            mock.methods().is_empty(),
+            "validation failures must not send a request, sent: {:?}",
+            mock.methods()
+        );
+    }
+
+    #[test]
+    fn the_mock_endpoint_records_a_request_that_does_happen() {
+        // The control for the test above: the probe sees traffic, so its
+        // silence there means no request, not a broken listener.
+        let mock = MockRpc::start();
+        let args = argv(&["status", "--guard", VALID_GUARD, "--rpc-url", &mock.url]);
+        let (_, rest) = args.split_first().expect("subcommand");
+        let request = parse_request("status", rest).expect("valid inputs");
+        assert_eq!(request.rpc().latest_ledger(), 1);
+        assert_eq!(mock.methods(), vec!["getLatestLedger".to_string()]);
+    }
+
+    #[test]
+    fn every_address_flag_of_every_subcommand_is_validated() {
+        let mock = MockRpc::start();
+        // `preflight`/`check`/`transfer` take a token and a recipient; each is
+        // checked against its own rule rather than trusting the RPC to complain.
+        for cmd in ["preflight", "check"] {
+            let mut args = argv(&[
+                cmd,
+                "--guard",
+                VALID_GUARD,
+                "--asset",
+                VALID_RECIPIENT, // an account ID where a contract ID belongs
+                "--to",
+                VALID_RECIPIENT,
+                "--amount",
+                "5",
+                "--rpc-url",
+                &mock.url,
+            ]);
+            let (_, rest) = args.split_first().expect("subcommand");
+            let err = parse_request(cmd, rest).expect_err("account ID accepted as --asset");
+            assert!(
+                err.contains("--asset") && err.contains("expected 'C'"),
+                "{err}"
+            );
+
+            args = argv(&[
+                cmd,
+                "--guard",
+                VALID_GUARD,
+                "--asset",
+                VALID_TOKEN,
+                "--to",
+                VALID_TOKEN,
+                "--amount",
+                "5",
+                "--rpc-url",
+                &mock.url,
+            ]);
+            let (_, rest) = args.split_first().expect("subcommand");
+            // A contract recipient is legal (`C...` addresses can receive), so
+            // this must pass validation.
+            parse_request(cmd, rest).expect("contract recipient rejected");
+        }
+
+        // `transfer` spells the asset flag `--token`, and says so when it is
+        // missing; `--asset` is still accepted for it.
+        let args = argv(&[
+            "transfer",
+            "--guard",
+            VALID_GUARD,
+            "--to",
+            VALID_RECIPIENT,
+            "--amount",
+            "5",
+            "--agent-secret",
+            VALID_SECRET,
+            "--rpc-url",
+            &mock.url,
+        ]);
+        let (_, rest) = args.split_first().expect("subcommand");
+        let err = parse_request("transfer", rest).expect_err("transfer accepted without a token");
+        assert!(err.contains("missing --token"), "{err}");
+
+        let args = argv(&[
+            "transfer",
+            "--guard",
+            VALID_GUARD,
+            "--asset",
+            VALID_TOKEN,
+            "--to",
+            VALID_RECIPIENT,
+            "--amount",
+            "5",
+            "--agent-secret",
+            VALID_SECRET,
+            "--rpc-url",
+            &mock.url,
+        ]);
+        let (_, rest) = args.split_first().expect("subcommand");
+        parse_request("transfer", rest).expect("`--asset` rejected for transfer");
+        assert!(mock.methods().is_empty(), "{:?}", mock.methods());
+    }
+
+    #[test]
+    fn guards_add_validates_addresses_before_verifying_onchain() {
+        let mock = MockRpc::start();
+        // `guards add <alias> <address> <admin> [url]`, with the subcommand
+        // already consumed by the dispatcher.
+        let bad_guard = argv(&["prod", VALID_RECIPIENT, VALID_RECIPIENT, &mock.url]);
+        let mut cli = Cli::new("guards", &bad_guard);
+        let err = cmd_guards_add(&mut cli).expect_err("account ID accepted as a guard address");
+        assert!(
+            err.contains("guards add address") && err.contains("expected 'C'"),
+            "{err}"
+        );
+
+        let bad_admin = argv(&["prod", VALID_GUARD, VALID_GUARD, &mock.url]);
+        let mut cli = Cli::new("guards", &bad_admin);
+        let err = cmd_guards_add(&mut cli).expect_err("contract ID accepted as an admin");
+        assert!(
+            err.contains("guards add admin") && err.contains("expected 'G'"),
+            "{err}"
+        );
+
+        assert!(
+            mock.methods().is_empty(),
+            "a rejected address must not be verified on-chain: {:?}",
+            mock.methods()
+        );
+    }
+
+    #[test]
+    fn usage_mistakes_are_errors_not_panics() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "unknown argument",
+                &["status", "--guard", VALID_GUARD, "--frobnicate", "1"],
+            ),
+            ("requires a value", &["status", "--guard"]),
+            (
+                "invalid --amount",
+                &[
+                    "check",
+                    "--guard",
+                    VALID_GUARD,
+                    "--asset",
+                    VALID_TOKEN,
+                    "--to",
+                    VALID_RECIPIENT,
+                    "--amount",
+                    "5.5",
+                ],
+            ),
+            (
+                "missing --to",
+                &[
+                    "check",
+                    "--guard",
+                    VALID_GUARD,
+                    "--asset",
+                    VALID_TOKEN,
+                    "--amount",
+                    "5",
+                ],
+            ),
+            (
+                "missing --asset",
+                &[
+                    "check",
+                    "--guard",
+                    VALID_GUARD,
+                    "--to",
+                    VALID_RECIPIENT,
+                    "--amount",
+                    "5",
+                ],
+            ),
+            (
+                "not a named network",
+                &["status", "--guard", VALID_GUARD, "--network", "localnet"],
+            ),
+        ];
+        for (expected, values) in cases {
+            let args = argv(values);
+            let (cmd, rest) = args.split_first().expect("subcommand");
+            let err = parse_request(cmd, rest).expect_err(&format!("{values:?} accepted"));
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
+    }
+
+    #[test]
+    fn network_presets_select_the_endpoint_and_passphrase() {
+        let cases = [
+            ("testnet", Network::Testnet),
+            ("futurenet", Network::Futurenet),
+            ("mainnet", Network::Mainnet),
+        ];
+        for (name, preset) in cases {
+            let args = argv(&["status", "--guard", VALID_GUARD, "--network", name]);
+            let (_, rest) = args.split_first().expect("subcommand");
+            let request = parse_request("status", rest).expect("preset selection");
+            assert_eq!(request.endpoint.network, Some(preset));
+            assert_eq!(request.endpoint.rpc_url, preset.rpc_url());
+            assert_eq!(request.endpoint.passphrase, preset.passphrase());
+            assert_eq!(
+                request.notice().is_some(),
+                preset == Network::Mainnet,
+                "only mainnet warns"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_rpc_url_overrides_the_default_endpoint() {
+        let args = argv(&[
+            "status",
+            "--guard",
+            VALID_GUARD,
+            "--rpc-url",
+            "http://127.0.0.1:8000/soroban/rpc",
+        ]);
+        let (_, rest) = args.split_first().expect("subcommand");
+        let request = parse_request("status", rest).expect("rpc-url override");
+        assert_eq!(
+            request.endpoint.rpc_url,
+            "http://127.0.0.1:8000/soroban/rpc"
+        );
+        assert_eq!(request.endpoint.network, None);
+        assert!(request.notice().is_none());
+
+        let args = argv(&[
+            "status",
+            "--guard",
+            VALID_GUARD,
+            "--network",
+            "futurenet",
+            "--rpc-url",
+            "http://127.0.0.1:8000/soroban/rpc",
+        ]);
+        let (_, rest) = args.split_first().expect("subcommand");
+        let err = parse_request("status", rest).expect_err("conflict accepted");
+        assert!(err.contains("conflicting network selection"), "{err}");
+    }
+
+    #[test]
+    fn mainnet_through_an_explicit_url_also_warns() {
+        let args = argv(&[
+            "status",
+            "--guard",
+            VALID_GUARD,
+            "--rpc-url",
+            "https://soroban.stellar.org/",
+        ]);
+        let (_, rest) = args.split_first().expect("subcommand");
+        let request = parse_request("status", rest).expect("mainnet url");
+        assert_eq!(request.endpoint.network, Some(Network::Mainnet));
+        assert!(request.notice().expect("warning").contains("unaudited"));
+    }
+
+    #[test]
+    fn submission_commands_require_the_agent_secret_and_reads_do_not() {
+        if std::env::var_os("AGENT_SECRET").is_some() {
+            return; // the environment supplies the secret, so the requirement holds anyway
+        }
+        for cmd in ["transfer", "heartbeat"] {
+            let values = if cmd == "transfer" {
+                argv(&[
+                    cmd,
+                    "--guard",
+                    VALID_GUARD,
+                    "--token",
+                    VALID_TOKEN,
+                    "--to",
+                    VALID_RECIPIENT,
+                    "--amount",
+                    "5",
+                ])
+            } else {
+                argv(&[cmd, "--guard", VALID_GUARD])
+            };
+            let (_, rest) = values.split_first().expect("subcommand");
+            let err =
+                parse_request(cmd, rest).expect_err(&format!("{cmd} accepted without a secret"));
+            assert!(err.contains("--agent-secret"), "{err}");
+        }
+        for cmd in ["status", "policy"] {
+            let args = argv(&["--guard", VALID_GUARD]);
+            parse_request(cmd, &args).expect("read command without a secret");
+        }
     }
 }
 
@@ -1274,16 +1751,250 @@ fn map_submission_error(err_str: &str) -> String {
     }
 }
 
+// ── Argument parsing ─────────────────────────────────────────────────────
+
+/// A command-line reader that pairs each flag with its value, so a missing
+/// value is reported as a usage error instead of a panic.
+struct Cli<'a> {
+    cmd: &'a str,
+    argv: &'a [String],
+    pos: usize,
+}
+
+impl<'a> Cli<'a> {
+    fn new(cmd: &'a str, argv: &'a [String]) -> Self {
+        Self { cmd, argv, pos: 0 }
+    }
+
+    fn next(&mut self) -> Option<String> {
+        let token = self.argv.get(self.pos).cloned();
+        if token.is_some() {
+            self.pos += 1;
+        }
+        token
+    }
+
+    /// The value belonging to the flag just consumed.
+    fn value(&mut self, flag: &str) -> Result<String, String> {
+        self.next()
+            .ok_or_else(|| format!("{flag} requires a value"))
+    }
+
+    fn positional(&mut self, name: &str) -> Result<String, String> {
+        self.next()
+            .ok_or_else(|| format!("`{}` requires {name}", self.cmd))
+    }
+
+    fn unknown(&self, flag: &str) -> String {
+        format!(
+            "unknown argument for `{}`: {flag} (see `agent-tx --help`)",
+            self.cmd
+        )
+    }
+}
+
+/// Validate a StrKey argument and parse it into the XDR address type. Parsing
+/// cannot fail after `strkey::validate_key` accepted the value: the version,
+/// length and checksum checks above are exactly what `ScAddress::from_str`
+/// requires.
+fn validate_address(field: &str, kind: KeyKind, value: &str) -> Result<ScAddress, String> {
+    strkey::validate_key(field, kind, value)?;
+    value.parse::<ScAddress>().map_err(|e| {
+        format!(
+            "internal error: {field} '{value}': passed StrKey validation but failed to parse: {e}"
+        )
+    })
+}
+
+fn parse_amount(raw: &str) -> Result<i128, String> {
+    raw.parse::<i128>().map_err(|e| {
+        format!("invalid --amount '{raw}': {e}; expected a signed integer in whole units")
+    })
+}
+
+/// One invocation's inputs, fully checked. Building a `Request` performs no
+/// network I/O: the guard, token, recipient and secret are all validated as
+/// StrKeys and the endpoint is resolved from a preset before an `Rpc` exists.
+#[derive(Debug)]
+struct Request {
+    guard: ScAddress,
+    token: Option<ScAddress>,
+    to: Option<ScAddress>,
+    amount: Option<i128>,
+    secret: Option<String>,
+    endpoint: Endpoint,
+    expect_blocked: bool,
+}
+
+impl Request {
+    /// The reminder the selected network owes the operator, if any: mainnet
+    /// prints the unaudited-contract warning (issue #54).
+    fn notice(&self) -> Option<&'static str> {
+        self.endpoint.network.and_then(Network::notice)
+    }
+
+    fn rpc(&self) -> Rpc {
+        Rpc {
+            url: self.endpoint.rpc_url.clone(),
+        }
+    }
+
+    fn args(&self) -> Args {
+        Args {
+            rpc: self.rpc(),
+            passphrase: self.endpoint.passphrase.clone(),
+            guard: self.guard.clone(),
+            secret: self.secret.clone(),
+            expect_blocked: self.expect_blocked,
+        }
+    }
+}
+
+/// The flags each subcommand takes, collected and then validated in one pass.
+fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
+    let mut cli = Cli::new(cmd, argv);
+    let mut guard = None;
+    let mut token = None;
+    let mut token_field = String::new();
+    let mut to = None;
+    let mut amount = None;
+    let mut secret = None;
+    let mut secret_field = String::new();
+    let mut network = None;
+    let mut rpc_url = None;
+    let mut passphrase = None;
+    let mut expect_blocked = false;
+
+    while let Some(flag) = cli.next() {
+        match flag.as_str() {
+            "--guard" => guard = Some(cli.value("--guard")?),
+            "--token" | "--asset" => {
+                token_field = flag.clone();
+                token = Some(cli.value(&flag)?);
+            }
+            "--to" => to = Some(cli.value("--to")?),
+            "--amount" => amount = Some(parse_amount(&cli.value("--amount")?)?),
+            "--agent-secret" | "--secret" => {
+                secret_field = flag.clone();
+                secret = Some(cli.value(&flag)?);
+            }
+            "--network" => network = Some(cli.value("--network")?),
+            "--rpc-url" => rpc_url = Some(cli.value("--rpc-url")?),
+            "--network-passphrase" => passphrase = Some(cli.value("--network-passphrase")?),
+            "--expect-blocked" => expect_blocked = true,
+            other => return Err(cli.unknown(other)),
+        }
+    }
+
+    let endpoint = network::resolve_endpoint(
+        network.as_deref(),
+        rpc_url.as_deref(),
+        passphrase.as_deref(),
+    )?;
+
+    // An alias in the local registry is resolved to its address first, so
+    // registry contents are validated exactly like a `--guard` on the command
+    // line.
+    let guard = validate_address(
+        "--guard",
+        KeyKind::Contract,
+        &resolve_guard(guard.as_deref())?,
+    )?;
+
+    let secret = secret.or_else(|| std::env::var("AGENT_SECRET").ok());
+    if secret_field.is_empty() && secret.is_some() {
+        secret_field = "--agent-secret (or AGENT_SECRET)".to_string();
+    }
+    if let Some(secret) = &secret {
+        strkey::validate_key(&secret_field, KeyKind::Secret, secret)?;
+    }
+    if matches!(cmd, "transfer" | "heartbeat") && secret.is_none() {
+        return Err(format!(
+            "missing --agent-secret (or AGENT_SECRET): `{cmd}` signs and submits, so it requires \
+             the registered agent's secret seed"
+        ));
+    }
+
+    // The spend-shaped subcommands take a token and a recipient. `transfer`
+    // names the token flag `--token`, `preflight`/`check` name it `--asset`;
+    // either spelling is accepted, and a complaint names the one used.
+    let spend_flags = matches!(cmd, "preflight" | "transfer" | "check");
+    let default_token_field = if cmd == "transfer" {
+        "--token"
+    } else {
+        "--asset"
+    };
+    let mut parsed_token = None;
+    let mut parsed_to = None;
+    if spend_flags {
+        let token_field = if token_field.is_empty() {
+            default_token_field.to_string()
+        } else {
+            token_field
+        };
+        let raw = token
+            .as_deref()
+            .ok_or_else(|| format!("missing {token_field}: `{cmd}` requires it"))?;
+        parsed_token = Some(validate_address(&token_field, KeyKind::Contract, raw)?);
+        let raw = to
+            .as_deref()
+            .ok_or_else(|| format!("missing --to: `{cmd}` requires it"))?;
+        parsed_to = Some(validate_address("--to", KeyKind::Recipient, raw)?);
+        if amount.is_none() {
+            return Err(format!("missing --amount: `{cmd}` requires it"));
+        }
+    }
+
+    Ok(Request {
+        guard,
+        token: parsed_token,
+        to: parsed_to,
+        amount,
+        secret,
+        endpoint,
+        expect_blocked,
+    })
+}
+
 fn print_help() {
     println!("agent-tx — simulate or submit Soroban transactions for Stellar Agent Guard");
     println!("Usage:");
     println!("  agent-tx preflight --guard <C...> --asset <C...> --to <G...> --amount <N> [--secret <S...>]");
     println!("  agent-tx transfer --guard <C...> --token <C...> --to <G...> --amount <N> --agent-secret <S...>");
     println!("  agent-tx heartbeat --guard <C...> --agent-secret <S...>");
-    println!("  agent-tx status --guard <C...> [--rpc-url ...] [--network-passphrase \"...\"]");
-    println!("  agent-tx policy --guard <C...> [--rpc-url ...] [--network-passphrase \"...\"]");
-    println!("  agent-tx check --guard <C...> --asset <C...> --to <G...> --amount <N> [--rpc-url ...] [--network-passphrase \"...\"]");
+    println!("  agent-tx status --guard <C...> [--network testnet|futurenet|mainnet]");
+    println!("  agent-tx policy --guard <C...> [--network testnet|futurenet|mainnet]");
+    println!("  agent-tx check --guard <C...> --asset <C...> --to <G...> --amount <N> [--network testnet|futurenet|mainnet]");
     println!("  agent-tx guards <add|list|remove|set-default> ...");
+    println!();
+    println!("Network selection:");
+    println!("  --network testnet|futurenet|mainnet   named preset endpoint + passphrase (default: testnet)");
+    println!(
+        "                                        mainnet: {}",
+        Network::Mainnet.rpc_url()
+    );
+    println!(
+        "                                        futurenet: {}",
+        Network::Futurenet.rpc_url()
+    );
+    println!("  --rpc-url <url>                       any endpoint; overrides the default, and is");
+    println!("                                        refused together with an explicit --network");
+    println!("  --network-passphrase <passphrase>     override the preset's passphrase (advanced:");
+    println!("                                        private or non-standard networks)");
+    println!(
+        "  Selecting mainnet prints the unaudited-contract reminder from SECURITY.md to stderr."
+    );
+    println!("  A StrKey's leading character encodes the key type, not the network, so address");
+    println!(
+        "  validation cannot catch a wrong-network address; the preset plus passphrase decide"
+    );
+    println!("  which network a call reaches.");
+    println!();
+    println!(
+        "Inputs: --guard/--asset/--token must be a contract ID (C...), --to an account (G...) or"
+    );
+    println!("contract (C...) ID, --agent-secret a secret seed (S...). All are checked for the");
+    println!("correct prefix, length and CRC16 checksum before any RPC request is made.");
     println!(
         "Preflight exit codes: 0=admitted, 1=blocked (signed simulation), 2=unsigned/inconclusive."
     );
@@ -1387,7 +2098,7 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
                     if sym.0.as_slice() == b"Policy" {
                         // PolicyConfig is stored as a Map with Symbol keys
                         let dms_grace_secs = extract_dms_grace_secs(&cdata.val);
-                        
+
                         // Heartbeat expired if: (now - last_heartbeat) > dms_grace_secs
                         // OR if dms_grace_secs is enabled (> 0) and last_heartbeat is 0 (never heartbeated)
                         if dms_grace_secs > 0 {
@@ -1396,7 +2107,9 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
                                 heartbeat_expired = true;
                             } else {
                                 // Check if grace period has elapsed
-                                heartbeat_expired = now.saturating_sub(last_heartbeat as u32) as u64 > dms_grace_secs;
+                                heartbeat_expired = now.saturating_sub(last_heartbeat as u32)
+                                    as u64
+                                    > dms_grace_secs;
                             }
                         }
                         break;
@@ -1502,15 +2215,15 @@ fn cmd_check(
                 if let Some(b64) = ev["xdr"].as_str() {
                     let de: DiagnosticEvent = xdr(b64);
                     let ContractEventBody::V0(v0) = &de.event.body;
-                        if v0.topics.len() >= 2 {
-                            // Extract the reason from the event topics
-                            if let ScVal::Symbol(reason) = &v0.topics[v0.topics.len() - 1] {
-                                // Convert ScSymbol to string for display
-                                let reason_str = String::from_utf8_lossy(&reason.0);
-                                println!("diagnostic_reason: {}", reason_str);
-                                break;
-                            }
+                    if v0.topics.len() >= 2 {
+                        // Extract the reason from the event topics
+                        if let ScVal::Symbol(reason) = &v0.topics[v0.topics.len() - 1] {
+                            // Convert ScSymbol to string for display
+                            let reason_str = String::from_utf8_lossy(&reason.0);
+                            println!("diagnostic_reason: {}", reason_str);
+                            break;
                         }
+                    }
                 }
             }
         }
@@ -1524,9 +2237,37 @@ fn cmd_check(
     Ok(())
 }
 
+fn exit_with(message: String) -> ! {
+    eprintln!("Error: {message}");
+    std::process::exit(1)
+}
+
+fn run_guards(argv: &[String]) {
+    let mut cli = Cli::new("guards", argv);
+    let subcommand = match cli.positional("a subcommand: add | list | remove | set-default") {
+        Ok(subcommand) => subcommand,
+        Err(message) => exit_with(message),
+    };
+    let result = match subcommand.as_str() {
+        "add" => cmd_guards_add(&mut cli),
+        "list" => {
+            cmd_guards_list();
+            Ok(())
+        }
+        "remove" => cmd_guards_remove(&mut cli),
+        "set-default" => cmd_guards_set_default(&mut cli),
+        other => Err(format!(
+            "unknown guards subcommand: {other} (expected add, list, remove or set-default)"
+        )),
+    };
+    if let Err(message) = result {
+        exit_with(message);
+    }
+}
+
 fn main() {
-    let mut it = std::env::args().skip(1);
-    let Some(cmd) = it.next() else {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let Some((cmd, rest)) = argv.split_first() else {
         print_help();
         std::process::exit(1);
     };
@@ -1534,136 +2275,72 @@ fn main() {
         print_help();
         return;
     }
+    if cmd == "guards" {
+        run_guards(rest);
+        return;
+    }
+    if !matches!(
+        cmd.as_str(),
+        "preflight" | "transfer" | "heartbeat" | "status" | "policy" | "check"
+    ) {
+        exit_with(format!(
+            "unknown subcommand '{cmd}' (see `agent-tx --help`)"
+        ));
+    }
 
-    match cmd.as_str() {
-        "guards" => {
-            let subcmd = it
-                .next()
-                .expect("guards subcommand: add | list | remove | set-default");
-            let result = match subcmd.as_str() {
-                "add" => cmd_guards_add(&mut it),
-                "list" => {
-                    cmd_guards_list();
-                    Ok(())
-                }
-                "remove" => cmd_guards_remove(&mut it),
-                "set-default" => cmd_guards_set_default(&mut it),
-                other => Err(format!("unknown guards subcommand: {other}")),
-            };
-            if let Err(e) = result {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
-            return;
-        }
-        "preflight" | "transfer" | "heartbeat" => {}
-        "status" | "policy" | "check" => {}
-        other => panic!("unknown subcommand {other}"),
+    // Parsing validates every address-typed flag and resolves the endpoint, so
+    // nothing past this point can reach the network with a malformed input.
+    let request = match parse_request(cmd, rest) {
+        Ok(request) => request,
+        Err(message) => exit_with(message),
+    };
+    if let Some(notice) = request.notice() {
+        eprintln!("{notice}");
     }
     if cmd == "preflight" {
         println!("send=no (preflight only)");
     }
 
-    let mut guard_s = None;
-    let mut token_s = None;
-    let mut to_s = None;
-    let mut amount: Option<i128> = None;
-    let mut secret = None;
-    let mut rpc_url = DEFAULT_RPC.to_string();
-    let mut passphrase = DEFAULT_PASSPHRASE.to_string();
-    let mut expect_blocked = false;
-
-    while let Some(a) = it.next() {
-        let mut val = || it.next().expect(&format!("value for {a}"));
-        match a.as_str() {
-            "--guard" => guard_s = Some(val()),
-            "--token" | "--asset" => token_s = Some(val()),
-            "--to" => to_s = Some(val()),
-            "--amount" => amount = Some(val().parse().expect("amount")),
-            "--agent-secret" | "--secret" => secret = Some(val()),
-            "--rpc-url" => rpc_url = val(),
-            "--network-passphrase" => passphrase = val(),
-            "--expect-blocked" => expect_blocked = true,
-            other => panic!("unknown argument {other}"),
-        }
-    }
-
-    let guard_addr = resolve_guard(guard_s.as_deref()).unwrap_or_else(|e| {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
-    });
-    let secret = secret.or_else(|| std::env::var("AGENT_SECRET").ok());
-    if cmd != "preflight"
-        && cmd != "status"
-        && cmd != "policy"
-        && cmd != "check"
-        && secret.is_none()
-    {
-        eprintln!("Error: --agent-secret (or AGENT_SECRET) is required for submission commands");
-        std::process::exit(1);
-    }
-    let guard: ScAddress = guard_addr.parse().expect("guard address");
-    let rpc = Rpc { url: rpc_url };
-
+    let rpc = request.rpc();
+    let passphrase = request.endpoint.passphrase.clone();
     match cmd.as_str() {
         "status" => {
-            if let Err(e) = cmd_status(&rpc, &guard, &passphrase) {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+            if let Err(e) = cmd_status(&rpc, &request.guard, &passphrase) {
+                exit_with(e);
             }
         }
         "policy" => {
-            if let Err(e) = cmd_policy(&rpc, &guard, &passphrase) {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+            if let Err(e) = cmd_policy(&rpc, &request.guard, &passphrase) {
+                exit_with(e);
             }
         }
         "check" => {
-            let asset: ScAddress = token_s.expect("--asset").parse().expect("asset address");
-            let to: ScAddress = to_s.expect("--to").parse().expect("to address");
-            let amount = amount.expect("--amount");
-            if let Err(e) = cmd_check(&rpc, &guard, &asset, &to, amount, &passphrase) {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+            let asset = request.token.clone().expect("validated --asset");
+            let to = request.to.clone().expect("validated --to");
+            let amount = request.amount.expect("validated --amount");
+            if let Err(e) = cmd_check(&rpc, &request.guard, &asset, &to, amount, &passphrase) {
+                exit_with(e);
             }
         }
         "preflight" => {
-            let token: ScAddress = token_s.expect("--asset").parse().expect("asset address");
-            let to: ScAddress = to_s.expect("--to").parse().expect("to address");
-            let amount = amount.expect("--amount");
-            let args = Args {
-                rpc,
-                passphrase,
-                guard: guard.clone(),
-                secret,
-                expect_blocked,
+            let call = Call::Transfer {
+                token: request.token.clone().expect("validated --asset"),
+                to: request.to.clone().expect("validated --to"),
+                amount: request.amount.expect("validated --amount"),
             };
-            let result = preflight(&Call::Transfer { token, to, amount }, &args, &args.rpc);
+            let args = request.args();
+            let result = preflight(&call, &args, &args.rpc);
             std::process::exit(result.err().unwrap_or(0));
         }
         "transfer" => {
-            let token: ScAddress = token_s.expect("--token").parse().expect("token address");
-            let to: ScAddress = to_s.expect("--to").parse().expect("to address");
-            let amount = amount.expect("--amount");
-            let args = Args {
-                rpc,
-                passphrase,
-                guard: guard.clone(),
-                secret,
-                expect_blocked,
+            let call = Call::Transfer {
+                token: request.token.clone().expect("validated --token"),
+                to: request.to.clone().expect("validated --to"),
+                amount: request.amount.expect("validated --amount"),
             };
-            run(&Call::Transfer { token, to, amount }, &args);
+            run(&call, &request.args());
         }
-        "heartbeat" => {
-            let args = Args {
-                rpc,
-                passphrase,
-                guard: guard.clone(),
-                secret,
-                expect_blocked,
-            };
-            run(&Call::Heartbeat, &args);
-        }
+        "heartbeat" => run(&Call::Heartbeat, &request.args()),
         _ => unreachable!(),
     }
 }

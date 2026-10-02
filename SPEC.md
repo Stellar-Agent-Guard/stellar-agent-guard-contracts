@@ -263,6 +263,87 @@ effective cap for that transfer. Per-recipient overrides maintain the same invar
 `RecipientWindowState`; recipients without an override use the global cap. Both the global cap
 and any matching per-recipient cap must be satisfied.
 
+### 3.2 Exact ScVal encoding of `PolicyConfig` (for non-TypeScript consumers)
+
+The SDK's `policyToScVal` is the corresponding TypeScript encoder. This section pins the on-wire
+`ScVal` layout so Go/Python/Rust integrators (or a future CLI) can
+implement encoders without reverse-engineering TS source. The layout below was derived from the
+soroban-sdk 27 `#[contracttype]` derives (the host is the ultimate referee) and is locked by
+`tests/policyconfig_scval_encoding.rs` and the shared vectors in
+[`tests/fixtures/policy-vectors.json`](tests/fixtures/policy-vectors.json). The Rust vector test
+decodes and round-trips each XDR value; [SDK issue #260](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/260)
+references this same file for the `policyToScVal` encoder assertion.
+
+**Top level:** `ScVal::Map` with exactly **14 entries**, one per field. The map keys are the
+field names as `ScVal::Symbol`.
+
+**Sort order is mandatory.** The entries below are listed in **ascending symbol-key order**
+(ASCII), which is the order the wire map must use. soroban-sdk generates struct decoders that
+read map entries positionally against the sorted field list — a decoder is **order-sensitive**:
+an encoder that emits declaration order instead of sorted order will silently misbind fields
+(e.g. `window_cap` decoded as `window_secs`) rather than fail loudly. Emit keys sorted; never
+rely on the struct's declaration order. The contract itself does not re-validate key order —
+§8 validates policy *semantics* — so sorted emission is entirely the encoder's responsibility.
+
+| # | Symbol key | Rust type | ScVal type | Notes |
+|----|--------------------|--------------------|------------|-------|
+| 1 | `active_from` | `u64` | `U64` | 0 = unrestricted |
+| 2 | `active_until` | `u64` | `U64` | 0 = unrestricted |
+| 3 | `allow_any_recipient` | `bool` | `Bool` | |
+| 4 | `assets` | `Vec<Address>` | `Vec` | elements are `ScVal::Address`; SAC token contracts are contract addresses |
+| 5 | `blocked_recipients` | `Vec<Address>` | `Vec` | denied destinations (checked first); account or contract addresses |
+| 6 | `dms_grace_secs` | `u64` | `U64` | 0 = DMS disabled |
+| 7 | `paused` | `bool` | `Bool` | |
+| 8 | `per_tx_cap` | `i128` | `I128` | `Int128Parts { hi: i64, lo: u64 }`, two's complement |
+| 9 | `protocol_calls_per_window` | `u32` | `U32` | 0 = disabled |
+| 10 | `protocols` | `Vec<ProtocolRule>` | `Vec` | elements are 2-entry maps, see below |
+| 11 | `recipient_window_caps` | `Vec<RecipientCap>` | `Vec` | elements are 2-entry maps, see below |
+| 12 | `recipients` | `Vec<Address>` | `Vec` | account addresses |
+| 13 | `window_cap` | `i128` | `I128` | 0 = disabled |
+| 14 | `window_secs` | `u64` | `U64` | |
+
+**`ProtocolRule` sub-encoding:** each element of `protocols` is itself a `ScVal::Map` with
+exactly 2 entries, keys sorted:
+
+| # | Symbol key | Rust type | ScVal type | Notes |
+|---|-----------|--------------------|------------|-------|
+| 1 | `contract` | `Address` | `Address` | contract address |
+| 2 | `fns` | `Option<Vec<Symbol>>` | `Vec` or `Void` | `Some(list)` → `ScVal::Vec` of `ScVal::Symbol`; `None` → `ScVal::Void` |
+
+**`RecipientCap` sub-encoding:** each element of `recipient_window_caps` is itself a
+`ScVal::Map` with exactly 2 entries, keys sorted:
+
+| # | Symbol key | Rust type | ScVal type | Notes |
+|---|-----------|------------|------------|-------|
+| 1 | `cap` | `i128` | `I128` | rolling cap within `window_secs`; 0 = disabled / fall back to global |
+| 2 | `recipient` | `Address` | `Address` | account address |
+
+**Primitive rules (apply everywhere, including nested values):**
+
+- `u64` → `ScVal::U64`; `protocol_calls_per_window: u32` → `ScVal::U32`.
+- `i128` → `ScVal::I128(Int128Parts { hi, lo })` — the 128-bit two's-complement value split into
+  a signed 64-bit high word and unsigned 64-bit low word. Example: `-1234567` encodes as
+  `hi: -1, lo: 18446744073708317049` (= 2⁶⁴ − 1234567). Non-negative values always have
+  `hi: 0`. §8 validation rejects negative caps, but integrators must still encode them
+  correctly to receive meaningful decode errors rather than garbage.
+- `Vec<T>` → `ScVal::Vec(Some(ScVec))`. An **empty vec stays an empty vec** — it must NOT be
+  encoded as `Void`.
+- `Option<T>` → `Some(v)` encodes as `v`; `None` encodes as **`ScVal::Void`** (this is why
+  `ProtocolRule.fns` is `Void` when any function is allowed). Do not confuse the two: an empty
+  `Vec` is a list with zero elements, `None` is the absence of the value.
+- `bool` → `ScVal::Bool`.
+- `Address` → `ScVal::Address` — `ScAddress::Contract(ContractId(Hash))` for contract IDs
+  (assets, protocol contracts) and `ScAddress::Account(AccountId(PublicKey::KeyTypeEd25519
+  (Uint256)))` for account IDs (recipients).
+- Serializing the tree above with Stellar XDR is deterministic (fixed-width big-endian fields,
+  `VecM` length prefixes), so byte equality is a valid equality test for policies.
+
+**Worked example — the Phase-1 fixture policy** (same values as the example in
+`docs/functions/set-policy.md`):
+
+JSON accepted by the CLI (`per_tx_cap`/`window_cap` quoted because they are `i128`):
+
+```json
 {
   "active_from": 0, "active_until": 0, "allow_any_recipient": false,
   "asset_caps": [],
@@ -372,6 +453,18 @@ For comparison, an **allowed** transfer with window pruning costs ~14,800 instru
     (`rearmed_dms: false`).
   - **No API change:** `unfreeze`'s signature, storage writes, and authorization are unchanged;
     this is purely additive event data (see §9).
+- **Executable specification.** `dms_timeline_edge_matrix` (`src/integration_tests.rs`) is the
+  table-driven walk of rule #2 and is normative for its edges: install arms the clock at
+  `LastHeartbeat = now`, the 80% warn band is reached while spend is still admissible (`> grace`,
+  not `>= grace`), expiry blocks the transfer *and* the heartbeat, a blocked heartbeat leaves the
+  clock untouched, and `unfreeze` re-arms it so the new window expires on its own terms. It also
+  pins the two degenerate encodings: `dms_grace_secs == 0` (switch disabled — no amount of silence
+  expires the account, `dms_health` returns `Ok` without consulting the clock) and
+  `LastHeartbeat == 0` (never armed — rule #2's `!= 0` clause means the gate can never fire on the
+  sentinel, while `dms_health` reports `Expired`; a first heartbeat replaces the sentinel and the
+  grace binds from then on). Read that asymmetry as intended: the gate defaults to *not* freezing an
+  account it holds no attestation for, and the advisory view is where the missing attestation is
+  surfaced. Measured: see `dms_timeline_edge_matrix` (scenario B).
 
 ---
 
@@ -392,6 +485,9 @@ calls whose semantics and arguments are known:
 
 - `transfer` args: `(from, to, amount)` — the account is `from`; recipient = args[1], amount = args[2].
 - `transfer_from` args: `(from, spender, to, amount)` — the account is `from`; recipient = args[2], amount = args[3].
+
+Note on multi-asset batches: the window total is a unit-less sum across assets until per-asset caps
+land; operators should use single-asset policies for meaningful windows.
 
 **Exact arity required; extra args deny -- we do not partially parse.** A call whose argument list does not match the SAC schema exactly (`transfer` = 3, `transfer_from` = 4) is rejected with `UnknownContract` and never reaches the cap/allowlist evaluation. We only enforce what we fully understand; a context carrying extra trailing values is treated as a call we cannot reason about (conservative default-deny).
 
@@ -508,7 +604,9 @@ To close the CheckResult/Error duality gap, every contract `Error` variant maps 
 | 26 | `UnknownContract` | `unknown_contract` | No | Auth-path only: unlisted contracts are encountered in auth contexts. |
 | 27 | `SelfFunctionNotAllowed` | `self_function_not_allowed` | No | Auth-path only: self-calls are part of `__check_auth` context dispatch. |
 | 28 | `CreateContractNotAllowed` | `create_contract_not_allowed` | No | Auth-path only: contract creation host functions occur in auth contexts. |
-| 29 | `RecipientBlocked` | `recipient_blocked` | Yes | Recipient is on the explicit denylist.
+| 29 | `RecipientBlocked` | `recipient_blocked` | Yes | Recipient is on the explicit denylist. |
+| 30 | `ProtocolCallRateExceeded` | `protocol_call_rate_exceeded` | No | Auth-path only: protocol-call rate limits apply to auth contexts. |
+| 31 | `DecisionInvariantViolation` | `decision_invariant_violation` | No | Internal invariant guard: the policy engine returned inconsistent verdict data. |
 
 // ── Policy management (admin only) ────────────────────────────────────────
 pub fn set_policy(env: Env, config: PolicyConfig)
@@ -632,7 +730,8 @@ pub enum Error {            // values stable; see tests/fixtures
     WindowCapExceeded = 23, ProtocolNotAllowed = 24, FunctionNotAllowed = 25,
     UnknownContract = 26, SelfFunctionNotAllowed = 27,
     CreateContractNotAllowed = 28,
-    RecipientBlocked = 29,
+    RecipientBlocked = 29, ProtocolCallRateExceeded = 30,
+    DecisionInvariantViolation = 31,
 }
 ```
 
@@ -749,6 +848,7 @@ exists to drift. Notes:
   the decision conservative: no realistic policy is affected, only clearly accidental
   ones. `0` remains legal for both fields (feature disabled, as documented).
 - `active_until == 0 || active_until > active_from`.
+- Policies may be installed with an `active_until` already elapsed or an `active_from` far in the past; this is allowed as a feature to park accounts in a dormant/pre-active state (subsequent transfers evaluate to `OutsideActiveWindow` until ledger time falls within the active window).
 - Assets, protocols, recipients, and per-protocol fn lists must be non-empty for their
   respective vectors to matter (empty `assets` = no SAC transfer is ever allowed; empty
   `recipients` with `allow_any_recipient == false` = no recipient allowed).
