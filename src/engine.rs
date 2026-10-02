@@ -1159,6 +1159,104 @@ mod tests {
     }
 
     #[test]
+    fn active_window_boundaries_are_inclusive() {
+        // SPEC §4 row 5: block when `now < active_from` or `now > active_until`,
+        // so `now == active_from` and `now == active_until` are allowed. Pin
+        // the exact boundary instants so an off-by-one in a refactor cannot
+        // silently shift operator-defined execution windows.
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.active_from = 1_000;
+        p.active_until = 2_000;
+        let mut l = Ledger::empty(&env);
+
+        // One second before the window opens: blocked.
+        let d_before = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            p.active_from - 1,
+            vec![&env, transfer_ctx(&env, 1, 2, 5)],
+        );
+        assert!(matches!(
+            d_before.first().unwrap(),
+            Decision::Blocked(Error::OutsideActiveWindow)
+        ));
+
+        // Exactly at `active_from`: allowed (inclusive lower bound).
+        let d_from = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            p.active_from,
+            vec![&env, transfer_ctx(&env, 1, 2, 5)],
+        );
+        assert!(matches!(d_from.first().unwrap(), Decision::Allowed));
+
+        // Exactly at `active_until`: allowed (inclusive upper bound).
+        let d_until = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            p.active_until,
+            vec![&env, transfer_ctx(&env, 1, 2, 5)],
+        );
+        assert!(matches!(d_until.first().unwrap(), Decision::Allowed));
+
+        // One second after the window closes: blocked.
+        let d_after = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            p.active_until + 1,
+            vec![&env, transfer_ctx(&env, 1, 2, 5)],
+        );
+        assert!(matches!(
+            d_after.first().unwrap(),
+            Decision::Blocked(Error::OutsideActiveWindow)
+        ));
+    }
+
+    #[test]
+    fn active_window_open_bounds_are_ignored() {
+        // `active_from == 0` and `active_until == 0` disable the respective
+        // bound entirely, so the boundary semantics above only apply to
+        // configured (non-zero) bounds.
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.active_from = 0;
+        p.active_until = 0;
+        let mut l = Ledger::empty(&env);
+
+        // Far before any configured window and far after: still allowed.
+        for now in [0u64, 1, u64::MAX] {
+            let d = decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut l,
+                now,
+                vec![&env, transfer_ctx(&env, 1, 2, 5)],
+            );
+            assert!(
+                matches!(d.first().unwrap(), Decision::Allowed),
+                "now={now} should be allowed when both bounds are disabled"
+            );
+        }
+    }
+
+    #[test]
     fn heartbeat_allowed_but_expired_blocked_even_for_heartbeat() {
         let env = Env::default();
         let sa = self_addr(&env);

@@ -3165,6 +3165,67 @@ fn status_outside_active_window_matches_check_block_reason() {
     assert_eq!(detail.result, CheckResult::Allowed);
 }
 
+// ── active-window boundary semantics (SPEC §4 row 5) ─────────────────────
+// SPEC §4 row 5 blocks when `now < active_from` or `now > active_until`,
+// which makes both boundaries *inclusive*: a transfer at exactly
+// `active_from` or exactly `active_until` is inside the operator-defined
+// execution window. `set_policy` validates `active_until > active_from`,
+// so the window is never empty. These tests pin the exact boundary
+// instants so an off-by-one introduced in a refactor cannot silently
+// change financial timing behavior.
+
+#[test]
+fn active_window_boundaries_are_inclusive() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.active_from = 1_500;
+    p.active_until = 1_600;
+    h.install_policy(&p);
+
+    // One second before the window opens: blocked.
+    h.set_time(1_499);
+    h.transfer_expect_blocked(&recv, 5);
+
+    // Exactly at `active_from`: allowed (inclusive lower boundary).
+    h.set_time(1_500);
+    h.transfer(&recv, 5);
+
+    // Exactly at `active_until`: allowed (inclusive upper boundary).
+    h.set_time(1_600);
+    h.transfer(&recv, 5);
+
+    // One second after the window closes: blocked.
+    h.set_time(1_601);
+    h.transfer_expect_blocked(&recv, 5);
+}
+
+#[test]
+fn active_window_boundaries_match_check_block_reason() {
+    // The on-chain gate and the `check` decision must agree at every
+    // boundary instant: `outside_active_window` iff the timestamp is
+    // strictly outside `[active_from, active_until]`.
+    let h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.active_from = 1_500;
+    p.active_until = 1_600;
+    h.install_policy(&p);
+
+    let outside = Symbol::new(&h.env, "outside_active_window");
+    let check = |now: u64| {
+        h.env.ledger().set_timestamp(now);
+        h.env.as_contract(&h.guard, || {
+            PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 1)
+        })
+    };
+
+    assert_eq!(check(1_499).result, CheckResult::Blocked(outside.clone()));
+    assert_eq!(check(1_500).result, CheckResult::Allowed);
+    assert_eq!(check(1_600).result, CheckResult::Allowed);
+    assert_eq!(check(1_601).result, CheckResult::Blocked(outside));
+}
+
 #[test]
 fn status_reads_never_write_window_or_emit_events() {
     // `status` is an event-free, write-free read. `env.events().all()` holds
