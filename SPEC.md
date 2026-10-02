@@ -138,6 +138,7 @@ pub struct PolicyConfig {
     pub assets: Vec<Address>,                // SAC token contracts whose transfers get parsed/enforced
     pub protocols: Vec<ProtocolRule>,        // allowlisted non-asset contracts the account may call
     pub recipients: Vec<Address>,            // allowed SAC transfer destinations
+    pub asset_caps: Vec<AssetCap>,           // per-asset cap overrides; empty = global behavior unchanged
     pub recipient_window_caps: Vec<RecipientCap>, // per-recipient rolling cap overrides; 0 = fall back to global
     pub blocked_recipients: Vec<Address>,    // denied SAC transfer destinations (checked first)
     pub allow_any_recipient: bool,           // escape hatch: skip recipient allowlist (still capped)
@@ -152,6 +153,13 @@ pub struct PolicyConfig {
 pub struct ProtocolRule {
     pub contract: Address,
     pub fns: Option<Vec<Symbol>>,         // None = any function; Some = function allowlist
+}
+
+#[contracttype]
+pub struct AssetCap {
+    pub asset: Address,                   // must be a member of `assets`; unknown-asset overrides rejected
+    pub per_tx_cap: i128,                 // per-asset per-tx cap; 0 = fall back to global per_tx_cap
+    pub window_cap: i128,                 // per-asset rolling cap; 0 = fall back to global window_cap
 }
 
 #[contracttype]
@@ -223,6 +231,15 @@ Implementation (exact, lazy, bounded):
   `window_secs` span") is preserved in all cases; in the pathological region of ≥8192 distinct
   spend seconds within one window the engine is conservative until density drops. This is
   documented here and in the README, not hidden.
+**Per-asset windows (v1 decision).** Per-asset overrides change the *cap* compared against,
+not the window ledger. There remains exactly one global rolling ledger (`WindowState.total` /
+`entries`); a transfer's effective per-tx cap and effective window cap are resolved from
+`asset_caps` (matching the transfer's asset) with fallback to the global `per_tx_cap` /
+`window_cap`. Full per-asset rolling ledgers (independent windows per asset) are explicitly
+out of scope for v1 and tracked as a separate issue if demanded. This keeps the window
+invariant (§3.1) unchanged: the global `total` is still the sum of all admitted asset spends
+in the window, and admission requires `total + amount <= effective_window_cap(asset)`.
+
 - **Merge telemetry:** each successful admission that triggers this backstop emits one
   `event_window_merged` event. Topic 1 identifies `global_spend`, `recipient_spend`, or
   `protocol_calls`; data is the compact tuple `(merged_ts, merged_value)`, where `merged_ts`
@@ -329,6 +346,7 @@ JSON accepted by the CLI (`per_tx_cap`/`window_cap` quoted because they are `i12
 ```json
 {
   "active_from": 0, "active_until": 0, "allow_any_recipient": false,
+  "asset_caps": [],
   "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
   "blocked_recipients": [],
   "dms_grace_secs": 60, "paused": false, "per_tx_cap": "1000",
@@ -336,32 +354,6 @@ JSON accepted by the CLI (`per_tx_cap`/`window_cap` quoted because they are `i12
   "recipients": ["GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"],
   "window_cap": "150", "window_secs": 60
 }
-```
-
-The same policy as a structural `ScVal` tree (keys in mandatory sorted order):
-
-```text
-ScVal::Map(Some(vec![
-  ("active_from",         U64(0)),
-  ("active_until",        U64(0)),
-  ("allow_any_recipient", Bool(false)),
-  ("assets",              Vec([Address(Contract(CBLQ…JC7))])),      // 1 element
-  ("blocked_recipients",  Vec([])),                                  // empty vec, NOT Void
-  ("dms_grace_secs",      U64(60)),
-  ("paused",              Bool(false)),
-  ("per_tx_cap",          I128(Int128Parts { hi: 0, lo: 1000 })),
-  ("protocols",           Vec([])),                                  // empty vec, NOT Void
-  ("recipient_window_caps", Vec([])),                            // empty vec, NOT Void
-  ("recipients",          Vec([Address(Account(GDUY…RRX))])),        // 1 element
-  ("window_cap",          I128(Int128Parts { hi: 0, lo: 150 })),
-  ("window_secs",         U64(60)),
-]))
-```
-
-Note the two address shapes: `assets` holds contract (C…) addresses →
-`ScAddress::Contract`, while `recipients` holds account (G…) addresses →
-`ScAddress::Account`.
-
 ---
 
 ## 4. Policy semantics — decision table
@@ -506,10 +498,14 @@ Rules applied (in order; the denylist is checked before the allowlist/escape hat
    `allow_any_recipient`.
 2. **Recipient allowlist:** if `allow_any_recipient == false`, `recipient ∈ policy.recipients`
    or block `RecipientNotAllowed`.
-3. **Per-tx cap:** if `per_tx_cap != 0`, `amount <= per_tx_cap` or block `PerTxCapExceeded`.
-4. **Rolling window (§3.1):**
-   - Global window: if `window_cap != 0`, prune expired entries, then
-     `total + amount <= window_cap` or block `WindowCapExceeded`.
+2. **Per-tx cap:** resolve the effective per-tx cap for the transfer's asset — the matching
+   `asset_caps` entry's `per_tx_cap` when non-zero, otherwise the global `per_tx_cap`. If the
+   effective cap is non-zero, `amount <= effective_per_tx_cap` or block `PerTxCapExceeded`.
+3. **Rolling window (§3.1):**
+   - Global window: resolve the effective window cap for the transfer's asset — the matching
+     `asset_caps` entry's `window_cap` when non-zero, otherwise the global `window_cap`. If the
+     effective cap is non-zero, prune expired entries, then
+     `total + amount <= effective_window_cap` or block `WindowCapExceeded`.
    - Per-recipient window: if `recipient` has an entry in `policy.recipient_window_caps` with
      `cap > 0`, use that cap against the recipient's own rolling ledger; otherwise fall back to
      the global window cap. If the effective cap is exceeded, block `WindowCapExceeded`.
@@ -746,8 +742,9 @@ entry TTLs under §9.5 and emits the same `auth_checked` event, with the same
 capacity available before the requested transfer; it is `None` when no effective
 window cap applies to the queried recipient (no global `window_cap` and no
 per-recipient override). The configured and effective caps are `None` when
-disabled; v1 has no per-asset overrides, so the effective per-transaction cap
-equals the configured cap.
+disabled. `effective_per_tx_cap` and `effective_window_cap` reflect the resolved
+per-asset override for the queried asset when one is configured, otherwise they
+equal the configured global caps.
 
 ### 7.2 Preflight / simulate a transfer (doc alias for `check`)
 
@@ -858,6 +855,12 @@ exists to drift. Notes:
 - Duplicate addresses within a list are rejected (`assets`, `recipients`,
   `blocked_recipients`, `protocols`).
 - Duplicate recipients within `recipient_window_caps` are rejected.
+- Duplicate assets within `asset_caps` are rejected.
+- Every `asset_caps[i].asset` must appear in `assets`; an override for an asset not in
+  `assets` is rejected (`InvalidConfig`) rather than silently ignored.
+- Every `asset_caps[i].per_tx_cap >= 0` and `asset_caps[i].window_cap >= 0`.
+- `recipients` and `recipient_window_caps` are each bounded to `MAX_RECIPIENT_ENTRIES` (256)
+  entries to keep allowlist scans and per-recipient storage predictable.
 - `recipients` and `blocked_recipients` must not intersect — a contradictory config is
   rejected.
 - The contract's own address may not appear in **any** of the address lists:
@@ -865,11 +868,13 @@ exists to drift. Notes:
     by policy, so a self-entry would be a nonsensical allowlist.
   - `protocols` — same: allowlisting the account to call itself through the policy path is
     meaningless (and §6.1 already decides what self-calls are allowed).
-  - `recipients` and `blocked_recipients` — the account paying itself is a no-op loop (a
+- `recipients` and `blocked_recipients` — the account paying itself is a no-op loop (a
     self-debit/re-credit of the same SAC balance) with no purpose; allowing it adds no
     capability while making a mis-pasted recipient address look like a deliberate policy.
     Rejected (recommended: catches typos) rather than allowed-with-documentation.
   - The same rule applies to `recipient_window_caps` entries.
+  - `asset_caps` — same reasoning: a self-entry cannot be a valid SAC asset override and is
+    rejected.
   The self-address is known pre-`initialize` (`env.current_contract_address()` is a
   deployment-time constant), and `set_policy` can only run post-initialize, so the check
   always compares against the real deployed contract ID.
