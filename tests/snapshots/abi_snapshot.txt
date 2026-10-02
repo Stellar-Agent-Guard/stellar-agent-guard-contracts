@@ -66,6 +66,7 @@ enum PolicyRuleId
   DurationExceedsBound
   AssetListTooLong
   ProtocolListTooLong
+  PerTxCapExceedsWindowCap
 enum ValidationOutcome
   Valid
   Invalid(PolicyRuleId)

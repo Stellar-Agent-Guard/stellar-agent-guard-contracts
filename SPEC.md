@@ -702,7 +702,7 @@ pub enum PolicyRuleId { AmountSign, WindowRequiresWidth, ActiveWindowOrder,
                         RecipientCapSign, RecipientAllowAndBlocked,
                         ProtocolContractDuplicate, ProtocolFnListInvalid,
                         DurationExceedsBound, AssetListTooLong,
-                        ProtocolListTooLong }
+                        ProtocolListTooLong, PerTxCapExceedsWindowCap }
 
 #[contracttype]
 pub enum ValidationOutcome { Valid, Invalid(PolicyRuleId) }
@@ -831,6 +831,14 @@ exists to drift. Notes:
   authorization scans, validation work, and per-recipient storage.
 - `window_cap != 0` requires `window_secs != 0`.
 - A per-recipient cap `> 0` requires `window_secs != 0`.
+- `per_tx_cap <= window_cap` when both are enabled (`per_tx_cap > 0 && window_cap > 0`; issue #33).
+  Rationale: if `per_tx_cap > window_cap` (both nonzero), every transfer above `window_cap` is
+  double-rejected and transfers between the two values pass per-tx only to fail on window — a
+  config that is legal in raw types but never admits its advertised per-tx range, i.e. operator error
+  the contract catches at install time and rejects as `InvalidConfig` (fail-closed, policy unchanged).
+  When either cap is disabled (`0`), this check is skipped: a per-tx cap with window disabled (`window_cap == 0`)
+  is legal, as is a window cap with per-tx limit disabled (`per_tx_cap == 0`). Equal caps
+  (`per_tx_cap == window_cap`) are explicitly allowed.
 - `window_secs <= MAX_WINDOW_SECS` and `dms_grace_secs <= MAX_DMS_GRACE_SECS`
   (both `315_360_000` seconds = 86_400 × 3_650 ≈ 10 years, `types::MAX_WINDOW_SECS` /
   `types::MAX_DMS_GRACE_SECS`, issue #34). Rationale: both fields are `u64`, so a
@@ -902,6 +910,7 @@ order:
 | `RecipientAllowAndBlocked` | a recipient in both `recipients` and `blocked_recipients` |
 | `ProtocolContractDuplicate` | the same contract in two protocol rules |
 | `ProtocolFnListInvalid` | a protocol rule's fn list empty or containing duplicates |
+| `PerTxCapExceedsWindowCap` | `per_tx_cap > window_cap` when both are enabled (`> 0`; issue #33) |
 | `DurationExceedsBound` | `window_secs` or `dms_grace_secs` over `MAX_WINDOW_SECS` (`315_360_000` s ≈ 10 years; evaluated last so the other variant ordinals stay wire-stable) |
 
 `validate_policy` is a read: no auth, no events, no state writes (read-path

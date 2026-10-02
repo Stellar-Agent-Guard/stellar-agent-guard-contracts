@@ -332,6 +332,14 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     if cfg.window_cap > 0 && cfg.window_secs == 0 {
         return Err(PolicyRuleId::WindowRequiresWidth);
     }
+    // Per-tx cap cannot exceed rolling window cap when both are enabled
+    // (issue #33): any transfer above `window_cap` would be double-rejected,
+    // and amounts between the two would pass per-tx only to fail on window.
+    // That advertised range is never admitted, so we reject as InvalidConfig.
+    // Skipped when either cap is disabled (0). Equal values are allowed.
+    if cfg.per_tx_cap > 0 && cfg.window_cap > 0 && cfg.per_tx_cap > cfg.window_cap {
+        return Err(PolicyRuleId::PerTxCapExceedsWindowCap);
+    }
     if cfg.active_until != 0 && cfg.active_until <= cfg.active_from {
         return Err(PolicyRuleId::ActiveWindowOrder);
     }
