@@ -21,22 +21,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # Actions are pinned to full 40-char commit SHAs (tag rewriting cannot
+      # swap the code this workflow runs). Bump SHAs only via Dependabot
+      # `github-actions` PRs — never by hand (see CONTRIBUTING.md).
       - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: wasm32v1-none
           components: clippy, rustfmt
 
       - name: Install Stellar CLI
+        uses: stellar/stellar-cli@300aaf69ab100536678bdb641428b06f06b318ea # v28.0.0
         uses: stellar/stellar-cli@v28.1.0
         with:
           version: 28.0.0
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry

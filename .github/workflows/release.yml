@@ -56,15 +56,19 @@ jobs:
     needs: [gates]
     runs-on: ubuntu-latest
     steps:
+      # Actions are pinned to full 40-char commit SHAs (tag rewriting cannot
+      # swap the code this release build runs). Bump SHAs only via Dependabot
+      # `github-actions` PRs — never by hand (see CONTRIBUTING.md).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: wasm32v1-none
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -94,6 +98,9 @@ jobs:
           # `--describe binaries` emits one SBOM per binary target; this crate
           # has exactly one (the shipped cdylib), renamed to a stable asset name.
           cp ./*-cdylib.cdx.json dist/sbom.cdx.json
+          # Downstream repos (dashboard / SDK / deploy automation) must consume
+          # the release's artifact provenance rather than one hardcoded hash.
+          sha256sum dist/*.wasm dist/sbom.cdx.json > dist/checksums.txt
           {
             echo "package: stellar-agent-guard-contracts"
             echo "tag: ${{ github.ref_name }}"
@@ -107,11 +114,12 @@ jobs:
           cat dist/provenance.txt
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             dist/stellar_agent_guard_contracts.wasm
             dist/stellar_agent_guard_contracts.wasm.sha256
             dist/provenance.txt
             dist/sbom.cdx.json
+            dist/checksums.txt
           generate_release_notes: true

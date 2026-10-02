@@ -818,6 +818,23 @@ impl PolicyEngine {
     /// engine returns no verdict for the single submitted preflight context.
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
+        let cfg = persist_get::<PolicyConfig>(&env, &DataKey::Policy);
+        let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
+        let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let now = env.ledger().timestamp();
+        let self_addr = env.current_contract_address();
+        let mut ledger = load_ledger(&env);
+
+        // A missing policy is decided by `decide` itself (SPEC §4 ordering:
+        // admin freeze outranks no-policy), so `None` flows straight through.
+        if let Some(cfg) = cfg.as_ref() {
+            if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
+                ledger.prune(now, cfg.window_secs);
+            }
+        }
+        let (remaining_window, per_tx_cap, effective_window_cap) = cfg
+            .as_ref()
+            .map_or((None, None, None), |cfg| cap_metrics(cfg, &ledger, &to));
         let Some(snapshot) = AuthSnapshot::load(&env) else {
             emit_auth(&env, false, Some(Error::NoPolicy), 0);
             return CheckDetail {
@@ -850,6 +867,7 @@ impl PolicyEngine {
         let verdicts = decide(
             &env,
             &self_addr,
+            cfg.as_ref(),
             Some(&policy),
             &AccountState {
                 admin_frozen,
@@ -929,6 +947,12 @@ impl CustomAccountInterface for PolicyEngine {
         let message: Bytes = signature_payload.into();
         env.crypto().ed25519_verify(&agent, &message, &signatures);
 
+        // 3. Policy snapshot + gate evaluation over every context.
+        // A missing policy is decided by `decide` itself (SPEC §4 ordering:
+        // admin freeze outranks no-policy), so `None` flows straight through.
+        let cfg = persist_get::<PolicyConfig>(&env, &DataKey::Policy);
+        let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
+        let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
         // 3. Policy snapshot + gate evaluation over every context. The whole
         //    storage read set of an authorization happens here, in one place,
         //    exactly once per key — see the `AuthSnapshot` invariant.
@@ -952,6 +976,7 @@ impl CustomAccountInterface for PolicyEngine {
         let verdicts = decide(
             &env,
             &self_addr,
+            cfg.as_ref(),
             Some(&policy),
             &AccountState {
                 admin_frozen,
