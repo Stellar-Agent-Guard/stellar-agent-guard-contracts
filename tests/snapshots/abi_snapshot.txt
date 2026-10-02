@@ -160,3 +160,4 @@ struct RecipientLedger
 28 CreateContractNotAllowed create_contract_not_allowed
 29 RecipientBlocked recipient_blocked
 30 ProtocolCallRateExceeded protocol_call_rate_exceeded
+31 DecisionInvariantViolation decision_invariant_violation
