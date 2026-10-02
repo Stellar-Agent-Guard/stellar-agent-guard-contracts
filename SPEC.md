@@ -366,6 +366,16 @@ Note the two address shapes: `assets` holds contract (C…) addresses →
 
 ## 4. Policy semantics — decision table
 
+### 4.0 Pre-decision authentication and snapshot pipeline (`__check_auth`)
+
+Before any policy gate or classification rule is evaluated, `__check_auth` executes a strict 3-step authentication sequence:
+
+1. **Agent key registration check:** `DataKey::AgentPubkey` must exist in instance storage (set during `initialize`). If missing, `__check_auth` returns contract error `Error::NotInitialized` (code #3). Crucially, this check precedes cryptographic verification, so an uninitialized account returns `NotInitialized` even when provided arbitrary or invalid signature bytes.
+2. **Ed25519 signature verification:** `env.crypto().ed25519_verify(&agent, &signature_payload, &signatures)`. If verification fails (wrong signer key or corrupted signature bytes), the host crypto function traps the execution frame (`InvokeError::Abort`). Crucially, this host trap occurs before policy snapshot loading, so an unauthorized or wrong-key signature aborts the frame immediately and never proceeds to return `Error::NoPolicy` or leak whether a policy is installed.
+3. **Policy snapshot loading:** `AuthSnapshot::load(&env)`. If `DataKey::Policy` is missing (never set or revoked), `__check_auth` returns contract error `Error::NoPolicy` (code #12).
+
+Once authentication succeeds and the policy snapshot is loaded, the decision table below is evaluated over every auth context:
+
 Evaluation order inside `__check_auth` (first match wins; all states below are evaluated against
 ledger time, which Soroban code cannot forge):
 
@@ -589,7 +599,7 @@ To close the CheckResult/Error duality gap, every contract `Error` variant maps 
 
 | Error Code | Error Variant | Reason Symbol (`CheckResult::Blocked`) | Reachable via `check()`? | Rationale for Unreachable Direction |
 |---|---|---|---|---|
-| 1 | `Unauthorized` | `unauthorized` | No | Auth-path only: signature validation or admin auth failure traps before policy check. |
+| 1 | `Unauthorized` | `unauthorized` | No | Auth-path only: `ed25519_verify` traps the host frame (`InvokeError::Abort`) on invalid signature, and admin ops enforce `require_auth(Admin)`. `Unauthorized` is retained in the ABI error enum for protocol completeness. |
 | 2 | `AlreadyInitialized` | `already_initialized` | No | Admin lifecycle op: initialize is run once during deployment setup, not a check parameter. |
 | 3 | `NotInitialized` | `not_initialized` | Yes | Pre-activation guard check. |
 | 4 | `InvalidConfig` | `invalid_config` | No | Admin op: `set_policy` validation error; policies are not passed into `check()`. |
@@ -659,9 +669,11 @@ impl CustomAccountInterface for PolicyEngine {
     type Error = Error;
     fn __check_auth(env, signature_payload: Hash<32>, signatures: BytesN<64>,
                     auth_contexts: Vec<Context>) -> Result<(), Error>;
-    // 1. ed25519_verify(AgentPubkey, signature_payload, signatures) or Unauthorized.
-    // 2. Decision table §4 + classification §6 over every context.
-    // 3. Events (§9) + TTL refreshes (§9.5); spend-accounting writes only on admission.
+    // 1. Agent pubkey registered (initialize done) -> Error::NotInitialized (#3) if absent.
+    // 2. ed25519_verify(AgentPubkey, signature_payload, signatures) -> host crypto trap (InvokeError::Abort) on bad signature / wrong key.
+    // 3. Policy snapshot load (AuthSnapshot::load) -> Error::NoPolicy (#12) if absent / revoked.
+    // 4. Decision table §4 + classification §6 over every context.
+    // 5. Events (§9) + TTL refreshes (§9.5); spend-accounting writes only on admission.
 }
 ```
 

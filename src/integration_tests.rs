@@ -42,7 +42,7 @@ use soroban_sdk::xdr::{
     SorobanCredentials, WriteXdr,
 };
 use soroban_sdk::{
-    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, Symbol, Val,
+    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, InvokeError, Symbol, Val,
 };
 use std::format;
 
@@ -713,6 +713,56 @@ impl Harness {
             memory_read_entries: detailed.resources.memory_read_entries,
             memcmp: memcmp_charges(&self.env),
         }
+    }
+
+    /// Invoke `__check_auth` directly via host routing and return the exact outcome:
+    /// `Ok(())` on authorization success,
+    /// `Err(Ok(err))` if `__check_auth` returned contract error `err`, or
+    /// `Err(Err(InvokeError::Abort))` if host verification trapped (e.g. invalid signature).
+    fn invoke_check_auth_transfer(
+        &mut self,
+        guard: &Address,
+        signer: &SigningKey,
+        to: &Address,
+        amount: i128,
+    ) -> Result<(), Result<GuardError, InvokeError>> {
+        let root = self.transfer_invocation(guard, to, amount);
+        let nonce = self.guard_nonce;
+        self.guard_nonce += 1;
+        let payload = self.payload(nonce, &root);
+        let sig = signer.sign(&payload).to_bytes();
+
+        let mut args: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(&self.env);
+        args.push_back(guard.clone().into_val(&self.env));
+        args.push_back(to.clone().into_val(&self.env));
+        args.push_back(amount.into_val(&self.env));
+        let contexts = vec![
+            &self.env,
+            Context::Contract(ContractContext {
+                contract: self.asset.clone(),
+                fn_name: Symbol::new(&self.env, "transfer"),
+                args,
+            }),
+        ];
+
+        let payload = BytesN::<32>::from_array(&self.env, &payload);
+        let signature: Val = BytesN::<64>::from_array(&self.env, &sig).into_val(&self.env);
+        self.env
+            .try_invoke_contract_check_auth::<GuardError>(guard, &payload, signature, &contexts)
+    }
+
+    /// Invoke `__check_auth` with explicit raw payload and raw signature bytes.
+    fn invoke_check_auth_raw(
+        &self,
+        guard: &Address,
+        payload_bytes: &[u8; 32],
+        sig_bytes: &[u8; 64],
+        contexts: &soroban_sdk::Vec<Context>,
+    ) -> Result<(), Result<GuardError, InvokeError>> {
+        let payload = BytesN::<32>::from_array(&self.env, payload_bytes);
+        let signature: Val = BytesN::<64>::from_array(&self.env, sig_bytes).into_val(&self.env);
+        self.env
+            .try_invoke_contract_check_auth::<GuardError>(guard, &payload, signature, contexts)
     }
 
     /// The fixed entry `memory_read_entries` reports for *every* invocation of
@@ -3799,4 +3849,206 @@ fn validate_policy_reports_duration_exceeds_bound() {
     assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
     client.set_policy(&p);
     assert!(client.policy().is_some());
+}
+
+// ── Auth verification ordering (Issue #27, SPEC §4 & §7) ───────────────────
+//
+// __check_auth executes in a strict 3-step authentication sequence before any
+// policy decision table gate is reached:
+//   1. Check `DataKey::AgentPubkey` in instance storage:
+//      - If uninitialized: returns contract error `GuardError::NotInitialized` (code #3).
+//      - Crucially: this check precedes crypto verification, so an uninitialized
+//        account returns `NotInitialized` even if provided arbitrary/invalid signature bytes.
+//   2. Verify Ed25519 signature via `env.crypto().ed25519_verify`:
+//      - If invalid (wrong signer key or corrupted signature bytes): host crypto
+//        verification fails and traps the execution frame (`InvokeError::Abort`).
+//      - Crucially: this host abort precedes policy snapshot lookup, so a wrong-key
+//        signature aborts the frame even if NO policy is installed on the contract
+//        (it never proceeds to return `GuardError::NoPolicy`).
+//   3. Load policy snapshot via `AuthSnapshot::load`:
+//      - If no policy is installed (never set or revoked): returns contract error
+//        `GuardError::NoPolicy` (code #12).
+//   4. If policy snapshot is loaded:
+//      - Evaluates the policy decision table (§4) over all auth contexts.
+//
+// Exact observable difference for triage:
+//   - Uninitialized contract: returns contract error `GuardError::NotInitialized`.
+//   - Bad signature / wrong key: host crypto trap (`InvokeError::Abort`), NOT a contract error.
+//   - Good signature + no policy: returns contract error `GuardError::NoPolicy`.
+//   - Good signature + valid policy: returns `Ok(())`.
+
+#[test]
+fn auth_verification_order_uninitialized_account_rejects_with_not_initialized() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let uninit_guard = h.env.register(PolicyEngine, ());
+
+    // Case 1: uninitialized account with completely arbitrary / zeroed signature bytes.
+    let arbitrary_sig = [0u8; 64];
+    let arbitrary_payload = [1u8; 32];
+    let contexts = soroban_sdk::Vec::new(&h.env);
+    let res = h.invoke_check_auth_raw(&uninit_guard, &arbitrary_payload, &arbitrary_sig, &contexts);
+    assert_eq!(
+        res,
+        Err(Ok(GuardError::NotInitialized)),
+        "uninitialized account with arbitrary sig must return NotInitialized, not trap"
+    );
+
+    // Case 2: uninitialized account with transfer context and signature from an arbitrary key.
+    let any_key = SigningKey::from_bytes(&[99u8; 32]);
+    let res_transfer = h.invoke_check_auth_transfer(&uninit_guard, &any_key, &recv, 100);
+    assert_eq!(
+        res_transfer,
+        Err(Ok(GuardError::NotInitialized)),
+        "uninitialized account with validly-signed payload from any key must still return NotInitialized"
+    );
+
+    // Case 3: even with the harness agent key, an uninitialized contract returns NotInitialized.
+    let res_agent = h.invoke_check_auth_transfer(&uninit_guard, &h.agent.clone(), &recv, 100);
+    assert_eq!(
+        res_agent,
+        Err(Ok(GuardError::NotInitialized)),
+        "uninitialized account must return NotInitialized before attempting crypto verification"
+    );
+}
+
+#[test]
+fn auth_verification_order_initialized_account_wrong_signature_traps_as_host_abort() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let wrong_key = SigningKey::from_bytes(&[42u8; 32]);
+
+    // Subcase A: Account is initialized, but NO policy is installed.
+    // Presenting a signature from a wrong key MUST trap the frame via host crypto
+    // (`InvokeError::Abort`), and MUST NOT reach policy loading to return `NoPolicy`.
+    let res_no_policy_wrong_sig =
+        h.invoke_check_auth_transfer(&h.guard.clone(), &wrong_key, &recv, 50);
+    assert_eq!(
+        res_no_policy_wrong_sig,
+        Err(Err(InvokeError::Abort)),
+        "wrong-key signature on account with no policy must trap with host abort, not return NoPolicy"
+    );
+
+    // Corrupted signature bytes also trap the host crypto frame.
+    let root = h.transfer_invocation(&h.guard, &recv, 50);
+    let payload = h.payload(h.guard_nonce, &root);
+    let corrupted_sig = [0xffu8; 64];
+    let contexts = soroban_sdk::vec![
+        &h.env,
+        Context::Contract(ContractContext {
+            contract: h.asset.clone(),
+            fn_name: Symbol::new(&h.env, "transfer"),
+            args: soroban_sdk::vec![
+                &h.env,
+                h.guard.clone().into_val(&h.env),
+                recv.clone().into_val(&h.env),
+                50i128.into_val(&h.env),
+            ],
+        }),
+    ];
+    let res_corrupted =
+        h.invoke_check_auth_raw(&h.guard.clone(), &payload, &corrupted_sig, &contexts);
+    assert_eq!(
+        res_corrupted,
+        Err(Err(InvokeError::Abort)),
+        "corrupted signature on account with no policy must trap with host abort"
+    );
+
+    // Subcase B: Account is initialized, AND policy IS installed.
+    // Wrong signature must still trap with host abort (`InvokeError::Abort`).
+    h.install_policy(&h.base_policy());
+    let res_with_policy_wrong_sig =
+        h.invoke_check_auth_transfer(&h.guard.clone(), &wrong_key, &recv, 50);
+    assert_eq!(
+        res_with_policy_wrong_sig,
+        Err(Err(InvokeError::Abort)),
+        "wrong-key signature on account with policy installed must trap with host abort"
+    );
+}
+
+#[test]
+fn auth_verification_order_initialized_account_valid_signature_no_policy_yields_no_policy() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let agent_key = h.agent.clone();
+
+    // Subcase A: Freshly initialized account (no policy ever set).
+    // Valid signature by the registered agent key verifies crypto successfully,
+    // then proceeds to policy loading, returning contract error `GuardError::NoPolicy`.
+    let res_fresh = h.invoke_check_auth_transfer(&h.guard.clone(), &agent_key, &recv, 10);
+    assert_eq!(
+        res_fresh,
+        Err(Ok(GuardError::NoPolicy)),
+        "registered agent signature with no policy installed must return NoPolicy"
+    );
+
+    // Subcase B: Account has policy installed, then admin revokes the policy.
+    // Valid signature by the registered agent key must again return `GuardError::NoPolicy`.
+    h.install_policy(&h.base_policy());
+    // Control: with policy installed, the exact same transfer succeeds.
+    let res_allowed = h.invoke_check_auth_transfer(&h.guard.clone(), &agent_key, &recv, 10);
+    assert_eq!(
+        res_allowed,
+        Ok(()),
+        "registered agent signature with installed policy must succeed"
+    );
+
+    // Now revoke policy.
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    client.revoke_policy();
+    assert!(client.policy().is_none());
+
+    // Subsequent authorization with registered agent signature now yields NoPolicy again.
+    let res_revoked = h.invoke_check_auth_transfer(&h.guard.clone(), &agent_key, &recv, 10);
+    assert_eq!(
+        res_revoked,
+        Err(Ok(GuardError::NoPolicy)),
+        "registered agent signature after policy revocation must return NoPolicy"
+    );
+}
+
+#[test]
+fn auth_verification_ordering_matrix_pins_exact_observables() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let agent_key = h.agent.clone();
+    let wrong_key = SigningKey::from_bytes(&[88u8; 32]);
+    let uninit_guard = h.env.register(PolicyEngine, ());
+
+    // Matrix Row 1: Uninitialized guard + any signature -> Contract Error #3 (NotInitialized).
+    // Does not reach host crypto verification.
+    let r1 = h.invoke_check_auth_transfer(&uninit_guard, &wrong_key, &recv, 25);
+    assert_eq!(
+        r1,
+        Err(Ok(GuardError::NotInitialized)),
+        "Row 1: uninitialized guard must return NotInitialized regardless of signature"
+    );
+
+    // Matrix Row 2: Initialized guard (no policy) + wrong signature -> Host Error (InvokeError::Abort).
+    // Traps in host crypto; does not reach policy loading.
+    let r2 = h.invoke_check_auth_transfer(&h.guard.clone(), &wrong_key, &recv, 25);
+    assert_eq!(
+        r2,
+        Err(Err(InvokeError::Abort)),
+        "Row 2: wrong-key signature must trap in host crypto with InvokeError::Abort"
+    );
+
+    // Matrix Row 3: Initialized guard (no policy) + valid signature -> Contract Error #12 (NoPolicy).
+    // Passes crypto verification, fails policy load.
+    let r3 = h.invoke_check_auth_transfer(&h.guard.clone(), &agent_key, &recv, 25);
+    assert_eq!(
+        r3,
+        Err(Ok(GuardError::NoPolicy)),
+        "Row 3: registered signature without policy must return NoPolicy"
+    );
+
+    // Matrix Row 4: Initialized guard (policy installed) + valid signature -> Success (Ok(())).
+    // Passes crypto verification and passes policy evaluation.
+    h.install_policy(&h.base_policy());
+    let r4 = h.invoke_check_auth_transfer(&h.guard.clone(), &agent_key, &recv, 25);
+    assert_eq!(
+        r4,
+        Ok(()),
+        "Row 4: registered signature with policy installed must approve"
+    );
 }
