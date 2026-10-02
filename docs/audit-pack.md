@@ -85,3 +85,28 @@ PR description for #155):
 - [Issue #6 — audit readiness](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/6) · [Issue #155 — this inventory](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/155)
 - [SPEC.md](../SPEC.md) · [SECURITY.md](../SECURITY.md) · [Enforcement Scope](enforcement-scope.md)
 - [Reason Glossary](reason-glossary.md) · [Testnet Verification](verification.md) · [Fixture evidence](../tests/fixtures/README.md)
+
+## Persistent-storage TTL expiry audit (SPEC §9.5)
+
+**Finding (proved):** `Window`'s rolling-cap entries are extended to max TTL on every
+`persist_set` write, but reads do not extend. If an account is quiet past the TTL, the host
+archives/expires the entry and `Window` reads as empty — the rolling cap silently forgets
+spent budget, a fund-limit bypass via storage semantics. `Policy` expiring is safer
+(default-deny); `LastHeartbeat` expiring is worst-case for DMS (reads as `0` = never
+heartbeated, interacting with rule #2's `!= 0` guard).
+
+**Fix:** evaluation now touches (extends TTL on) `Window`, `Policy`, and `LastHeartbeat` on
+read, so continuity is guaranteed regardless of host archival timing. Pinned by a test that
+advances test-env ledger TTL past expiry without writes and asserts the budget is **not**
+reset.
+
+**Evidence:**
+
+| Artifact | Location |
+|---|---|
+| Executable proof (TTL advance, no writes, evaluate transfer) | `src/window.rs` tests |
+| Touch-on-read fix | `src/window.rs`, `src/lib.rs` read paths |
+| SPEC §9.5 invariant update | [`SPEC.md`](../SPEC.md) §9.5 |
+| `Policy` / `LastHeartbeat` audit | `src/lib.rs` read paths + tests |
+
+This finding folds into the #6 audit pack (items 2 and 12 above).

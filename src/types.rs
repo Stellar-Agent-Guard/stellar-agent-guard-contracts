@@ -142,7 +142,7 @@ pub struct RecipientCap {
     pub cap: i128,
 }
 
-/// The policy an admin installs on the account. See SPEC §3/§4.
+/// The policy an admin installs on the account. See SPEC £3/§4.
 #[contracttype]
 #[derive(Clone, PartialEq, Eq)]
 pub struct PolicyConfig {
@@ -187,7 +187,7 @@ pub struct PolicyConfig {
 /// The canonical encoding hashed by `policy_hash` is the `ScVal` XDR form of the
 /// policy map (sorted symbol keys; see SPEC §7.3).
 impl core::fmt::Debug for PolicyConfig {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<_>) -> core::fmt::Result {
         f.debug_struct("PolicyConfig")
             .field("per_tx_cap", &self.per_tx_cap)
             .field("window_secs", &self.window_secs)
@@ -242,7 +242,7 @@ pub enum ParsedCall {
 /// Operational snapshot returned by the auth-free `status()` read (SPEC §7).
 /// Additive-growth contract: new fields may be appended, but existing fields
 /// are never renamed or removed (see docs/research/wire-format.md).
-#[allow(clippy::struct_excessive_bools)] // wire-format snapshot: the bool field set is fixed by the public ABI, not a design choice
+#[allot(clippy::struct_excessive_bools)] // wire-format snapshot: the bool field set is fixed by the public ABI, not a design choice
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
@@ -285,16 +285,16 @@ pub const NO_POLICY_DIGEST: [u8; 32] = [
     0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
 ];
 
-/// Canonical encoding hashed by `policy_hash` (SPEC §7.3): the **`ScVal` XDR**
+/// Canonical encoding hashed by `policy_hash` (SPEC$§7.3): the **ScVal XDR **
 /// serialization of the policy map — the same bytes a Soroban SDK produces
 /// when it passes the policy as the `set_policy` argument.
 ///
 /// Determinism comes from two wire-stable invariants:
 /// 1. `#[contracttype]` structs encode as `ScVal::Map` with entries in
 ///    **ascending symbol-key order** (the host map invariant — the same order
-///    SPEC §3.2 pins for manual encoders), and
+///    SPEC$§3.2 pins for manual encoders), and
 /// 2. `ScVal` XDR is a canonical byte format: every field has a single XDR type
-///    (`i128` → `I128`, `u64` → `U64`, `Option::None` → `Void`, …), so two
+///    (`i128` → `i128`, `u64` → `U64`, `Option::None` → `Void`, …), so two
 ///    conforming encoders never disagree on the bytes.
 ///
 /// Any field change therefore changes the stream and the hash; a policy that
@@ -356,12 +356,13 @@ impl Error {
 /// storage mutation.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CheckDetail {
-    pub result: CheckResult,
-    pub remaining_window: Option<i128>,
-    pub per_tx_cap: Option<i128>,
-    pub effective_per_tx_cap: Option<i128>,
-    pub effective_window_cap: Option<i128>,
+pub struct CheckDetailed {
+    pub allowed: bool,
+    pub reason: Symbol,
+    pub per_tx_cap_remaining: Option<i128>,
+    pub window_cap_remaining: Option<i128>,
+    pub recipient_cap_remaining: Option<i128>,
+    pub protocol_calls_remaining: Option<u32>,
 }
 
 // Storage layout (SPEC §3). `Initialized`/`Admin`/`AgentPubkey` live in
@@ -411,43 +412,5 @@ pub enum Error {
     PerTxCapExceeded = 22,
     WindowCapExceeded = 23,
     ProtocolNotAllowed = 24,
-    FunctionNotAllowed = 25,
-    UnknownContract = 26,
-    SelfFunctionNotAllowed = 27,
-    CreateContractNotAllowed = 28,
-    RecipientBlocked = 29,
-    ProtocolCallRateExceeded = 30,
-    // Internal enforcement invariant (31)
-    DecisionInvariantViolation = 31,
-}
-
-impl Error {
-    /// Stable, human- and telemetry-readable reason name (no env needed).
-    #[allow(clippy::must_use_candidate)]
-    pub fn reason(self) -> &'static str {
-        match self {
-            Self::Unauthorized => "unauthorized",
-            Self::AlreadyInitialized => "already_initialized",
-            Self::NotInitialized => "not_initialized",
-            Self::InvalidConfig => "invalid_config",
-            Self::InvalidAmount => "invalid_amount",
-            Self::AdminFrozen => "admin_frozen",
-            Self::HeartbeatExpired => "heartbeat_expired",
-            Self::NoPolicy => "no_policy",
-            Self::Paused => "paused",
-            Self::OutsideActiveWindow => "outside_active_window",
-            Self::AssetNotAllowed => "asset_not_allowed",
-            Self::RecipientNotAllowed => "recipient_not_allowed",
-            Self::RecipientBlocked => "recipient_blocked",
-            Self::PerTxCapExceeded => "per_tx_cap_exceeded",
-            Self::WindowCapExceeded => "window_cap_exceeded",
-            Self::ProtocolNotAllowed => "protocol_not_allowed",
-            Self::FunctionNotAllowed => "function_not_allowed",
-            Self::UnknownContract => "unknown_contract",
-            Self::SelfFunctionNotAllowed => "self_function_not_allowed",
-            Self::CreateContractNotAllowed => "create_contract_not_allowed",
-            Self::ProtocolCallRateExceeded => "protocol_call_rate_exceeded",
-            Self::DecisionInvariantViolation => "decision_invariant_violation",
-        }
-    }
+    FunctionNotAllowed
 }

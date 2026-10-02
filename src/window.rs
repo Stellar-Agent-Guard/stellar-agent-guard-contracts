@@ -13,6 +13,13 @@
 //! Persistent `WindowState` TTL management belongs to the storage boundary in
 //! `lib.rs` (`persist_get`/`save_ledger`); this module transforms only the
 //! in-memory snapshot after storage has loaded it.
+//!
+//! TTL continuity (SPEC §9.5): the storage boundary in `lib.rs` is
+//! responsible for extending the persistent `WindowState` TTL on every read
+//! *and* write (`persist_get`/`save_ledger`), so a quiet account cannot have
+//! its rolling-window entries silently archived mid-window. This module
+//! assumes the snapshot it receives is complete; it does not itself touch
+//! storage.
 
 use crate::types::{
     ProtocolCallEntry, RecipientWindowState, SpendEntry, WindowState, MAX_WINDOW_ENTRIES,
@@ -145,6 +152,11 @@ impl Ledger {
     /// at low timestamps, so an entry recorded at ledger ts 0 cannot be
     /// wrongly treated as expired just because `now - window_secs` would clip
     /// to 0 under saturating subtraction.
+    ///
+    /// Callers must have already loaded a snapshot whose persistent TTL was
+    /// refreshed by the storage boundary (see module docs); otherwise a
+    /// host-side archive could present an empty snapshot and this prune would
+    /// observe a reset budget.
     pub fn prune(&mut self, now: u64, window_secs: u64) {
         prune_entries(&mut self.total, &mut self.entries, now, window_secs);
         for i in 0..self.recipients.len() {
@@ -722,5 +734,35 @@ mod tests {
 
         assert_eq!(restored.protocol_call_total, 3);
         assert_eq!(restored.protocol_call_entries.len(), 2);
+    }
+
+    #[test]
+    fn prune_of_empty_snapshot_is_indistinguishable_from_reset() {
+        // Issue #6 audit: this test pins the *in-memory* semantics that make
+        // the storage-boundary TTL guarantee load-bearing. If the host ever
+        // archives a persistent `WindowState` mid-window and the storage
+        // boundary in `lib.rs` fails to refresh TTL on read, `from_state`
+        // will be handed an empty `WindowState` and `prune` will observe a
+        // zero total — i.e. a silently reset rolling cap. The fix lives in
+        // `lib.rs` (`persist_get`/`save_ledger` touch-on-read/write); this
+        // test documents the failure mode the fix must prevent.
+        let env = Env::default();
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit(100, 7);
+        assert_eq!(ledger.total, 7);
+
+        // Simulate the host having archived the entry: the storage boundary
+        // hands back an empty `WindowState`.
+        let archived = WindowState {
+            total: 0,
+            entries: soroban_sdk::Vec::new(&env),
+            recipients: soroban_sdk::Vec::new(&env),
+            protocol_call_entries: soroban_sdk::Vec::new(&env),
+        };
+        let mut restored = Ledger::from_state(&env, archived);
+        restored.prune(101, 100);
+        // The cap has silently forgotten the spent budget — the exact
+        // fund-limit bypass the storage-boundary TTL refresh must prevent.
+        assert_eq!(restored.total, 0);
     }
 }
