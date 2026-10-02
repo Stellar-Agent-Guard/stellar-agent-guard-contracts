@@ -379,6 +379,17 @@ ledger time, which Soroban code cannot forge):
 | 6 | context is a call to this account's own administrative/self functions (`heartbeat`, `check`) | allow into §5 handling (heartbeat state update only) |
 | 7 | per-context classification (§6) applies all allowlist / cap / window rules | allow or **Block** (`Reason::AssetNotAllowed`, `Reason::RecipientNotAllowed`, `Reason::PerTxCapExceeded`, `Reason::WindowCapExceeded`, `Reason::ProtocolNotAllowed`, `Reason::FunctionNotAllowed`, `Reason::UnknownContract`) |
 
+**Machine-readable twin: [`decision-table.json`](decision-table.json).** The table above is
+rendered from it (one JSON row per line, verbatim), and it also records which `Error` variants the
+engine can actually return for each row and which test pins each one. `tests/decision_table.rs`
+fails `cargo test` — and therefore CI — if this table, the JSON, the `README` walkthrough, the
+`Error` enum, and the engine's branches disagree. Edit a decision row in `decision-table.json`
+first, then paste the rendered line back into the table above; never edit only the SPEC side.
+Where this table and the engine still disagree — SPEC row 7 names `Reason::AssetNotAllowed`, which
+the v1 engine never emits — the JSON records the engine's behavior in its `note` and points at the
+audit (see [`docs/scenario-matrix.md`](docs/scenario-matrix.md) findings F-2/F-3); correcting this
+prose is a semantics call for a maintainer, not a doc-generation side effect.
+
 Note the dead-man auto-freeze (`#2`) applies even to `heartbeat` from the registered key: a
 heartbeat arriving after the grace window expired cannot revive the account — revival is the
 admin's `unfreeze` (§7). This is the precise freeze/reversal boundary.

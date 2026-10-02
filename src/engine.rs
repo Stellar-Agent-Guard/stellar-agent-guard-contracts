@@ -680,6 +680,24 @@ mod tests {
         ));
     }
 
+    /// SPEC §6.2: a listed asset invoked with anything other than
+    /// `transfer`/`transfer_from` (e.g. `mint`, `burn`) is classified as
+    /// `AssetOther` and denied. The account is an authorizer, never a minter.
+    #[test]
+    fn asset_other_function_is_function_not_allowed() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = Some(base_policy(&env));
+        let mut l = Ledger::empty(&env);
+        // Contract 1 is in `assets`; `mint` is not a SAC transfer function.
+        let ctx = vec![&env, proto_ctx(&env, 1, "mint")];
+        let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx.clone());
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::FunctionNotAllowed)
+        ));
+    }
+
     #[test]
     fn window_cap_blocks_across_transactions_and_rolls_over() {
         let env = Env::default();
@@ -1156,6 +1174,30 @@ mod tests {
                 .unwrap(),
             Decision::Allowed
         ));
+    }
+
+    /// SPEC §4 rule 5: outside `active_from`/`active_until` every context is
+    /// blocked before classification, and nothing is admitted to the window.
+    #[test]
+    fn outside_active_window_blocks_before_classification() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.active_from = 2_000;
+        p.active_until = 3_000;
+        let mut l = Ledger::empty(&env);
+        // A transfer every other gate would admit, plus the self-call the
+        // dead-man path allows: neither may slip past the account-level gate.
+        let ctx = vec![&env, transfer_ctx(&env, 1, 2, 5), heartbeat_ctx(&env, &sa)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, ctx.clone());
+        assert_eq!(d.len(), 2);
+        for verdict in &d {
+            assert!(matches!(
+                verdict,
+                Decision::Blocked(Error::OutsideActiveWindow)
+            ));
+        }
+        assert_eq!(l.total, 0, "a blocked window must not admit spend");
     }
 
     #[test]
