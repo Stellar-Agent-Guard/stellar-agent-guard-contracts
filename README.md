@@ -180,9 +180,10 @@ Other validation rules (SPEC §8): negative caps, `window_cap > 0` or a positive
 `recipient_window_caps` entry with `window_secs == 0`, duplicate
 assets/recipients/blocked_recipients/protocol contracts, duplicate recipients in
 `recipient_window_caps`, a non-empty intersection between `recipients` and
-`blocked_recipients`, more than 256 recipients, blocked recipients, or per-recipient
-cap entries, empty per-protocol fn lists, or the self-address in
-`assets`/`protocols`/`recipients`/`blocked_recipients` all fail with `InvalidConfig`.
+`blocked_recipients`, more than 256 `assets`, `protocols`, or `recipients` (and more
+than 256 `blocked_recipients` or per-recipient cap entries), empty per-protocol fn
+lists, or the self-address in `assets`/`protocols`/`recipients`/`blocked_recipients`
+all fail with `InvalidConfig`.
 
 **Not sure where to start?** Copy-paste presets for common operator personas —
 day-trader agent, payments bot, watch-only + heartbeat, max security — each with
@@ -308,11 +309,30 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 #    "window_cap":"150","window_secs":60}
 ```
 
+### `policy_hash` (read) — cheap drift detection
+```rust
+pub fn policy_hash(env: Env) -> BytesN<32>
+```
+No auth. Returns the SHA-256 over the canonical (ScVal XDR)
+encoding of the installed policy, so SDKs/dashboards can detect policy drift by comparing
+one value instead of shipping and diffing the full `PolicyConfig`, and can record the hash
+alongside `auth_checked` events as a tamper-evident log anchor. With no policy installed the
+read returns the documented sentinel `NO_POLICY_DIGEST` = `sha256("")`
+(`e3b0c442…b855`) — never a trap; `revoke_policy()` restores it. The encoding, field order,
+and sentinel are pinned in [SPEC §7.3](SPEC.md#73-policy-hash--cheap-drift-detection-policy_hash)
+and locked by `tests/policy_hash_encoding.rs`; off-chain, reproduce the hash by SHA-256-ing
+the XDR bytes of the same policy value your SDK builds for `set_policy`.
+
 ### `status` (read)
 ```rust
 pub fn status(env: Env) -> Status
 ```
-No auth. Returns `{ has_policy, admin_frozen, heartbeat_expired, last_heartbeat, now }`. When
+No auth. Returns `{ has_policy, admin_frozen, heartbeat_expired, last_heartbeat, now }` plus
+the additive operational fields `paused` (the policy's kill switch; `false` with no policy),
+`window_remaining` (global `window_cap - spent` on the pruned ledger; `null` when the global
+cap is disabled — mirrors `check_detailed`'s `remaining_window` for recipients without an
+override), and `outside_active_window` (`now` outside the policy's `active_from`/`active_until`
+bounds, both inclusive; `false` with no policy or an unrestricted window). When
 submitted on-ledger, this read may extend persistent-entry TTLs and incur rent; simulation does
 not persist those extensions (SPEC §9.5).
 Verified live:
@@ -346,6 +366,16 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
   --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX --amount 50
 # → {"Blocked":"heartbeat_expired"}
 ```
+
+`check()` uses the ledger timestamp at the time that invocation executes; it does not use the
+client's wall clock and cannot reserve capacity for a later transaction. Ledger time has
+one-second granularity, so activity sharing a timestamp has ledger-defined ordering rather
+than sub-second ordering. A later transaction can see a different result if another spend
+consumes the cap or time crosses a window/activation boundary. Treat pre-flight results as
+advisory: re-run `check()` if more than one ledger has elapsed before submission, and handle
+the authoritative on-ledger authorization result even after a fresh check. The exact expiry
+boundary (a spend at `t` expiring when `now == t + window_secs`) is demonstrated in the
+`ledger_second_changes_window_membership_at_boundary` test (SPEC §3.1).
 
 For operator triage, `check_detailed` returns the same verdict plus current headroom and
 effective caps without changing spend accounting. A submitted call may extend persistent-entry
@@ -382,7 +412,11 @@ host invokes it automatically on every authorization the account must approve. S
 4. Run the decision table (`decide`) — account-level gates first, then a per-context
    decision loop, then commit window admissions only if every context passed.
 5. Return `Ok(())` to approve the transaction, or `Err(reason)` to reject it — and emit
-   the `auth_checked` event either way.
+   the `auth_checked` event either way. **Observability caveat:** a blocked decision rolls
+   back with its transaction, so its `auth_checked` event never becomes a committed ledger
+   event — blocks reach observers via simulation diagnostics and the SDK telemetry listener
+   (dual-stream), not via raw RPC `getEvents`. See
+   [SPEC §9](SPEC.md#9-events-and-telemetry).
 
 See [How it works](#how-it-works) below for the full flow through `parse_call`/`decide`.
 
@@ -412,6 +446,39 @@ When submitting transactions via `agent-tx` (run `agent-tx --help` for usage and
 | `testnet` | `https://soroban-testnet.stellar.org` |
 | `mainnet` | `https://soroban.stellar.org` |
 | `futurenet` | `https://rpc-futurenet.stellar.org` |
+
+#### Network presets in `agent-tx`
+
+The submission helper resolves its endpoint from a named preset — both the RPC URL
+*and* the network passphrase, which is what the signed auth payload commits to — so
+`--network` replaces the raw URL instead of adding a flag to remember:
+
+```bash
+agent-tx status --guard C...                    # no flag needed: testnet is the default
+agent-tx status --guard C... --network futurenet
+agent-tx preflight --guard C... --asset C... --to G... --amount 1100 --network testnet
+```
+
+| `--network` | Endpoint | Network passphrase |
+|---|---|---|
+| `testnet` (default) | `https://soroban-testnet.stellar.org` | `Test SDF Network ; September 2015` |
+| `futurenet` | `https://rpc-futurenet.stellar.org` | `Test SDF Future Network ; October 2022` |
+| `mainnet` | `https://soroban.stellar.org` | `Public Global Stellar Network ; September 2015` |
+
+- `--rpc-url <url>` still overrides the endpoint for a custom or self-hosted node.
+  Passing `--network` *and* `--rpc-url` together is an error that names both flags
+  rather than a silent precedence rule. A preset's own URL given through `--rpc-url`
+  is recognised, and gets that preset's passphrase.
+- `--network-passphrase <phrase>` overrides the passphrase — for a local
+  `stellar standalone` instance or a fork.
+- Selecting mainnet, by preset or by URL, prints a one-line reminder to stderr: this
+  contract is unaudited and gates real funds (see [SECURITY.md](SECURITY.md)).
+- Every address flag (`--guard`, `--asset`/`--token`, `--to`, and the `guards add`
+  address and admin) is validated as a StrKey of the right kind before any network
+  call, so a truncated or mistyped ID fails locally instead of burning a simulation.
+  The leading character is a *key type*, not a network (`G` account, `C` contract),
+  so no prefix check can catch a testnet ID aimed at mainnet — the preset plus the
+  passphrase decide where a call lands.
 
 ### Build from source
 ```bash
@@ -515,7 +582,9 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
 6. **All-or-nothing commit.** Window admissions are staged and only committed to storage
    if *every* context passes — a partially-validating batch can never spend. `Ok(())`
    approves; `Err(reason)` rejects the entire transaction, and the `auth_checked` event
-   records the outcome either way.
+   records the outcome either way — with the same observability caveat as step 5 above:
+   an allowed decision's event is committed, a blocked one exists only in diagnostics
+   (the transaction it rolled back with carried it away). See [SPEC §9](SPEC.md#9-events-and-telemetry).
 
 ## Storage
 
@@ -536,6 +605,8 @@ maximum TTL on writes and refreshed to maximum when a read finds less than half 
 TTL remaining (`persist_get`; SPEC §9.5). The `Window` ledger is bounded at
 `MAX_WINDOW_ENTRIES = 8192` — beyond that, the two oldest entries merge *forward*
 (conservative over-count), so the `window_cap` ceiling is never exceeded (SPEC §3.1).
+Each successful admission that triggers the merge emits `event_window_merged` with the ledger
+kind, retained timestamp, and merged spend amount or protocol call count (SPEC §9).
 See [Storage rent and TTL cost model](docs/rent-and-ttl.md) for approximate XLM costs,
 who pays extension rent, and the underfunded-expiry failure mode.
 

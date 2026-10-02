@@ -207,7 +207,7 @@ machine contract, and `schema_version` is what a consumer checks first.
 | `scenarios[].tx` | string \| null | Confirmed transaction hash, or `null` — blocked scenarios are caught pre-broadcast and have no hash. |
 | `scenarios[].ledger` | int \| null | Ledger index of `tx`; `null` when blocked or not recorded. |
 | `scenarios[].recorded_utc` | string \| null | Horizon `created_at` time of `tx`, when recorded. |
-| `scenarios[].event_topics` | array | Exact `auth_checked` topics: `[event_auth_checked, allowed]` or `[event_auth_checked, blocked, <expected_reason>]`. |
+| `scenarios[].event_topics` | array | Recorded auth_checked topics. The canonical full vocabulary, including the empty reason topic on allowed outcomes, is in [`auth-checked-vocabulary.json`](auth-checked-vocabulary.json). |
 | `scenarios[].notes[]` | array | The caveats the prose carries for that scenario. |
 | `scenarios[4].reversal` | object | DMS reversal: `action`, `by` (admin address), `tx`, `ledger`, `event_topics` (`[event_unfrozen]`). |
 | `scenarios[4].post_reversal` | object | The transfer that succeeded after `unfreeze()`: `outcome`, `expected_reason`, `amount`, `tx`, `ledger`, `recorded_utc`, `notes`. |
@@ -226,6 +226,21 @@ drift:
 - the setup table must keep one row per `setup_transactions` entry;
 - the scenario list must stay ids 1–5 with coherent `outcome`,
   `expected_reason`, `tx`, `ledger`, and `event_topics`.
+
+## Canonical `auth_checked` event vocabulary
+
+[`auth-checked-vocabulary.json`](auth-checked-vocabulary.json) is the complete,
+machine-readable matrix of the allowed path and every `Error` code/reason
+symbol. Each entry pins its event topics, data map fields, and SPEC reference.
+Allowed decisions carry an empty reason topic because the contract publishes a
+`Symbol("")` when no block reason exists. The `auth_checked_vocabulary`
+integration test deserializes this fixture and fails if it drifts from the
+`Error` enum or its reason-symbol mapping.
+
+The SDK and dashboard should load this file from the contracts repository in
+their decoder tests rather than maintaining copied vocabularies. Their
+companion tracking issues are [SDK #263](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/263)
+and [dashboard #263](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/263).
 
 > **Companion note for `stellar-agent-guard-sdk`:** consume `index.json`
 > instead of scraping this markdown — parse `schema_version` first and treat an

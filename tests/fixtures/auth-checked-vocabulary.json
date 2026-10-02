@@ -1,0 +1,559 @@
+{
+  "schema_version": 1,
+  "event": "event_auth_checked",
+  "description": "Canonical topics and data-shape vocabulary for every auth_checked outcome. Allowed emits an empty reason topic because the contract represents a missing reason as Symbol(\"\").",
+  "outcomes": [
+    {
+      "code": null,
+      "error_variant": "Allowed",
+      "symbol": "allowed",
+      "topics": [
+        "event_auth_checked",
+        "allowed",
+        ""
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§9"
+    },
+    {
+      "code": 1,
+      "error_variant": "Unauthorized",
+      "symbol": "unauthorized",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "unauthorized"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§7 (`__check_auth` step 1)"
+    },
+    {
+      "code": 2,
+      "error_variant": "AlreadyInitialized",
+      "symbol": "already_initialized",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "already_initialized"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§7 (initialize)"
+    },
+    {
+      "code": 3,
+      "error_variant": "NotInitialized",
+      "symbol": "not_initialized",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "not_initialized"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§4 rule 3; §7.1"
+    },
+    {
+      "code": 4,
+      "error_variant": "InvalidConfig",
+      "symbol": "invalid_config",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "invalid_config"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§8; §7.1"
+    },
+    {
+      "code": 5,
+      "error_variant": "InvalidAmount",
+      "symbol": "invalid_amount",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "invalid_amount"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.2; §7.1"
+    },
+    {
+      "code": 10,
+      "error_variant": "AdminFrozen",
+      "symbol": "admin_frozen",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "admin_frozen"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§4 rule 1; §5"
+    },
+    {
+      "code": 11,
+      "error_variant": "HeartbeatExpired",
+      "symbol": "heartbeat_expired",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "heartbeat_expired"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§4 rule 2; §5"
+    },
+    {
+      "code": 12,
+      "error_variant": "NoPolicy",
+      "symbol": "no_policy",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "no_policy"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§4 rule 3"
+    },
+    {
+      "code": 13,
+      "error_variant": "Paused",
+      "symbol": "paused",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "paused"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§4 rule 4"
+    },
+    {
+      "code": 14,
+      "error_variant": "OutsideActiveWindow",
+      "symbol": "outside_active_window",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "outside_active_window"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§4 rule 5"
+    },
+    {
+      "code": 20,
+      "error_variant": "AssetNotAllowed",
+      "symbol": "asset_not_allowed",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "asset_not_allowed"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.2"
+    },
+    {
+      "code": 21,
+      "error_variant": "RecipientNotAllowed",
+      "symbol": "recipient_not_allowed",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "recipient_not_allowed"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.2"
+    },
+    {
+      "code": 22,
+      "error_variant": "PerTxCapExceeded",
+      "symbol": "per_tx_cap_exceeded",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "per_tx_cap_exceeded"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.2"
+    },
+    {
+      "code": 23,
+      "error_variant": "WindowCapExceeded",
+      "symbol": "window_cap_exceeded",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "window_cap_exceeded"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§3.1; §6.2"
+    },
+    {
+      "code": 24,
+      "error_variant": "ProtocolNotAllowed",
+      "symbol": "protocol_not_allowed",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "protocol_not_allowed"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.3"
+    },
+    {
+      "code": 25,
+      "error_variant": "FunctionNotAllowed",
+      "symbol": "function_not_allowed",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "function_not_allowed"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.3"
+    },
+    {
+      "code": 26,
+      "error_variant": "UnknownContract",
+      "symbol": "unknown_contract",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "unknown_contract"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.4"
+    },
+    {
+      "code": 27,
+      "error_variant": "SelfFunctionNotAllowed",
+      "symbol": "self_function_not_allowed",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "self_function_not_allowed"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.1; §7"
+    },
+    {
+      "code": 28,
+      "error_variant": "CreateContractNotAllowed",
+      "symbol": "create_contract_not_allowed",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "create_contract_not_allowed"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.4; §7.1"
+    },
+    {
+      "code": 29,
+      "error_variant": "RecipientBlocked",
+      "symbol": "recipient_blocked",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "recipient_blocked"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.2"
+    },
+    {
+      "code": 30,
+      "error_variant": "ProtocolCallRateExceeded",
+      "symbol": "protocol_call_rate_exceeded",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "protocol_call_rate_exceeded"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.3"
+    },
+    {
+      "code": 31,
+      "error_variant": "DecisionInvariantViolation",
+      "symbol": "decision_invariant_violation",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "decision_invariant_violation"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.3"
+    }
+  ]
+}
