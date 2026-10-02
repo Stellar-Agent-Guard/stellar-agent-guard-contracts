@@ -447,3 +447,130 @@ impl Error {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that each `Error` variant's numeric discriminant strictly matches
+    /// the value documented in SPEC §7 (and §7.1 error code mapping table).
+    ///
+    /// # Parity Obligation with SDK (`reasons.ts`)
+    ///
+    /// Soroban contract errors surface to the SDK and telemetry as numeric codes
+    /// (e.g. `Error(Contract, #12)` for `NoPolicy`). Off-chain decoders — specifically
+    /// `stellar-agent-guard-sdk` (see `src/reasons.ts` and `src/errors.ts`) — rely on these
+    /// numeric discriminants being completely stable.
+    ///
+    /// Renumbering any code silently corrupts error decoding across all consumers.
+    /// If an error code must change or a new variant is introduced:
+    /// 1. Update the error table and Error enum in SPEC §7 / §7.1.
+    /// 2. Update the SDK's `reasons.ts` (`REASON_CODES` / `REASON_BY_CODE` mapping).
+    /// 3. Update `tests/fixtures/auth-checked-vocabulary.json`.
+    /// 4. Update this test to assert the new or modified discriminant.
+    #[test]
+    fn error_code_discriminant_stability_spec_7() {
+        let all_errors = [
+            Error::Unauthorized,
+            Error::AlreadyInitialized,
+            Error::NotInitialized,
+            Error::InvalidConfig,
+            Error::InvalidAmount,
+            Error::AdminFrozen,
+            Error::HeartbeatExpired,
+            Error::NoPolicy,
+            Error::Paused,
+            Error::OutsideActiveWindow,
+            Error::AssetNotAllowed,
+            Error::RecipientNotAllowed,
+            Error::PerTxCapExceeded,
+            Error::WindowCapExceeded,
+            Error::ProtocolNotAllowed,
+            Error::FunctionNotAllowed,
+            Error::UnknownContract,
+            Error::SelfFunctionNotAllowed,
+            Error::CreateContractNotAllowed,
+            Error::RecipientBlocked,
+            Error::ProtocolCallRateExceeded,
+        ];
+
+        // An exhaustive match asserting each variant's exact discriminant against SPEC §7.
+        // If a new variant is added, rustc will fail with E0004 (non-exhaustive patterns).
+        // If a variant is renumbered, the assertion inside the match arm will fail.
+        for err in all_errors {
+            let (expected_code, expected_reason) = match err {
+                Error::Unauthorized => (1, "unauthorized"),
+                Error::AlreadyInitialized => (2, "already_initialized"),
+                Error::NotInitialized => (3, "not_initialized"),
+                Error::InvalidConfig => (4, "invalid_config"),
+                Error::InvalidAmount => (5, "invalid_amount"),
+                Error::AdminFrozen => (10, "admin_frozen"),
+                Error::HeartbeatExpired => (11, "heartbeat_expired"),
+                Error::NoPolicy => (12, "no_policy"),
+                Error::Paused => (13, "paused"),
+                Error::OutsideActiveWindow => (14, "outside_active_window"),
+                Error::AssetNotAllowed => (20, "asset_not_allowed"),
+                Error::RecipientNotAllowed => (21, "recipient_not_allowed"),
+                Error::PerTxCapExceeded => (22, "per_tx_cap_exceeded"),
+                Error::WindowCapExceeded => (23, "window_cap_exceeded"),
+                Error::ProtocolNotAllowed => (24, "protocol_not_allowed"),
+                Error::FunctionNotAllowed => (25, "function_not_allowed"),
+                Error::UnknownContract => (26, "unknown_contract"),
+                Error::SelfFunctionNotAllowed => (27, "self_function_not_allowed"),
+                Error::CreateContractNotAllowed => (28, "create_contract_not_allowed"),
+                Error::RecipientBlocked => (29, "recipient_blocked"),
+                Error::ProtocolCallRateExceeded => (30, "protocol_call_rate_exceeded"),
+            };
+
+            assert_eq!(
+                err as u32, expected_code,
+                "Error::{:?} discriminant ({}) does not match SPEC §7 code ({}). Update SPEC §7 and SDK reasons.ts together if intentional.",
+                err,
+                err as u32,
+                expected_code
+            );
+            assert_eq!(
+                err.reason(),
+                expected_reason,
+                "Error::{:?} reason symbol ({}) does not match SPEC §7 symbol ({}). Update SPEC §7 and SDK reasons.ts together if intentional.",
+                err,
+                err.reason(),
+                expected_reason
+            );
+        }
+    }
+
+    #[test]
+    fn error_codes_are_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for err in [
+            Error::Unauthorized,
+            Error::AlreadyInitialized,
+            Error::NotInitialized,
+            Error::InvalidConfig,
+            Error::InvalidAmount,
+            Error::AdminFrozen,
+            Error::HeartbeatExpired,
+            Error::NoPolicy,
+            Error::Paused,
+            Error::OutsideActiveWindow,
+            Error::AssetNotAllowed,
+            Error::RecipientNotAllowed,
+            Error::PerTxCapExceeded,
+            Error::WindowCapExceeded,
+            Error::ProtocolNotAllowed,
+            Error::FunctionNotAllowed,
+            Error::UnknownContract,
+            Error::SelfFunctionNotAllowed,
+            Error::CreateContractNotAllowed,
+            Error::RecipientBlocked,
+            Error::ProtocolCallRateExceeded,
+        ] {
+            let code = err as u32;
+            assert!(
+                seen.insert(code),
+                "duplicate error code {code} detected for {err:?}"
+            );
+        }
+    }
+}

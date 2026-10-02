@@ -606,6 +606,7 @@ To close the CheckResult/Error duality gap, every contract `Error` variant maps 
 | 27 | `SelfFunctionNotAllowed` | `self_function_not_allowed` | No | Auth-path only: self-calls are part of `__check_auth` context dispatch. |
 | 28 | `CreateContractNotAllowed` | `create_contract_not_allowed` | No | Auth-path only: contract creation host functions occur in auth contexts. |
 | 29 | `RecipientBlocked` | `recipient_blocked` | Yes | Recipient is on the explicit denylist.
+| 30 | `ProtocolCallRateExceeded` | `protocol_call_rate_exceeded` | No | Auth-path only: non-SAC protocol call exceeded the window invocation rate limit. |
 
 // ── Policy management (admin only) ────────────────────────────────────────
 pub fn set_policy(env: Env, config: PolicyConfig)
@@ -729,7 +730,7 @@ pub enum Error {            // values stable; see tests/fixtures
     WindowCapExceeded = 23, ProtocolNotAllowed = 24, FunctionNotAllowed = 25,
     UnknownContract = 26, SelfFunctionNotAllowed = 27,
     CreateContractNotAllowed = 28,
-    RecipientBlocked = 29,
+    RecipientBlocked = 29, ProtocolCallRateExceeded = 30,
 }
 ```
 
