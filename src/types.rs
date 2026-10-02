@@ -79,6 +79,8 @@ pub enum PolicyRuleId {
     AssetListTooLong,
     /// `protocols` exceeds `MAX_POLICY_PROTOCOLS`.
     ProtocolListTooLong,
+    /// `per_tx_cap > window_cap` when both are enabled (both > 0; issue #33).
+    PerTxCapExceedsWindowCap,
 }
 
 /// Result of the `validate_policy` read (issue #35): whether a candidate

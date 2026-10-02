@@ -3369,6 +3369,82 @@ fn validate_policy_reports_window_requires_width() {
 }
 
 #[test]
+fn validate_policy_reports_per_tx_cap_exceeds_window_cap() {
+    let h = Harness::new();
+
+    // When both caps are enabled (> 0) and per_tx_cap > window_cap:
+    // rejected as PolicyRuleId::PerTxCapExceedsWindowCap in validate_policy
+    // and as InvalidConfig in set_policy (fail-closed; issue #33).
+    let mut p = h.base_policy();
+    p.per_tx_cap = 200;
+    p.window_cap = 100;
+    assert_rejects_with(&h, &p, &PolicyRuleId::PerTxCapExceedsWindowCap);
+}
+
+#[test]
+fn validate_policy_accepts_equal_per_tx_and_window_caps() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // When both caps are enabled and equal, the config is valid and installable.
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    p.window_cap = 100;
+    assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
+    client.set_policy(&p);
+    let installed = client.policy().expect("policy installed");
+    assert_eq!(installed.per_tx_cap, 100);
+    assert_eq!(installed.window_cap, 100);
+}
+
+#[test]
+fn validate_policy_skips_cap_comparison_when_either_is_zero() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // 1. per_tx_cap > 0, window_cap == 0: per-tx limit only (window cap disabled).
+    let mut p = h.base_policy();
+    p.per_tx_cap = 500;
+    p.window_cap = 0;
+    assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
+    client.set_policy(&p);
+    assert_eq!(client.policy().expect("policy installed").per_tx_cap, 500);
+
+    // 2. per_tx_cap == 0, window_cap > 0: window limit only (per-tx cap disabled).
+    let mut p = h.base_policy();
+    p.per_tx_cap = 0;
+    p.window_cap = 500;
+    assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
+    client.set_policy(&p);
+    assert_eq!(client.policy().expect("policy installed").window_cap, 500);
+
+    // 3. per_tx_cap == 0, window_cap == 0: both disabled.
+    let mut p = h.base_policy();
+    p.per_tx_cap = 0;
+    p.window_cap = 0;
+    assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
+    client.set_policy(&p);
+    assert_eq!(client.policy().expect("policy installed").per_tx_cap, 0);
+    assert_eq!(client.policy().expect("policy installed").window_cap, 0);
+}
+
+#[test]
+fn validate_policy_accepts_per_tx_cap_less_than_window_cap() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // Normal configuration: per_tx_cap < window_cap.
+    let mut p = h.base_policy();
+    p.per_tx_cap = 50;
+    p.window_cap = 100;
+    assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
+    client.set_policy(&p);
+    let installed = client.policy().expect("policy installed");
+    assert_eq!(installed.per_tx_cap, 50);
+    assert_eq!(installed.window_cap, 100);
+}
+
+#[test]
 fn validate_policy_reports_active_window_order() {
     let h = Harness::new();
     let mut p = h.base_policy();
