@@ -22,6 +22,12 @@ cargo clippy --all-targets --all-features
 # Format check
 cargo fmt --check
 
+# Install cargo-deny once
+cargo install --locked cargo-deny
+
+# Check dependencies against the repository policy in deny.toml
+cargo deny check
+
 # Build the contract wasm (Soroban 27 targets wasm32v1-none)
 cargo build --release --target wasm32v1-none
 
