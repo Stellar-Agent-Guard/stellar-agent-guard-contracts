@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 //! Locks the `policy_hash()` drift-detection read (SPEC §7.3).
 //!
 //! Three independent views of the same guarantee, matching how the section is

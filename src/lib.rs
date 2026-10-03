@@ -9,6 +9,13 @@
 //! verifies the Ed25519 signature presented over the transaction auth payload
 //! and then evaluates the policy (SPEC §4/§6/§7). No CAP-71 delegation in v1.
 
+// Deny-list (CONTRIBUTING rule 1, issue #66): `unwrap`/`expect`/bare `panic!`
+// are denied in non-test `src/` via `[lints.clippy]` in Cargo.toml. This crate
+// exempts its own test code — the `#[cfg(test)]` modules and the `*_tests.rs`
+// files declared below — where a panic is a failing test and unwrapping a
+// fixture is idiomatic, not a shipped abort.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 extern crate alloc;
 
 #[cfg(test)]
@@ -1012,6 +1019,12 @@ impl CustomAccountInterface for PolicyEngine {
     type Signature = BytesN<64>;
     type Error = Error;
 
+    // SAFETY (clippy::unwrap_used, issue #66): `u32::try_from(i)` indexes
+    // `auth_contexts` (a length-checked host `Vec`), so it cannot overflow; and
+    // `first_error` is unwrapped only on the branch where `all_passed == false`,
+    // which is set only after a `Blocked` verdict was recorded — so it is
+    // always `Some` there.
+    #[allow(clippy::unwrap_used)]
     fn __check_auth(
         env: Env,
         signature_payload: soroban_sdk::crypto::Hash<32>,
