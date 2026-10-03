@@ -946,9 +946,17 @@ calls within one ledger. The fields are additive data on unchanged topics, so
 decoders that ignore unknown map keys keep working; SDK/dashboard decoders
 surfacing the new field are cross-repo follow-ups. Two `auth_checked` events
 sharing a revision were evaluated under the same policy generation; the
-`policy_hash` (§7.3) distinguishes *which* policy that generation installed.
-
-Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
+`policy_hash` (§7.3) distinguishes *which* policy that generation installed.Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one
+vocabulary. That vocabulary is pinned on three sides (issue #41):
+`tests/fixtures/sdk-reasons.json` is the committed copy of the SDK's
+human-readable reason map, and both `tests/reason_parity.rs` (inside
+`cargo test`) and `scripts/check-reason-parity.sh` (the CI step after tests)
+fail when the `Error::reason()` symbols in `src/types.rs`, that SDK copy, or
+the `expected_reason` values recorded in `tests/fixtures/index.json` drift
+apart — so a new contract reason cannot land without an SDK-side entry, and
+the SDK repository's companion parity gate asserts its own shipped map
+against this same committed file (companion-issue text:
+`docs/issues/sdk-reason-parity-gate.md`).
 
 **Heartbeat expiry (`heartbeat.expires_at`).** `expires_at` is the deadline the heartbeat was
 actually attested under, derived from the `dms_grace_secs` of the policy *current at the moment
