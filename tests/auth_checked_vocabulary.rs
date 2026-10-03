@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 //! Keeps the consumer-facing `auth_checked` vocabulary fixture in sync with Error.
 
 use std::collections::BTreeMap;

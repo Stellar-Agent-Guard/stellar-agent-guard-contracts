@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 //! Committed ABI snapshot: the public contract surface as a diffable file.
 //!
 //! The SDK, dashboard, and deployed integrations consume the Soroban ABI —

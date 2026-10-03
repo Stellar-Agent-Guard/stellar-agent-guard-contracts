@@ -14,10 +14,7 @@
 // exempts its own test code — the `#[cfg(test)]` modules and the `*_tests.rs`
 // files declared below — where a panic is a failing test and unwrapping a
 // fixture is idiomatic, not a shipped abort.
-#![cfg_attr(
-    test,
-    allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)
-)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 extern crate alloc;
 
