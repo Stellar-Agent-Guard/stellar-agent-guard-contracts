@@ -122,7 +122,7 @@ fn sample_policy(env: &Env) -> PolicyConfig {
 }
 
 #[test]
-fn top_level_map_has_exactly_the_eleven_fields_in_sorted_symbol_order() {
+fn top_level_map_has_exactly_the_fourteen_fields_in_sorted_symbol_order() {
     let env = Env::default();
     let entries = map_entries(&to_scval(&env, sample_policy(&env)));
 

@@ -883,6 +883,7 @@ mod tests {
     }
 
     #[test]
+    /// SPEC §6.3: `fns: None` allows any fn on that contract.
     fn protocol_and_function_allowlists() {
         let env = Env::default();
         let sa = self_addr(&env);
@@ -937,6 +938,164 @@ mod tests {
             .unwrap(),
             Decision::Blocked(Error::UnknownContract)
         ));
+    }
+
+    #[test]
+    /// SPEC §6.3: `fns: None` wildcard — any fn on the listed contract is allowed.
+    fn protocol_fns_none_allows_any_fn() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 3),
+                fns: None,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+        assert!(matches!(
+            decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut l,
+                1000,
+                vec![&env, proto_ctx(&env, 3, "swap")]
+            )
+            .first()
+            .unwrap(),
+            Decision::Allowed
+        ));
+        assert!(matches!(
+            decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut l,
+                1000,
+                vec![&env, proto_ctx(&env, 3, "anything_else")]
+            )
+            .first()
+            .unwrap(),
+            Decision::Allowed
+        ));
+    }
+
+    #[test]
+    /// SPEC §6.3: listed fn allowed.
+    fn protocol_listed_fn_allowed() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 3),
+                fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+        assert!(matches!(
+            decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut l,
+                1000,
+                vec![&env, proto_ctx(&env, 3, "swap")]
+            )
+            .first()
+            .unwrap(),
+            Decision::Allowed
+        ));
+    }
+
+    #[test]
+    /// SPEC §6.3: unlisted fn on a listed contract → `FunctionNotAllowed`.
+    fn protocol_unlisted_fn_denied() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 3),
+                fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+        assert!(matches!(
+            decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut l,
+                1000,
+                vec![&env, proto_ctx(&env, 3, "drain")]
+            )
+            .first()
+            .unwrap(),
+            Decision::Blocked(Error::FunctionNotAllowed)
+        ));
+    }
+
+    #[test]
+    /// SPEC §6.3: contract not in protocols → `UnknownContract`.
+    fn protocol_unknown_contract_denied() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 3),
+                fns: None,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+        assert!(matches!(
+            decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut l,
+                1000,
+                vec![&env, proto_ctx(&env, 4, "swap")]
+            )
+            .first()
+            .unwrap(),
+            Decision::Blocked(Error::UnknownContract)
+        ));
+    }
+
+    #[test]
+    /// SPEC §6.3: allowlist classification happens before arg inspection —
+    /// a protocol contract named like an SAC is not parsed as a transfer.
+    fn protocol_classification_precedes_arg_inspection() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        // Protocol contract 3 is NOT in cfg.assets, but is in cfg.protocols.
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 3),
+                fns: None,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+        // Call named "transfer" on protocol contract 3 with SAC-shaped args.
+        // Must be classified as Protocol (allowed), not AssetTransfer.
+        let ctx = vec![&env, transfer_ctx(&env, 3, 2, 5)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
+        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_eq!(l.total, 0);
     }
 
     #[test]
@@ -1637,5 +1796,24 @@ mod tests {
             observed_strictness,
             "expected the over-count to make at least one admission stricter"
         );
+    }
+
+    #[test]
+    fn multi_asset_batch_unit_mixing_summation() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.assets = vec![&env, addr(&env, 1), addr(&env, 2)];
+        p.window_cap = 150;
+        p.per_tx_cap = 100;
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![
+            &env,
+            transfer_ctx(&env, 1, 2, 40),
+            transfer_ctx(&env, 2, 2, 60),
+        ];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx);
+        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_eq!(l.total, 100);
     }
 }

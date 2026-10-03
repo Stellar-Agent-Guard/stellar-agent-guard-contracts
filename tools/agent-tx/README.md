@@ -7,6 +7,45 @@ address. Build it from the repository root with:
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
 
+## Network selection
+
+Every subcommand resolves its endpoint from a named preset, which fixes both the RPC
+URL and the network passphrase the signed auth payload commits to:
+
+```bash
+agent-tx status --guard C...                    # testnet is the default
+agent-tx status --guard C... --network futurenet
+```
+
+| `--network` | Endpoint | Passphrase |
+|---|---|---|
+| `testnet` (default) | `https://soroban-testnet.stellar.org` | `Test SDF Network ; September 2015` |
+| `futurenet` | `https://rpc-futurenet.stellar.org` | `Test SDF Future Network ; October 2022` |
+| `mainnet` | `https://soroban.stellar.org` | `Public Global Stellar Network ; September 2015` |
+
+- `--rpc-url <url>` points at a custom or self-hosted node instead. `--network` and
+  `--rpc-url` together are rejected: they name two endpoints, and guessing which one
+  an operator meant is exactly the failure mode presets exist to remove. A URL that
+  *is* a preset endpoint is recognised, so `--rpc-url https://soroban.stellar.org`
+  still signs the mainnet payload.
+- `--network-passphrase <phrase>` overrides the passphrase (a local
+  `stellar standalone` network, a fork).
+- Selecting mainnet prints a one-line reminder on stderr that this contract is
+  unaudited and gates real funds; see the repository [SECURITY.md](../../SECURITY.md).
+
+## Input validation
+
+`--guard`, `--asset`/`--token`, `--to`, the `guards add` address and its admin, and
+`--agent-secret` are validated as StrKeys *of the expected kind* before any RPC
+request is made: `C...` for contract IDs (guard, token), `G...` for account IDs
+(recipients accepted as either, admin must be an account), `S...` for the secret seed.
+Length, the base-32 alphabet, and the CRC16 checksum are all checked, so a copy-paste
+that lost a character fails with a message naming the flag, the value, and the rule.
+
+The leading character encodes the key *type*, never the network, so validation cannot
+(and does not claim to) catch a testnet contract ID used against mainnet — the
+`--network` preset and passphrase decide that.
+
 ## Read-only diagnostics
 
 Read the guard's current state without simulation or submission.

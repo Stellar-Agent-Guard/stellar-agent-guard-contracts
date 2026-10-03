@@ -16,10 +16,18 @@
 //! - `MockAdmin` is a trivial custom account (`Signature = ()`, always
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
+//!
+//! Protocol allowlist coverage (SPEC §6.3): `ProtocolRule.fns` has three
+//! states — `None` (any fn on that contract), `Some(list)` with a match, and
+//! `Some(list)` without a match. The tests below pin each state plus the
+//! unknown-contract denial and the empty-`Some([])` config rejection, and
+//! assert that the allowlist check runs *before* any arg inspection (a
+//! protocol named like an SAC is still classified as a protocol, not a
+//! transfer).
 
 use crate::types::{
-    CheckResult, DataKey, Error as GuardError, PolicyConfig, PolicyRuleId, ProtocolRule,
-    RecipientCap, ValidationOutcome, WindowState,
+    CheckResult, DataKey, DmsHealthStatus, Error as GuardError, PolicyConfig, PolicyRuleId,
+    ProtocolRule, RecipientCap, ValidationOutcome, WindowState,
 };
 use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
 
@@ -1336,6 +1344,407 @@ fn admin_freeze_blocks_immediately_and_unfreeze_restores() {
     h.transfer(&recv, 5); // restored
 }
 
+// ── Issue #48: the DMS timeline as one executable matrix (SPEC §5) ────────
+//
+// SPEC §5 rule #2 is a three-clause boolean — `grace > 0`, `LastHeartbeat != 0`
+// and `now - LastHeartbeat > grace` — and every clause has its own edge. Those
+// edges used to live in separate narrative tests, so nothing showed the whole
+// timeline at once. `dms_timeline_edge_matrix` is the table-driven unit twin of
+// SPEC §11 scenario 5: one runner, labelled scenarios, one assertion per row,
+// and failure messages that name the row that moved.
+//
+// The timelines start at `DMS_T0`, not at ledger time 0, because installing a
+// policy at ts 0 writes `LastHeartbeat = 0`, which is the encoding of "never
+// heartbeated". Rather than route around that collision, scenario B pins what
+// it means.
+
+/// Base ledger timestamp for the timelines. Non-zero so `set_policy`'s clock arm
+/// cannot be mistaken for the "never heartbeated" sentinel.
+const DMS_T0: u64 = 1_000_000;
+/// Grace used by the timeline scenarios (SPEC §5 recommends small values on
+/// testnet proofs; the matrix only needs the expiry boundary to be reachable).
+const DMS_GRACE: u64 = 100;
+/// Amount spent by the `Spend*` rows. The base policy has no caps, so the only
+/// gate that can refuse it is the account-level one under test.
+const DMS_SPEND: i128 = 5;
+
+/// One row of the matrix: the operation to perform, and for asserting rows the
+/// expectation it must meet.
+#[derive(Debug)]
+enum DmsOp {
+    /// `set_policy` with `dms_grace_secs = grace` at ledger timestamp `t`.
+    /// Installing arms the clock: `LastHeartbeat = t`.
+    Install { t: u64, grace: u64 },
+    /// Advance the ledger clock and nothing else — time passing must not be
+    /// able to reset the DMS, only to expire it.
+    Time { t: u64 },
+    /// An agent-signed transfer must be admitted.
+    SpendOk,
+    /// An agent-signed transfer must be blocked, naming the reason.
+    SpendBlocked(&'static str),
+    /// An agent-signed heartbeat must be admitted.
+    HeartbeatOk,
+    /// An agent-signed heartbeat must be blocked, naming the reason.
+    HeartbeatBlocked(&'static str),
+    /// Admin `freeze()`.
+    Freeze,
+    /// Admin `unfreeze()`: asserts the `rearmed_dms` event flag *and* the clock
+    /// side effect it describes (SPEC §5 recorded decision).
+    Unfreeze {
+        rearmed_dms: bool,
+        last_heartbeat: u64,
+    },
+    /// `status()` snapshot: the two DMS-ish flags plus the persisted clock.
+    Status {
+        admin_frozen: bool,
+        heartbeat_expired: bool,
+        last_heartbeat: u64,
+    },
+    /// `dms_health()` — the consumer-facing view, deliberately not the gate.
+    Health(DmsHealthStatus),
+}
+
+/// A row is `(what it pins, what to do)`.
+type DmsStep = (&'static str, DmsOp);
+
+/// Runs a guarded transfer in enforcing auth mode and returns the block reason
+/// from the host's error payload, or `None` when the call was admitted. The
+/// failing frame rolls the `auth_checked` event back from the ledger events API,
+/// so the payload is where the emitted reason is observable (same technique as
+/// `rotate_agent_key_next_heartbeat_validity_spec_5_7`).
+fn transfer_outcome(h: &mut Harness, to: &Address, amount: i128) -> Option<std::string::String> {
+    let guard = h.guard.clone();
+    let root = h.transfer_invocation(&guard, to, amount);
+    let entry = h.guard_entry(&root);
+    h.enforce(entry);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        MockAssetClient::new(&h.env, &h.asset).transfer(&h.guard, to, &amount);
+    }));
+    match res {
+        Ok(()) => None,
+        Err(payload) => Some(
+            payload
+                .downcast_ref::<std::string::String>()
+                .cloned()
+                .unwrap_or_default(),
+        ),
+    }
+}
+
+/// `transfer_outcome` for the self-called `heartbeat`.
+fn heartbeat_outcome(h: &mut Harness) -> Option<std::string::String> {
+    let root = h.heartbeat_invocation();
+    let entry = h.guard_entry(&root);
+    h.enforce(entry);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).heartbeat();
+    }));
+    match res {
+        Ok(()) => None,
+        Err(payload) => Some(
+            payload
+                .downcast_ref::<std::string::String>()
+                .cloned()
+                .unwrap_or_default(),
+        ),
+    }
+}
+
+/// Walks one scenario. Every assertion carries `scenario / row` so a red test
+/// points at the edge instead of at a line number.
+#[allow(clippy::too_many_lines)] // the walk-through *is* the deliverable
+fn run_dms_scenario(scenario: &str, steps: &[DmsStep]) {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    for (label, op) in steps {
+        let at = || format!("{scenario} / {label}");
+        match op {
+            DmsOp::Install { t, grace } => {
+                let mut p = h.base_policy();
+                p.dms_grace_secs = *grace;
+                h.set_time(*t);
+                h.install_policy(&p);
+            }
+            DmsOp::Time { t } => h.set_time(*t),
+            DmsOp::SpendOk => {
+                if let Some(reason) = transfer_outcome(&mut h, &recv, DMS_SPEND) {
+                    panic!(
+                        "{}: expected the transfer to be admitted, blocked ({reason})",
+                        at()
+                    );
+                }
+            }
+            DmsOp::SpendBlocked(want) => {
+                let reason = transfer_outcome(&mut h, &recv, DMS_SPEND)
+                    .unwrap_or_else(|| panic!("{}: expected the transfer to be blocked", at()));
+                assert!(
+                    reason.contains(want),
+                    "{}: expected block reason `{want}`, got ({reason})",
+                    at()
+                );
+            }
+            DmsOp::HeartbeatOk => {
+                if let Some(reason) = heartbeat_outcome(&mut h) {
+                    panic!(
+                        "{}: expected the heartbeat to be admitted, blocked ({reason})",
+                        at()
+                    );
+                }
+            }
+            DmsOp::HeartbeatBlocked(want) => {
+                let reason = heartbeat_outcome(&mut h)
+                    .unwrap_or_else(|| panic!("{}: expected the heartbeat to be blocked", at()));
+                assert!(
+                    reason.contains(want),
+                    "{}: expected block reason `{want}`, got ({reason})",
+                    at()
+                );
+            }
+            DmsOp::Freeze => {
+                h.env.mock_all_auths();
+                PolicyEngineClient::new(&h.env, &h.guard).freeze();
+            }
+            DmsOp::Unfreeze {
+                rearmed_dms,
+                last_heartbeat,
+            } => {
+                h.unfreeze();
+                assert_unfrozen_event_rearmed(&h.env, *rearmed_dms);
+                let st = h.status();
+                assert_eq!(
+                    st.last_heartbeat,
+                    *last_heartbeat,
+                    "{}: unfreeze must write LastHeartbeat = now",
+                    at()
+                );
+                assert!(
+                    !st.admin_frozen,
+                    "{}: unfreeze must clear AdminFrozen",
+                    at()
+                );
+            }
+            DmsOp::Status {
+                admin_frozen,
+                heartbeat_expired,
+                last_heartbeat,
+            } => {
+                let st = h.status();
+                assert_eq!(st.admin_frozen, *admin_frozen, "{}: admin_frozen", at());
+                assert_eq!(
+                    st.heartbeat_expired,
+                    *heartbeat_expired,
+                    "{}: heartbeat_expired",
+                    at()
+                );
+                assert_eq!(
+                    st.last_heartbeat,
+                    *last_heartbeat,
+                    "{}: last_heartbeat (the persisted DMS clock)",
+                    at()
+                );
+            }
+            DmsOp::Health(expected) => {
+                let got = PolicyEngineClient::new(&h.env, &h.guard).dms_health();
+                assert_eq!(&got, expected, "{}: dms_health", at());
+            }
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // the matrix is one row per edge by design
+fn dms_timeline_edge_matrix() {
+    // ── A: the SPEC §11 scenario 5 timeline ───────────────────────────────
+    run_dms_scenario(
+        "A: expiry, unrevivable silence, re-arm",
+        &[
+            (
+                "set_policy with grace=100 arms the clock at install time",
+                DmsOp::Install {
+                    t: DMS_T0,
+                    grace: DMS_GRACE,
+                },
+            ),
+            ("t=+10", DmsOp::Time { t: DMS_T0 + 10 }),
+            (
+                "a fresh install is not expired",
+                DmsOp::Status {
+                    admin_frozen: false,
+                    heartbeat_expired: false,
+                    last_heartbeat: DMS_T0,
+                },
+            ),
+            (
+                "t=+10 is below the 80% warn band",
+                DmsOp::Health(DmsHealthStatus::Ok),
+            ),
+            ("spend inside the grace is admitted", DmsOp::SpendOk),
+            ("t=+50", DmsOp::Time { t: DMS_T0 + 50 }),
+            ("a heartbeat re-attests liveness", DmsOp::HeartbeatOk),
+            (
+                "the clock moved to the heartbeat",
+                DmsOp::Status {
+                    admin_frozen: false,
+                    heartbeat_expired: false,
+                    last_heartbeat: DMS_T0 + 50,
+                },
+            ),
+            ("t=+149", DmsOp::Time { t: DMS_T0 + 149 }),
+            (
+                "99 of 100s consumed is in the warn band",
+                DmsOp::Health(DmsHealthStatus::Warn),
+            ),
+            (
+                "and still admissible: expiry is > grace, not >= grace",
+                DmsOp::SpendOk,
+            ),
+            ("t=+151", DmsOp::Time { t: DMS_T0 + 151 }),
+            (
+                "the grace elapsed, so time alone froze the account",
+                DmsOp::Status {
+                    admin_frozen: false,
+                    heartbeat_expired: true,
+                    last_heartbeat: DMS_T0 + 50,
+                },
+            ),
+            (
+                "the advisory view agrees",
+                DmsOp::Health(DmsHealthStatus::Expired),
+            ),
+            (
+                "spend is blocked with HeartbeatExpired",
+                DmsOp::SpendBlocked("heartbeat_expired"),
+            ),
+            (
+                "silence cannot self-revive: the heartbeat is blocked too",
+                DmsOp::HeartbeatBlocked("heartbeat_expired"),
+            ),
+            (
+                "a rejected heartbeat leaves the clock untouched",
+                DmsOp::Status {
+                    admin_frozen: false,
+                    heartbeat_expired: true,
+                    last_heartbeat: DMS_T0 + 50,
+                },
+            ),
+            ("t=+160", DmsOp::Time { t: DMS_T0 + 160 }),
+            (
+                "unfreeze is the reversal: brake release + liveness attestation",
+                DmsOp::Unfreeze {
+                    rearmed_dms: true,
+                    last_heartbeat: DMS_T0 + 160,
+                },
+            ),
+            (
+                "the re-armed clock is what status reports",
+                DmsOp::Status {
+                    admin_frozen: false,
+                    heartbeat_expired: false,
+                    last_heartbeat: DMS_T0 + 160,
+                },
+            ),
+            ("t=+259", DmsOp::Time { t: DMS_T0 + 259 }),
+            (
+                "the re-armed window is a real one: 99s in, spend still works",
+                DmsOp::SpendOk,
+            ),
+            ("t=+261", DmsOp::Time { t: DMS_T0 + 261 }),
+            (
+                "and it expires on its own terms 100s later",
+                DmsOp::SpendBlocked("heartbeat_expired"),
+            ),
+        ],
+    );
+
+    // ── B: `LastHeartbeat == 0` means "clock not armed" ────────────────────
+    // The gate's `!= 0` clause and `dms_health`'s sentinel check read the same
+    // bytes and answer differently, on purpose: rule #2 never freezes an
+    // account it has no attestation for, while the health view calls that state
+    // Expired so consumers can alert. This scenario pins the asymmetry and the
+    // moment the clock becomes armed.
+    run_dms_scenario(
+        "B: LastHeartbeat = 0 (never armed)",
+        &[
+            (
+                "installing at ledger ts 0 stores the sentinel as the clock",
+                DmsOp::Install {
+                    t: 0,
+                    grace: DMS_GRACE,
+                },
+            ),
+            ("t=500_000", DmsOp::Time { t: 500_000 }),
+            (
+                "rule #2 cannot fire on the sentinel: not expired",
+                DmsOp::Status {
+                    admin_frozen: false,
+                    heartbeat_expired: false,
+                    last_heartbeat: 0,
+                },
+            ),
+            (
+                "dms_health still reports Expired",
+                DmsOp::Health(DmsHealthStatus::Expired),
+            ),
+            ("spend is admitted", DmsOp::SpendOk),
+            (
+                "a heartbeat is admitted and replaces the sentinel",
+                DmsOp::HeartbeatOk,
+            ),
+            (
+                "the clock is now armed",
+                DmsOp::Status {
+                    admin_frozen: false,
+                    heartbeat_expired: false,
+                    last_heartbeat: 500_000,
+                },
+            ),
+            ("t=500_101", DmsOp::Time { t: 500_101 }),
+            (
+                "once armed, the grace binds like any other",
+                DmsOp::Status {
+                    admin_frozen: false,
+                    heartbeat_expired: true,
+                    last_heartbeat: 500_000,
+                },
+            ),
+            (
+                "spend blocked with HeartbeatExpired",
+                DmsOp::SpendBlocked("heartbeat_expired"),
+            ),
+            (
+                "heartbeat blocked too",
+                DmsOp::HeartbeatBlocked("heartbeat_expired"),
+            ),
+        ],
+    );
+
+    // ── C: `grace == 0` and the manual brake ──────────────────────────────
+    // grace = 0 is how "disabled" is encoded: neither clause of rule #2 can be
+    // satisfied, so no amount of silence expires the account. `freeze()` is the
+    // operator's answer for that configuration, and it is checked *before* the
+    // DMS — which is why an admin-frozen live agent sees `admin_frozen` for the
+    // heartbeat as well.
+    run_dms_scenario(
+        "C: grace = 0 (disabled) + manual freeze",
+        &[
+            ("set_policy with grace=0 disables the switch", DmsOp::Install { t: DMS_T0, grace: 0 }),
+            ("t=+10_000_000", DmsOp::Time { t: DMS_T0 + 10_000_000 }),
+            ("far past any window, still nothing expired", DmsOp::Status { admin_frozen: false, heartbeat_expired: false, last_heartbeat: DMS_T0 }),
+            ("health is Ok without consulting the clock", DmsOp::Health(DmsHealthStatus::Ok)),
+            ("spend is admitted", DmsOp::SpendOk),
+            ("heartbeat is admitted and still records the clock", DmsOp::HeartbeatOk),
+            ("the clock tracks the heartbeat even when the DMS is off", DmsOp::Status { admin_frozen: false, heartbeat_expired: false, last_heartbeat: DMS_T0 + 10_000_000 }),
+            ("freeze() is the brake, independent of the DMS", DmsOp::Freeze),
+            ("frozen: the flag is what status reports", DmsOp::Status { admin_frozen: true, heartbeat_expired: false, last_heartbeat: DMS_T0 + 10_000_000 }),
+            ("frozen: spend blocked with AdminFrozen", DmsOp::SpendBlocked("admin_frozen")),
+            ("frozen: AdminFrozen is checked before the DMS, so heartbeats are blocked too", DmsOp::HeartbeatBlocked("admin_frozen")),
+            ("t=+10_000_001", DmsOp::Time { t: DMS_T0 + 10_000_001 }),
+            ("unfreeze clears the flag; the clock write is a re-arm only because a second passed", DmsOp::Unfreeze { rearmed_dms: true, last_heartbeat: DMS_T0 + 10_000_001 }),
+            ("spend is restored", DmsOp::SpendOk),
+        ],
+    );
+}
+
 #[test]
 fn wrong_signature_is_rejected_by_host_crypto() {
     let mut h = Harness::new();
@@ -1987,6 +2396,19 @@ fn self_address_rejected_in_every_list() {
     // unrelated validation defect in the harness.
     client.set_policy(&h.base_policy());
     assert!(client.policy().is_some());
+}
+
+#[test]
+fn expired_at_install_policy_results_in_outside_active_window() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.active_from = 100;
+    p.active_until = 500;
+    h.install_policy(&p);
+    // Ledger time is past active_until (600 > 500), parked in dormant/expired state.
+    h.set_time(600);
+    h.transfer_expect_blocked(&recv, 5);
 }
 
 #[test]

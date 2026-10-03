@@ -1,7 +1,9 @@
 //! Comprehensive event payload audit tests for every event emitted by the contract.
 //! Asserts exact topic counts, topic symbols, and data payload shapes per SPEC §9.
 
+use crate::emit_window_merge;
 use crate::types::PolicyConfig;
+use crate::window::{Ledger, WindowMergeKind};
 use crate::{PolicyEngine, PolicyEngineClient};
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -34,6 +36,24 @@ fn map_u64_field(event: &xdr::ContractEvent, field: &str) -> u64 {
     match &entry.val {
         ScVal::U64(v) => *v,
         other => panic!("event field `{field}` must be U64, got {other:?}"),
+    }
+}
+
+fn map_i128_field(event: &xdr::ContractEvent, field: &str) -> i128 {
+    let xdr::ContractEventBody::V0(v0) = &event.body;
+    let ScVal::Map(Some(map)) = &v0.data else {
+        panic!("event data must be a Map");
+    };
+    let entry = map
+        .0
+        .iter()
+        .find(|entry| {
+            entry.key == ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from(field)).unwrap())
+        })
+        .unwrap_or_else(|| panic!("event data must carry `{field}`"));
+    match &entry.val {
+        ScVal::I128(v) => (i128::from(v.hi) << 64) | i128::from(v.lo),
+        other => panic!("event field `{field}` must be I128, got {other:?}"),
     }
 }
 
@@ -580,4 +600,40 @@ fn policy_revision_sequence_is_incremental_and_stamped_on_auth_events() {
             .policy_revision,
         3
     );
+}
+
+#[test]
+fn window_merge_event_emits_once_at_the_entry_bound() {
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let mut ledger = Ledger::empty(&env);
+    for ts in 0..crate::types::MAX_WINDOW_ENTRIES as u64 {
+        ledger.admit(ts, 1);
+    }
+    assert!(
+        ledger.merges.is_empty(),
+        "no merge or event below the bound"
+    );
+    assert_eq!(env.events().all().events(), []);
+
+    ledger.admit(crate::types::MAX_WINDOW_ENTRIES as u64, 1);
+    assert_eq!(ledger.merges.len(), 1);
+    let merge = ledger.merges.pop().expect("one merge metadata record");
+    assert_eq!(merge.kind, WindowMergeKind::GlobalSpend);
+    assert_eq!(merge.merged_ts, 1);
+    assert_eq!(merge.merged_value, 2);
+    let contract = env.register(MockAdmin, ());
+    env.as_contract(&contract, || emit_window_merge(&env, merge));
+
+    let all_events = env.events().all();
+    let events = all_events.events();
+    assert_eq!(events.len(), 1);
+    let event = events.first().unwrap();
+    assert!(matches!(
+        &event.body,
+        xdr::ContractEventBody::V0(v0)
+            if v0.topics.first() == Some(&event_name("event_window_merged"))
+    ));
+    assert_eq!(map_u64_field(event, "merged_ts"), 1);
+    assert_eq!(map_i128_field(event, "merged_value"), 2);
 }

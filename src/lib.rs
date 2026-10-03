@@ -42,7 +42,7 @@ use types::{
     CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_DMS_GRACE_SECS, MAX_POLICY_ASSETS,
     MAX_POLICY_PROTOCOLS, MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
 };
-use window::Ledger;
+use window::{Ledger, WindowMerge, WindowMergeKind};
 
 // ── Contract events (SPEC §9). Each event is its own type; topic layout
 //    follows the SPEC table exactly so the Phase-2 listener can filter on one
@@ -136,6 +136,31 @@ struct EventAgentRotated {
     by: Address,
     old_fingerprint: BytesN<8>,
     new_fingerprint: BytesN<8>,
+}
+
+/// A conservative ledger coalescence at the 8192-entry backstop.
+/// Topic 1 identifies the ledger kind; data carries retained timestamp/value.
+#[contractevent]
+#[derive(Clone)]
+struct EventWindowMerged {
+    #[topic]
+    ledger_kind: Symbol,
+    merged_ts: u64,
+    merged_value: i128,
+}
+
+fn emit_window_merge(env: &Env, merge: WindowMerge) {
+    let ledger_kind = match merge.kind {
+        WindowMergeKind::GlobalSpend => "global_spend",
+        WindowMergeKind::RecipientSpend => "recipient_spend",
+        WindowMergeKind::ProtocolCalls => "protocol_calls",
+    };
+    EventWindowMerged {
+        ledger_kind: Symbol::new(env, ledger_kind),
+        merged_ts: merge.merged_ts,
+        merged_value: merge.merged_value,
+    }
+    .publish(env);
 }
 
 // ── Persistent-storage helpers (SPEC §3) ────────────────────────────────
@@ -473,6 +498,7 @@ fn key_fingerprint(env: &Env, pubkey: &BytesN<32>) -> BytesN<8> {
         .sha256(&Bytes::from_array(env, &pubkey.to_array()))
         .into();
     let mut fingerprint = [0u8; 8];
+    // `digest` is fixed at 32 bytes, so this constant 0..8 range is in bounds.
     fingerprint.copy_from_slice(&digest[..8]);
     BytesN::from_array(env, &fingerprint)
 }
@@ -788,7 +814,8 @@ impl PolicyEngine {
     ///
     /// # Panics
     ///
-    /// This function panics if the policy engine's `decide` evaluation returns an empty list of verdicts.
+    /// This function surfaces `DecisionInvariantViolation` if the policy
+    /// engine returns no verdict for the single submitted preflight context.
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
         let Some(snapshot) = AuthSnapshot::load(&env) else {
@@ -832,7 +859,10 @@ impl PolicyEngine {
             now,
             vec![&env, call],
         );
-        let result = match verdicts.first().unwrap() {
+        let Some(verdict) = verdicts.first() else {
+            panic_with_error!(&env, Error::DecisionInvariantViolation);
+        };
+        let result = match verdict {
             Decision::Allowed => {
                 emit_auth(&env, true, None, 0);
                 CheckResult::Allowed
@@ -935,27 +965,36 @@ impl CustomAccountInterface for PolicyEngine {
         let mut all_passed = true;
         let mut first_error = None;
         for (i, v) in verdicts.iter().enumerate() {
+            let Ok(context_index) = u32::try_from(i) else {
+                panic_with_error!(&env, Error::DecisionInvariantViolation);
+            };
             match v {
-                Decision::Allowed => emit_auth(&env, true, None, u32::try_from(i).unwrap()),
+                Decision::Allowed => emit_auth(&env, true, None, context_index),
                 Decision::Blocked(e) => {
                     all_passed = false;
                     if first_error.is_none() {
                         first_error = Some(*e);
                     }
-                    emit_auth(&env, false, Some(*e), u32::try_from(i).unwrap());
+                    emit_auth(&env, false, Some(*e), context_index);
                 }
             }
         }
 
         if all_passed {
             // 4. Persist window changes made by the decision.
+            for &merge in &ledger.merges {
+                emit_window_merge(&env, merge);
+            }
             let has_entries = ledger.len() > 0 || ledger_has_recipient_entries(&ledger);
             if window_persisted || has_entries {
                 save_ledger(&env, &ledger);
             }
             Ok(())
         } else {
-            Err(first_error.unwrap())
+            match first_error {
+                Some(error) => Err(error),
+                None => panic_with_error!(&env, Error::DecisionInvariantViolation),
+            }
         }
     }
 }
