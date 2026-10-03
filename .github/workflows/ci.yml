@@ -49,6 +49,9 @@ jobs:
       - name: Unit + integration tests
         run: cargo test
 
+      - name: Decision-path CPU ceilings
+        run: cargo run --manifest-path benches/Cargo.toml --bin denial_path_gas
+
       - name: Contract build (wasm32v1-none)
         run: cargo build --release --target wasm32v1-none
 
