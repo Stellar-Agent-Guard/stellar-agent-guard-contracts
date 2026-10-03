@@ -810,13 +810,13 @@ impl GuardScenario {
     }
 
     /// Advance the ledger clock to `ts`.
-    fn at(mut self, ts: u64) -> Self {
+    fn at(self, ts: u64) -> Self {
         self.h.set_time(ts);
         self
     }
 
     /// Install a policy built from the harness base policy and mutated by `f`.
-    fn policy(mut self, f: impl FnOnce(&mut PolicyConfig)) -> Self {
+    fn policy(self, f: impl FnOnce(&mut PolicyConfig)) -> Self {
         let mut p = self.h.base_policy();
         f(&mut p);
         self.h.install_policy(&p);
