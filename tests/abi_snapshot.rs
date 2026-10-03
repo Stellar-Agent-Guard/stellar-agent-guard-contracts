@@ -57,27 +57,43 @@ fn normalize_sig(text: &str) -> String {
         .replace(",)", ")")
 }
 
-/// Contract entrypoints from `src/lib.rs`: every 4-space-indented `pub fn`
-/// (the `PolicyEngine` contract methods — top-level `fn` helpers sit at
-/// column 0 and are not entrypoints) plus the host-invoked `__check_auth`.
+/// Contract entrypoints from the `PolicyEngine` implementation plus the
+/// host-invoked `__check_auth` method. Restrict scanning to those impl blocks
+/// so feature-gated `testutils` helpers do not appear in the Soroban ABI.
 fn extract_functions(src: &str) -> Vec<String> {
     let lines: Vec<&str> = src.lines().collect();
     let mut fns = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let body = lines[i].strip_prefix("    ").unwrap_or("");
-        let is_entrypoint = body.starts_with("pub fn ") || body.starts_with("fn __check_auth(");
-        if is_entrypoint {
-            let mut sig = body.to_string();
-            while !sig.contains('{') && i + 1 < lines.len() {
-                i += 1;
-                sig.push(' ');
-                sig.push_str(lines[i].trim());
+    for (impl_header, method_prefix) in [
+        ("impl PolicyEngine {", "pub fn "),
+        (
+            "impl CustomAccountInterface for PolicyEngine {",
+            "fn __check_auth(",
+        ),
+    ] {
+        let start = lines
+            .iter()
+            .position(|line| line.trim() == impl_header)
+            .unwrap_or_else(|| panic!("{LIB_SOURCE}: `{impl_header}` not found"));
+        let end_offset = lines[start + 1..]
+            .iter()
+            .position(|line| *line == "}")
+            .unwrap_or_else(|| panic!("{LIB_SOURCE}: `{impl_header}` is not closed"));
+        let body = &lines[start + 1..start + 1 + end_offset];
+        let mut i = 0;
+        while i < body.len() {
+            let signature = body[i].strip_prefix("    ").unwrap_or("");
+            if signature.starts_with(method_prefix) {
+                let mut sig = signature.to_string();
+                while !sig.contains('{') && i + 1 < body.len() {
+                    i += 1;
+                    sig.push(' ');
+                    sig.push_str(body[i].trim());
+                }
+                let sig = sig.trim_end_matches(['{', ' ']).trim_end().to_string();
+                fns.push(normalize_sig(&sig));
             }
-            let sig = sig.trim_end_matches(['{', ' ']).trim_end().to_string();
-            fns.push(normalize_sig(&sig));
+            i += 1;
         }
-        i += 1;
     }
     fns
 }

@@ -1,0 +1,31 @@
+[package]
+name = "stellar-agent-guard-contracts-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+soroban-sdk = { version = "=27.0.6", features = ["alloc", "testutils"] }
+stellar-xdr = "=27.0.0"
+stellar-agent-guard-contracts = { path = "..", features = ["testutils"] }
+
+[[bin]]
+name = "policy_config_deserialization"
+path = "fuzz_targets/policy_config_deserialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seed-policy-config"
+path = "src/bin/seed_policy_config.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
