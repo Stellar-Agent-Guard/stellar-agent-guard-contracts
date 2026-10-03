@@ -37,7 +37,7 @@ fn __check_auth(
 
 5. **Return `Ok(())`** to approve, or **`Err(reason)`** to reject the entire transaction.
 
-6. **Emit `auth_checked` event** either way — the same event vocabulary used by the `check` pre-flight function.
+6. **Emit `auth_checked` event** either way — the same event vocabulary used by the `check` pre-flight function. Its data carries `context_index` and `revision` (the `PolicyRevision` counter in force at decision time, issue #38), so telemetry can join each admission/rejection to the exact policy generation.
 
 ## The auth context
 
@@ -77,6 +77,9 @@ For other calls, the arguments are not interpretable — see [Enforcement Scope]
 | `UnknownContract` | 26 | Contract not in assets or protocols |
 | `SelfFunctionNotAllowed` | 27 | Self-call to non-heartbeat function |
 | `CreateContractNotAllowed` | 28 | Contract creation denied in v1 |
+| `RecipientBlocked` | 29 | Transfer to an explicitly blocked recipient |
+| `ProtocolCallRateExceeded` | 30 | Protocol call rate limit exceeded |
+| `DecisionInvariantViolation` | 31 | Internal enforcement verdict invariant failed |
 
 ## How agent-tx drives `__check_auth`
 
