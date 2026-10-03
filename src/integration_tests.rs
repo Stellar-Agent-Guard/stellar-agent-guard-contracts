@@ -522,6 +522,25 @@ impl Harness {
         assert!(res.is_err(), "expected the transfer to be blocked");
     }
 
+    /// Signed transfer *expected to be blocked*, returning the host error log so
+    /// a caller can assert **which** reason blocked it (mirrors
+    /// `heartbeat_with_expect_blocked`). Panics if the transfer is not blocked.
+    fn transfer_blocked_reason(&mut self, to: &Address, amount: i128) -> std::string::String {
+        let root = self.transfer_invocation(&self.guard, to, amount);
+        let entry = self.guard_entry(&root);
+        self.enforce(entry);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            MockAssetClient::new(&self.env, &self.asset).transfer(&self.guard, to, &amount);
+        }));
+        match res {
+            Err(payload) => payload
+                .downcast_ref::<std::string::String>()
+                .cloned()
+                .unwrap_or_default(),
+            Ok(()) => panic!("expected the transfer to be blocked"),
+        }
+    }
+
     fn heartbeat(&mut self) {
         let root = self.heartbeat_invocation();
         let entry = self.guard_entry(&root);
@@ -763,6 +782,109 @@ impl Harness {
     }
 }
 
+// ── GuardScenario: declarative scenario builder (issue #63) ──────────────
+//
+// Each call maps 1:1 onto a step of the SPEC §11 scenario walkthrough, so a
+// scenario reads as one block instead of repeating harness wiring:
+//
+//   | Builder call                        | SPEC §11 step                                |
+//   |-------------------------------------|----------------------------------------------|
+//   | `GuardScenario::new()`              | deploy guard + MockAsset, register agent key |
+//   | `.at(t)`                            | advance the ledger clock to timestamp `t`     |
+//   | `.policy(|p| { .. })`              | install/modify the policy (`set_policy`)     |
+//   | `.expect_transfer(&to, amt)`        | signed SAC transfer expected **Allowed**     |
+//   | `.expect_block(reason, &to, amt)`   | signed SAC transfer expected **Blocked(reason)** |
+//   | `.heartbeat()` / `.heartbeat_blocked()` / `.unfreeze()` | agent/admin ops under enforcing auth |
+//
+// `expect_block` asserts the *reason*, not just the verdict, by matching the
+// host log a blocked `require_auth` produces (the same technique as
+// `heartbeat_with_expect_blocked`). Building consumes `self`, so a scenario is
+// a single expression.
+struct GuardScenario {
+    h: Harness,
+}
+
+impl GuardScenario {
+    fn new() -> Self {
+        Self { h: Harness::new() }
+    }
+
+    /// Advance the ledger clock to `ts`.
+    fn at(self, ts: u64) -> Self {
+        self.h.set_time(ts);
+        self
+    }
+
+    /// Install a policy built from the harness base policy and mutated by `f`.
+    fn policy(self, f: impl FnOnce(&mut PolicyConfig)) -> Self {
+        let mut p = self.h.base_policy();
+        f(&mut p);
+        self.h.install_policy(&p);
+        self
+    }
+
+    /// A signed SAC transfer expected to be **Allowed**.
+    fn expect_transfer(mut self, to: &Address, amount: i128) -> Self {
+        self.h.transfer(to, amount);
+        self
+    }
+
+    /// A signed SAC transfer expected to be **Blocked** for `reason`.
+    fn expect_block(mut self, reason: GuardError, to: &Address, amount: i128) -> Self {
+        let expected = reason.reason();
+        let log = self.h.transfer_blocked_reason(to, amount);
+        assert!(
+            log.contains(expected),
+            "expected block reason {expected:?}, but the host log was: {log}"
+        );
+        self
+    }
+
+    /// A signed heartbeat expected to be **Allowed**.
+    fn heartbeat(mut self) -> Self {
+        self.h.heartbeat();
+        self
+    }
+
+    /// A signed heartbeat expected to be **Blocked**.
+    fn heartbeat_blocked(mut self) -> Self {
+        self.h.heartbeat_expect_blocked();
+        self
+    }
+
+    /// Admin `unfreeze` under enforcing auth (the DMS reversal path, SPEC §5).
+    fn unfreeze(mut self) -> Self {
+        self.h.unfreeze();
+        self
+    }
+
+    fn recipient(&self) -> Address {
+        self.h.recv.clone()
+    }
+
+    fn other(&self) -> Address {
+        self.h.other.clone()
+    }
+
+    fn status(&self) -> crate::types::Status {
+        self.h.status()
+    }
+
+    /// Shared env handle, for event assertions that read `env.events()`.
+    fn env(&self) -> &Env {
+        &self.h.env
+    }
+
+    /// Assert the guard emitted an `auth_checked` event with `result = allowed`.
+    fn assert_allowed_auth_emitted(&self) -> &Self {
+        assert!(
+            self.h.emitted_allowed_auth(),
+            "expected an allowed auth_checked event"
+        );
+        self
+    }
+}
+
 // ── Scenarios ────────────────────────────────────────────────────────────
 
 #[test]
@@ -854,14 +976,11 @@ fn archived_policy_window_and_heartbeat_restore_without_resetting_limits() {
 
 #[test]
 fn allowed_transaction_succeeds() {
-    let mut h = Harness::new();
-    let recv = h.recv.clone();
-    h.install_policy(&h.base_policy());
-    h.set_time(1_000);
-    h.transfer(&recv, 50);
-    assert!(h.emitted_allowed_auth());
-    let st = h.status();
-    assert!(!st.heartbeat_expired);
+    let s = GuardScenario::new();
+    let recv = s.recipient();
+    let s = s.policy(|_| {}).at(1_000).expect_transfer(&recv, 50);
+    s.assert_allowed_auth_emitted();
+    assert!(!s.status().heartbeat_expired);
 }
 
 #[test]
@@ -953,28 +1072,26 @@ fn policy_revision_increments_across_set_and_revoke() {
 
 #[test]
 fn no_policy_is_default_deny_on_chain() {
-    let mut h = Harness::new();
+    let s = GuardScenario::new();
     // initialize only — no policy ever installed.
-    let recv = h.recv.clone();
-    h.set_time(1_000);
-    h.transfer_expect_blocked(&recv, 10);
+    let recv = s.recipient();
+    s.at(1_000).expect_block(GuardError::NoPolicy, &recv, 10);
 }
 
 #[test]
 fn per_tx_cap_violation_blocked_without_window_effect() {
-    let mut h = Harness::new();
-    let recv = h.recv.clone();
-    let mut p = h.base_policy();
-    p.per_tx_cap = 50;
-    p.window_cap = 100; // also watch the window: blocked txs must not spend it
-    h.install_policy(&p);
-    h.set_time(1_000);
-
-    h.transfer(&recv, 20); // ok: window total 20
-    h.transfer_expect_blocked(&recv, 60); // per-tx cap (60 > 50); window must stay 20
-    h.transfer(&recv, 30); // ok: total 50 — would fail if the blocked 60 had hit the window (110 > 100)
-    h.transfer(&recv, 50); // ok: total exactly 100
-    h.transfer_expect_blocked(&recv, 1); // window ledger is genuinely full: proves the 60 never counted
+    let s = GuardScenario::new();
+    let recv = s.recipient();
+    s.policy(|p| {
+        p.per_tx_cap = 50;
+        p.window_cap = 100; // also watch the window: blocked txs must not spend it
+    })
+    .at(1_000)
+    .expect_transfer(&recv, 20) // ok: window total 20
+    .expect_block(GuardError::PerTxCapExceeded, &recv, 60) // 60 > 50; window must stay 20
+    .expect_transfer(&recv, 30) // total 50 — would fail if the blocked 60 had counted (110 > 100)
+    .expect_transfer(&recv, 50) // total exactly 100
+    .expect_block(GuardError::WindowCapExceeded, &recv, 1); // ledger genuinely full
 }
 
 #[test]
@@ -1059,13 +1176,13 @@ fn enabled_window_cap_accrues_with_per_tx_cap_disabled() {
 
 #[test]
 fn recipient_allowlist_blocked() {
-    let mut h = Harness::new();
-    let recv = h.recv.clone();
-    let other = h.other.clone();
-    h.install_policy(&h.base_policy()); // only h.recv allowed
-    h.set_time(1_000);
-    h.transfer_expect_blocked(&other, 5);
-    h.transfer(&recv, 5); // allowlisted recipient still fine
+    let s = GuardScenario::new();
+    let recv = s.recipient();
+    let other = s.other();
+    s.policy(|_| {}) // only the harness recipient is allowlisted
+        .at(1_000)
+        .expect_block(GuardError::RecipientNotAllowed, &other, 5)
+        .expect_transfer(&recv, 5); // allowlisted recipient still fine
 }
 
 #[test]
@@ -1121,34 +1238,28 @@ fn allow_any_recipient_escape_hatch_still_capped() {
 
 #[test]
 fn dead_man_switch_freeze_and_admin_reversal() {
-    let mut h = Harness::new();
-    let recv = h.recv.clone();
-    let mut p = h.base_policy();
-    p.dms_grace_secs = 60;
+    let s = GuardScenario::new();
+    let recv = s.recipient();
     // Install at a realistic (non-zero) ledger time: `set_policy` starts the
     // DMS clock at install time, and the `LastHeartbeat != 0` sentinel (SPEC
     // §4 rule 2) is only meaningful off the epoch — ledger ts 0 would collide
     // with "never heartbeated".
-    h.set_time(1_000_000);
-    h.install_policy(&p); // LastHeartbeat = 1_000_000
-
-    // Within grace: fine.
-    h.set_time(1_000_010);
-    h.transfer(&recv, 5);
-
-    // Grace (60s) elapsed: transfers and even heartbeats are blocked.
-    h.set_time(1_000_100);
-    h.transfer_expect_blocked(&recv, 5);
-    h.heartbeat_expect_blocked(); // silence cannot self-revive (SPEC §5)
+    let s = s
+        .at(1_000_000)
+        .policy(|p| p.dms_grace_secs = 60) // LastHeartbeat = 1_000_000
+        .at(1_000_010) // within grace: fine
+        .expect_transfer(&recv, 5)
+        .at(1_000_100) // grace (60s) elapsed
+        .expect_block(GuardError::HeartbeatExpired, &recv, 5)
+        .heartbeat_blocked(); // silence cannot self-revive (SPEC §5)
 
     // Admin unfreeze is the reversal path (SPEC §5). The DMS grace had
     // elapsed, so the admin's signature re-arms the liveness clock — the
     // event must carry `rearmed_dms: true` to make that side effect
     // auditable (SPEC §5 recorded decision).
-    h.unfreeze(); // sets LastHeartbeat = now (1_000_100)
-    assert_unfrozen_event_rearmed(&h.env, true);
-    h.heartbeat(); // a subsequently-heartbeating agent keeps it alive
-    h.transfer(&recv, 5); // revived
+    let s = s.unfreeze(); // sets LastHeartbeat = now (1_000_100)
+    assert_unfrozen_event_rearmed(s.env(), true);
+    s.heartbeat().at(1_000_100).expect_transfer(&recv, 5); // revived
 }
 
 /// Reads the most recent `event_unfrozen` data map and asserts the value of
