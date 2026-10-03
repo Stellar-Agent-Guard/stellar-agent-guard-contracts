@@ -145,6 +145,34 @@ struct EventAgentRotated {
     new_fingerprint: BytesN<8>,
 }
 
+/// Admin rotation proposal: data `by` (the current admin that proposed) plus
+/// the `proposed` pending admin awaiting confirmation (SPEC §7.2).
+#[contractevent]
+#[derive(Clone)]
+struct EventAdminRotationProposed {
+    by: Address,
+    proposed: Address,
+}
+
+/// Admin rotation completion: data `old` (the outgoing admin) and `new`
+/// (the incoming admin that confirmed). The confirmer is always `new` — only
+/// the pending admin can complete the handover (SPEC §7.2).
+#[contractevent]
+#[derive(Clone)]
+struct EventAdminRotated {
+    old: Address,
+    new: Address,
+}
+
+/// Admin rotation cancellation: data `by` (the current admin that cancelled)
+/// plus the `cancelled` pending admin that will never take effect.
+#[contractevent]
+#[derive(Clone)]
+struct EventAdminRotationCancelled {
+    by: Address,
+    cancelled: Address,
+}
+
 /// A conservative ledger coalescence at the 8192-entry backstop.
 /// Topic 1 identifies the ledger kind; data carries retained timestamp/value.
 #[contractevent]
@@ -519,6 +547,30 @@ fn emit_agent_rotated(env: &Env, by: &Address, old: &BytesN<32>, new: &BytesN<32
     .publish(env);
 }
 
+fn emit_admin_rotation_proposed(env: &Env, by: &Address, proposed: &Address) {
+    EventAdminRotationProposed {
+        by: by.clone(),
+        proposed: proposed.clone(),
+    }
+    .publish(env);
+}
+
+fn emit_admin_rotated(env: &Env, old: &Address, new: &Address) {
+    EventAdminRotated {
+        old: old.clone(),
+        new: new.clone(),
+    }
+    .publish(env);
+}
+
+fn emit_admin_rotation_cancelled(env: &Env, by: &Address, cancelled: &Address) {
+    EventAdminRotationCancelled {
+        by: by.clone(),
+        cancelled: cancelled.clone(),
+    }
+    .publish(env);
+}
+
 // ── Contract ──────────────────────────────────────────────────────────
 
 #[contract]
@@ -596,6 +648,58 @@ impl PolicyEngine {
             .instance()
             .set(&DataKey::AgentPubkey, &new_pubkey);
         emit_agent_rotated(&env, &admin, &old_pubkey, &new_pubkey);
+    }
+
+    // ── Admin rotation (two-step handover, SPEC §7.2) ───────────────────────────
+
+    /// Proposes a new policy admin. The current admin stays fully authoritative
+    /// until the proposal is confirmed, so a typo'd proposal locks out nothing:
+    /// it just sits in `PendingAdmin` until cancelled or overwritten.
+    /// Proposing the current admin is rejected (`InvalidConfig`) — a no-op
+    /// rotation that would emit a misleading handover trail.
+    pub fn propose_admin_rotation(env: Env, new_admin: Address) {
+        let admin = Self::admin_or_panic(&env);
+        if new_admin == admin {
+            panic_with_error!(&env, Error::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        emit_admin_rotation_proposed(&env, &admin, &new_admin);
+    }
+
+    /// Completes a pending admin rotation. Only the *proposed* admin can call
+    /// this (`require_auth` on the pending address) — the confirmation doubles
+    /// as proof the new key is live and correctly recorded, which is what makes
+    /// typos un-harmful: a proposal to an uncontrolled address can never be
+    /// confirmed. On success the old admin loses all authority immediately;
+    /// policy, window, heartbeat, and freeze state are untouched (no revision
+    /// bump — the policy did not change).
+    pub fn confirm_admin_rotation(env: Env) {
+        let old: Option<Address> = env.storage().instance().get(&DataKey::Admin);
+        let Some(old) = old else {
+            panic_with_error!(&env, Error::NotInitialized);
+        };
+        let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
+        let Some(pending) = pending else {
+            panic_with_error!(&env, Error::NoPendingAdmin);
+        };
+        pending.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        emit_admin_rotated(&env, &old, &pending);
+    }
+
+    /// Cancels a pending admin rotation. Only the current admin can cancel;
+    /// the pending address has no power until it confirms.
+    pub fn cancel_admin_rotation(env: Env) {
+        let admin = Self::admin_or_panic(&env);
+        let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
+        let Some(pending) = pending else {
+            panic_with_error!(&env, Error::NoPendingAdmin);
+        };
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        emit_admin_rotation_cancelled(&env, &admin, &pending);
     }
 
     // ── Dead-man switch / freeze (SPEC §5) ───────────────────────────────

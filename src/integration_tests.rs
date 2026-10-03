@@ -431,6 +431,22 @@ impl Harness {
         self.invocation(&self.guard, "unfreeze", std::vec![])
     }
 
+    fn freeze_invocation(&self) -> SorobanAuthorizedInvocation {
+        self.invocation(&self.guard, "freeze", std::vec![])
+    }
+
+    fn propose_admin_invocation(&self, new_admin: &Address) -> SorobanAuthorizedInvocation {
+        self.invocation(
+            &self.guard,
+            "propose_admin_rotation",
+            std::vec![new_admin.clone().into_val(&self.env)],
+        )
+    }
+
+    fn confirm_admin_invocation(&self) -> SorobanAuthorizedInvocation {
+        self.invocation(&self.guard, "confirm_admin_rotation", std::vec![])
+    }
+
     fn signature_expiration_ledger(&self) -> u32 {
         self.env
             .ledger()
@@ -779,6 +795,48 @@ impl Harness {
             );
         }
         panic!("no agent_rotated event was emitted");
+    }
+
+    /// The address pair carried by the most recent admin-rotation event with
+    /// the given name (SPEC §7.2 / §9), as raw `ScVal`s. Panics if the event
+    /// is absent or malformed.
+    fn admin_rotation_event(&self, event: &str, first: &str, second: &str) -> (ScVal, ScVal) {
+        let want = symbol_val(event);
+        for e in self.env.events().all().events().iter().rev() {
+            let xdr::ContractEventBody::V0(v0) = &e.body;
+            if v0.topics.first() != Some(&want) {
+                continue;
+            }
+            let ScVal::Map(Some(map)) = &v0.data else {
+                panic!("{event} data is not a map");
+            };
+            let mut a = None;
+            let mut b = None;
+            for entry in &map.0 {
+                if entry.key == symbol_val(first) {
+                    a = Some(entry.val.clone());
+                } else if entry.key == symbol_val(second) {
+                    b = Some(entry.val.clone());
+                }
+            }
+            return (
+                a.unwrap_or_else(|| panic!("{event} is missing {first}")),
+                b.unwrap_or_else(|| panic!("{event} is missing {second}")),
+            );
+        }
+        panic!("no {event} event was emitted");
+    }
+
+    /// The on-chain `Admin` / `PendingAdmin` slots, read directly from the
+    /// guard's instance storage.
+    fn stored_admins(&self) -> (Option<Address>, Option<Address>) {
+        self.env.as_contract(&self.guard, || {
+            let instance = self.env.storage().instance();
+            (
+                instance.get(&DataKey::Admin),
+                instance.get(&DataKey::PendingAdmin),
+            )
+        })
     }
 }
 
@@ -1234,6 +1292,56 @@ fn allow_any_recipient_escape_hatch_still_capped() {
     h.set_time(1_000);
     h.transfer(&other, 5); // non-allowlisted recipient passes
     h.transfer_expect_blocked(&other, 101); // but the cap still binds
+}
+
+/// Issue #47: the escape hatch skips *only* the recipient allowlist. With
+/// `allow_any_recipient = true` and an empty recipient list (so the list
+/// contents cannot be doing any work in either direction), an arbitrary
+/// recipient within caps is Allowed, while over-cap transfers are still
+/// blocked with the exact cap reason — a refactor that accidentally skipped
+/// cap enforcement under the flag would fail here.
+#[test]
+fn allow_any_recipient_with_empty_list_still_enforces_both_caps() {
+    let mut h = Harness::new();
+    let other = h.other.clone();
+    let mut p = h.base_policy();
+    p.allow_any_recipient = true;
+    p.recipients = soroban_sdk::Vec::new(&h.env); // empty: the flag alone admits
+    p.per_tx_cap = 100;
+    p.window_secs = 86_400;
+    p.window_cap = 100;
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Within both caps: pre-flight says Allowed and the real `__check_auth`
+    // path admits the transfer to an address on no list anywhere.
+    let verdict = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check(h.env.clone(), h.asset.clone(), other.clone(), 40)
+    });
+    assert_eq!(verdict, CheckResult::Allowed);
+    h.transfer(&other, 40); // window total 40
+
+    // Over per-tx cap: the exact reason is PerTxCapExceeded (rule order in
+    // `decide`: per-tx before window), and the on-chain path blocks.
+    let verdict = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check(h.env.clone(), h.asset.clone(), other.clone(), 101)
+    });
+    assert_eq!(
+        verdict,
+        CheckResult::Blocked(Symbol::new(&h.env, "per_tx_cap_exceeded"))
+    );
+    h.transfer_expect_blocked(&other, 101); // window must stay 40
+    h.transfer(&other, 60); // ok: window total exactly 100, proves 101 never counted
+
+    // Over window cap (per-tx fine): the exact reason is WindowCapExceeded.
+    let verdict = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check(h.env.clone(), h.asset.clone(), other.clone(), 1)
+    });
+    assert_eq!(
+        verdict,
+        CheckResult::Blocked(Symbol::new(&h.env, "window_cap_exceeded"))
+    );
+    h.transfer_expect_blocked(&other, 1);
 }
 
 #[test]
@@ -2019,6 +2127,226 @@ fn rotated_agent_key_binds() {
     h.transfer(&recv, 5);
 }
 
+// ── Admin rotation (two-step handover, SPEC §7.2) ───────────────────
+
+/// `ScVal` encoding of an `Address` as carried in admin-rotation event data.
+fn addr_val(addr: &Address) -> ScVal {
+    ScVal::Address(xdr::ScAddress::from(addr))
+}
+
+#[test]
+fn admin_rotation_two_step_handover_keeps_policy_and_agent() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    h.install_policy(&h.base_policy());
+    h.set_time(1_000);
+    h.transfer(&recv, 5);
+
+    let policy_before = PolicyEngineClient::new(&h.env, &h.guard).policy();
+    let revision_before = h.status().policy_revision;
+    let old_admin = h.admin.clone();
+    let new_admin = Address::generate(&h.env);
+
+    // Step 1: the current admin proposes. Nothing changes yet — the old admin
+    // stays fully authoritative, so a typo'd proposal locks out nothing.
+    // NOTE: the event lookup must come before any other host call
+    // (`stored_admins` included): the test env reports only the most recent
+    // top-level call's events.
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).propose_admin_rotation(&new_admin);
+    let (by, proposed) = h.admin_rotation_event("event_admin_rotation_proposed", "by", "proposed");
+    assert_eq!(by, addr_val(&old_admin));
+    assert_eq!(proposed, addr_val(&new_admin));
+    let (stored, pending) = h.stored_admins();
+    assert_eq!(stored, Some(old_admin.clone()));
+    assert_eq!(pending, Some(new_admin.clone()));
+
+    // Step 2: the pending admin confirms (mocked auth stands in for the new
+    // key's signature). Authority flips atomically; the slot is cleared.
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).confirm_admin_rotation();
+    let (old, new) = h.admin_rotation_event("event_admin_rotated", "old", "new");
+    assert_eq!(old, addr_val(&old_admin));
+    assert_eq!(new, addr_val(&new_admin));
+    let (stored, pending) = h.stored_admins();
+    assert_eq!(stored, Some(new_admin.clone()));
+    assert!(pending.is_none());
+
+    // In-flight policy is untouched: same policy, same revision — and the
+    // registered agent key still spends, proving the handover moved no
+    // fund-moving power.
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(client.policy(), policy_before);
+    assert_eq!(h.status().policy_revision, revision_before);
+    h.transfer(&recv, 5);
+}
+
+#[test]
+fn admin_rotation_old_admin_replay_fails() {
+    let mut h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let new_admin = Address::generate(&h.env);
+
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).propose_admin_rotation(&new_admin);
+    PolicyEngineClient::new(&h.env, &h.guard).confirm_admin_rotation();
+    let (stored, _) = h.stored_admins();
+    assert_eq!(stored, Some(new_admin.clone()));
+
+    // The old admin's authorization no longer satisfies any admin gate: an
+    // enforcing call carrying only the old admin's entry is rejected, for both
+    // freeze and a fresh proposal.
+    let root = h.freeze_invocation();
+    let entry = h.admin_entry(&root);
+    h.enforce(entry);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).freeze();
+    }));
+    assert!(res.is_err(), "old-admin freeze must fail after handover");
+
+    let next_admin = Address::generate(&h.env);
+    let root = h.propose_admin_invocation(&next_admin);
+    let entry = h.admin_entry(&root);
+    h.enforce(entry);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).propose_admin_rotation(&next_admin);
+    }));
+    assert!(res.is_err(), "old-admin proposal must fail after handover");
+
+    // The new admin is authoritative.
+    h.env.mock_all_auths();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    client.freeze();
+    assert!(h.status().admin_frozen);
+    client.unfreeze();
+    assert!(!h.status().admin_frozen);
+}
+
+#[test]
+fn admin_rotation_only_pending_admin_can_confirm() {
+    let mut h = Harness::new();
+    let new_admin = Address::generate(&h.env);
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).propose_admin_rotation(&new_admin);
+
+    // An entry from anyone else (here: the still-current admin) does not
+    // satisfy `require_auth(pending)`.
+    let root = h.confirm_admin_invocation();
+    let entry = h.admin_entry(&root);
+    h.enforce(entry);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).confirm_admin_rotation();
+    }));
+    assert!(res.is_err(), "non-pending confirmer must fail");
+
+    // The proposal survives the failed attempt; the pending admin (mocked)
+    // still completes it.
+    let (stored, pending) = h.stored_admins();
+    assert_eq!(stored, Some(h.admin.clone()));
+    assert_eq!(pending, Some(new_admin.clone()));
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).confirm_admin_rotation();
+    let (stored, pending) = h.stored_admins();
+    assert_eq!(stored, Some(new_admin));
+    assert!(pending.is_none());
+}
+
+#[test]
+fn admin_rotation_rejects_uninitialized_account() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let guard = env.register(PolicyEngine, ());
+    let new_admin = Address::generate(&env);
+    let client = PolicyEngineClient::new(&env, &guard);
+
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.propose_admin_rotation(&new_admin);
+    }));
+    assert!(res.is_err(), "propose before initialize must fail");
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.confirm_admin_rotation();
+    }));
+    assert!(res.is_err(), "confirm before initialize must fail");
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.cancel_admin_rotation();
+    }));
+    assert!(res.is_err(), "cancel before initialize must fail");
+}
+
+#[test]
+fn admin_rotation_confirm_and_cancel_without_pending_fail_closed() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let revision_before = client.status().policy_revision;
+
+    // No proposal exists: both completions fail with `NoPendingAdmin`.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.confirm_admin_rotation();
+    }));
+    assert!(res.is_err(), "confirm with no pending rotation must fail");
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.cancel_admin_rotation();
+    }));
+    assert!(res.is_err(), "cancel with no pending rotation must fail");
+
+    // Fail-closed: admin, pending slot, policy, and revision all unchanged.
+    let (stored, pending) = h.stored_admins();
+    assert_eq!(stored, Some(h.admin.clone()));
+    assert!(pending.is_none());
+    assert!(client.policy().is_some());
+    assert_eq!(client.status().policy_revision, revision_before);
+}
+
+#[test]
+fn admin_rotation_self_proposal_overwrite_and_cancel() {
+    let h = Harness::new();
+    let old_admin = h.admin.clone();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // Proposing the current admin is a no-op handover: rejected, nothing stored.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.propose_admin_rotation(&old_admin);
+    }));
+    assert!(res.is_err(), "self-proposal must be rejected");
+    let (_, pending) = h.stored_admins();
+    assert!(pending.is_none());
+
+    // A second proposal overwrites the first: confirmation hands to the latest.
+    let first = Address::generate(&h.env);
+    let second = Address::generate(&h.env);
+    client.propose_admin_rotation(&first);
+    client.propose_admin_rotation(&second);
+    let (by, proposed) = h.admin_rotation_event("event_admin_rotation_proposed", "by", "proposed");
+    assert_eq!(by, addr_val(&old_admin));
+    assert_eq!(proposed, addr_val(&second));
+    client.confirm_admin_rotation();
+    let (stored, pending) = h.stored_admins();
+    assert_eq!(stored, Some(second.clone()));
+    assert!(pending.is_none());
+
+    // Cancel path: propose, cancel, then confirm has nothing to complete and a
+    // second cancel fails too.
+    let next = Address::generate(&h.env);
+    client.propose_admin_rotation(&next);
+    client.cancel_admin_rotation();
+    let (cancelled_by, cancelled) =
+        h.admin_rotation_event("event_admin_rotation_cancelled", "by", "cancelled");
+    assert_eq!(cancelled_by, addr_val(&second));
+    assert_eq!(cancelled, addr_val(&next));
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.confirm_admin_rotation();
+    }));
+    assert!(res.is_err(), "confirm after cancel must fail");
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.cancel_admin_rotation();
+    }));
+    assert!(res.is_err(), "double cancel must fail");
+    let (stored, pending) = h.stored_admins();
+    assert_eq!(stored, Some(second));
+    assert!(pending.is_none());
+}
+
 #[test]
 fn rotate_agent_key_next_heartbeat_validity_spec_5_7() {
     // Edge: the DMS clock keeps counting from heartbeats *signed by the old
@@ -2419,6 +2747,7 @@ fn error_and_block_reason_round_trip() {
         GuardError::NotInitialized,
         GuardError::InvalidConfig,
         GuardError::InvalidAmount,
+        GuardError::NoPendingAdmin,
         GuardError::AdminFrozen,
         GuardError::HeartbeatExpired,
         GuardError::NoPolicy,

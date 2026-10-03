@@ -121,7 +121,8 @@ TTL on every write; see §9.5).
 | Key | Type | Kind | Notes |
 |---|---|---|---|
 | `Initialized` | `bool` | instance | one-time flag for `initialize` |
-| `Admin` | `Address` | instance | policy admin; set once at `initialize` |
+| `Admin` | `Address` | instance | policy admin; set once at `initialize`, rotated via §7.2 |
+| `PendingAdmin` | `Address` | instance | proposed admin awaiting `confirm_admin_rotation`; absent = no rotation pending |
 | `AgentPubkey` | `BytesN<32>` | instance | the agent's Ed25519 public key |
 | `Policy` | `PolicyConfig` | persistent | current policy (`None` = default-deny) |
 | `Window` | `WindowState` | persistent | rolling spend ledger for asset transfers (global + per-recipient) |
@@ -567,6 +568,19 @@ outcomes `CreateContractNotAllowed` and the `AssetOther` → `function_not_allow
 classified here but are **not** listed in §4 rule 7's inline reason list; §4.1's cost table
 does list gate 6 (`SelfFunctionNotAllowed`) but has no row for contract creation.
 
+### 6.6 Admin-rotation errors live outside the per-context path
+
+`propose_admin_rotation` / `confirm_admin_rotation` / `cancel_admin_rotation`
+(§7.2) are direct admin entrypoints, not authorizations evaluated by `decide`:
+they never produce per-context verdicts and never emit `auth_checked`. Two
+errors belong to them alone. `InvalidConfig` is raised when the current admin
+proposes itself (a no-op handover that would emit a misleading event trail).
+`NoPendingAdmin` is raised when `confirm_admin_rotation` or
+`cancel_admin_rotation` runs with no `PendingAdmin` stored. Neither error is
+reachable via `check()` pre-flight or `__check_auth` (see the §7.1 mapping);
+both fail the transaction frame that raised them, leaving admin, policy, and
+revision unchanged.
+
 ---
 
 ## 7. Public surface — exact signatures and auth placement
@@ -594,6 +608,7 @@ To close the CheckResult/Error duality gap, every contract `Error` variant maps 
 | 3 | `NotInitialized` | `not_initialized` | Yes | Pre-activation guard check. |
 | 4 | `InvalidConfig` | `invalid_config` | No | Admin op: `set_policy` validation error; policies are not passed into `check()`. |
 | 5 | `InvalidAmount` | `invalid_amount` | Yes | Checked directly in `check()` input arguments. |
+| 6 | `NoPendingAdmin` | `no_pending_admin` | No | Admin op: `confirm_admin_rotation` / `cancel_admin_rotation` with no `PendingAdmin` stored; rotation state is never a `check()` parameter. |
 | 10 | `AdminFrozen` | `admin_frozen` | Yes | Account-level gate evaluated in `check()`. |
 | 11 | `HeartbeatExpired` | `heartbeat_expired` | Yes | Account-level dead-man switch gate evaluated in `check()`. |
 | 12 | `NoPolicy` | `no_policy` | Yes | Account-level gate evaluated in `check()`. |
@@ -621,6 +636,17 @@ pub fn revoke_policy(env: Env)
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
     // require_auth(Admin). Re-binds AgentPubkey. Admin never gains fund-moving
     // power; it can only replace the key the account will authenticate.
+pub fn propose_admin_rotation(env: Env, new_admin: Address)
+    // require_auth(Admin). Stores PendingAdmin; the current admin stays
+    // authoritative until confirmation. Self-proposal -> InvalidConfig.
+pub fn confirm_admin_rotation(env: Env)
+    // require_auth(PendingAdmin). Only the proposed admin can confirm: the
+    // confirmation is proof the new key is live (see §7.2). Sets Admin,
+    // clears PendingAdmin; no policy revision bump (policy unchanged).
+    // No pending rotation -> NoPendingAdmin.
+pub fn cancel_admin_rotation(env: Env)
+    // require_auth(Admin). Clears PendingAdmin. No pending rotation ->
+    // NoPendingAdmin.
 
 // ── Dead-man switch (see §5) ──────────────────────────────────────────────
 pub fn heartbeat(env: Env)
@@ -728,6 +754,7 @@ pub struct CheckDetail {
 pub enum Error {            // values stable; see tests/fixtures
     Unauthorized = 1, AlreadyInitialized = 2, NotInitialized = 3,
     InvalidConfig = 4, InvalidAmount = 5,
+    NoPendingAdmin = 6,
     AdminFrozen = 10, HeartbeatExpired = 11, NoPolicy = 12, Paused = 13,
     OutsideActiveWindow = 14,
     AssetNotAllowed = 20, RecipientNotAllowed = 21, PerTxCapExceeded = 22,
@@ -1069,10 +1096,11 @@ are different digests, and the admin path never consults the agent's signature a
 
 ---
 
-## 11. Testnet proof plan (five scenarios)
+## 11. Testnet proof plan (scenarios 1–8: five proven, three planned)
 
-Executed against a real testnet deployment; evidence (contract IDs, tx hashes, event output) is
-recorded in `tests/fixtures/README.md` as required by Phase 1 exit criteria:
+Scenarios 1–5 were executed against a real testnet deployment; evidence
+(contract IDs, tx hashes, event output) is recorded in
+`tests/fixtures/README.md` as required by Phase 1 exit criteria:
 
 1. **Allowed transaction** — policy-respecting asset transfer succeeds.
 2. **Per-tx cap violation** — transfer above `per_tx_cap` is blocked on-chain.
@@ -1082,6 +1110,50 @@ recorded in `tests/fixtures/README.md` as required by Phase 1 exit criteria:
 4. **Allowlist violation** — transfer to a recipient outside the allowlist is blocked.
 5. **Dead-man switch trigger + reversal** — heartbeat stops past `dms_grace_secs`; a subsequent
    spend is blocked with `HeartbeatExpired`; admin `unfreeze` + fresh heartbeat restores it.
+
+Scenarios 6–8 are defined below to the same evidentiary standard (reproduction
+steps, contract ID, tx hash or diagnostic output, event topics) and are
+**pending live execution** (tracked by issue #49; the executing PR records the
+hashes in `tests/fixtures/README.md` + `index.json` and closes #49). Scenario 6
+is the scope of issue #5 (agent-key rotation proof) — #5 is absorbed here, not
+duplicated: the executing PR closes both. Until the hashes land, the fixture
+index stays at scenarios 1–5 (`schema_version: 1`, `SCENARIO_COUNT = 5` in
+`tests/fixtures_index.rs`); the executing PR bumps both to cover 6–8.
+
+6. **Agent-key rotation + old-key rejection** (absorbs issue #5) — admin
+   `rotate_agent_key(new_pubkey)` succeeds on-chain (`agent_rotated` event with
+   the old/new fingerprints); a transfer signed with the **old** key is
+   rejected (host signature-trap error in the enforced simulation — no
+   `auth_checked` topics, since verification fails before policy evaluation);
+   a transfer signed with the **new** key succeeds on-chain
+   (`auth_checked`/`allowed` + ledger + hash). DMS interplay asserted:
+   `status()` before/after shows `last_heartbeat` unchanged (rotation resets
+   nothing) and the new key heartbeats within the existing grace. Precondition:
+   the account must be live (unfrozen, inside DMS grace — `unfreeze` and/or a
+   scenario policy install first, each hash recorded). Postcondition: rotate
+   back to the canonical key and prove it spends again, so the shared fixture
+   deployment ends exactly as it started.
+7. **Protocol allowlist admit + deny** — policy installs a `protocols` rule for
+   a freshly deployed minimal protocol contract (contract ID recorded at run
+   time) allowlisting one function (e.g. `ping`) while another function on the
+   same contract (e.g. `admin_fn`) stays denied:
+   - **7a admit:** agent-signed call to the allowlisted function succeeds
+     on-chain (`auth_checked`/`allowed` + ledger + hash). Requires the
+     `invoke` subcommand in `tools/agent-tx` (the current tool only builds
+     transfer/heartbeat auth entries) — specified in
+     `tools/agent-tx/README.md`, implemented in the executing PR.
+   - **7b deny (wrong fn):** agent-signed call to the non-allowlisted function
+     on the same contract is blocked pre-broadcast (`auth_checked`/`blocked`/
+     `function_not_allowed`, no hash).
+   - **7c deny (unknown contract):** agent-signed call to a contract in
+     neither `assets` nor `protocols` is blocked pre-broadcast
+     (`auth_checked`/`blocked`/`protocol_not_allowed`, no hash). No deployment
+     needed for 7c — any address not in the policy exercises the path.
+8. **Pause gate** — admin installs `paused: true` (hash recorded); an
+   agent-signed transfer is blocked pre-broadcast (`auth_checked`/`blocked`/
+   `paused`, no hash — pause is decision-table gate #4, ahead of all
+   classification); admin restores `paused: false` (hash recorded) and the
+   same transfer succeeds on-chain (`auth_checked`/`allowed` + ledger + hash).
 
 Unit + invariant tests (Soroban test env, real host semantics) cover the decision table, the
 window invariant, auth-context parsing, signature verification, freeze/reversal, and default
