@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/policy.schema.json",
+  "title": "Stellar Agent Guard PolicyConfig",
+  "description": "CLI JSON representation of the Soroban PolicyConfig. Contract validation remains authoritative; update this schema whenever PolicyConfig or its validation rules change.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "per_tx_cap": { "$ref": "#/$defs/nonNegativeI128", "description": "Per-transfer cap; 0 disables it. CLI encodes i128 as a decimal string." },
+    "window_secs": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "Rolling-window duration in seconds (u64)." },
+    "window_cap": { "$ref": "#/$defs/nonNegativeI128", "description": "Rolling spend cap; 0 disables it." },
+    "assets": { "type": "array", "items": { "$ref": "#/$defs/contractAddress" }, "uniqueItems": true },
+    "protocols": { "type": "array", "items": { "$ref": "#/$defs/protocolRule" }, "uniqueItems": true },
+    "recipients": { "$ref": "#/$defs/recipientList" },
+    "recipient_window_caps": {
+      "type": "array", "maxItems": 256,
+      "items": { "$ref": "#/$defs/recipientCap" },
+      "description": "Per-recipient overrides; 0 means fall back to the global window cap."
+    },
+    "blocked_recipients": { "$ref": "#/$defs/recipientList" },
+    "allow_any_recipient": { "type": "boolean" },
+    "active_from": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "active_until": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "0 means unrestricted; otherwise must be greater than active_from (also enforced by the contract)." },
+    "paused": { "type": "boolean" },
+    "dms_grace_secs": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "protocol_calls_per_window": { "type": "integer", "minimum": 0, "maximum": 4294967295, "default": 0 }
+  },
+  "required": ["per_tx_cap", "window_secs", "window_cap", "assets", "protocols", "recipients", "recipient_window_caps", "blocked_recipients", "allow_any_recipient", "active_from", "active_until", "paused", "dms_grace_secs", "protocol_calls_per_window"],
+  "allOf": [
+    {
+      "if": { "properties": { "window_cap": { "pattern": "^[1-9]" } }, "required": ["window_cap"] },
+      "then": { "properties": { "window_secs": { "minimum": 1 } } }
+    },
+    {
+      "if": { "properties": { "recipient_window_caps": { "contains": { "properties": { "cap": { "pattern": "^[1-9]" } }, "required": ["cap"] } } }, "required": ["recipient_window_caps"] },
+      "then": { "properties": { "window_secs": { "minimum": 1 } } }
+    }
+  ],
+  "$comment": "Standard JSON Schema cannot compare active_until numerically with active_from or detect address-list intersections; PolicyConfig validation in src/lib.rs remains the authority for those cross-field rules.",
+  "$defs": {
+    "nonNegativeI128": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,38})$",
+      "maxLength": 39,
+      "description": "Non-negative decimal i128. Contract validation additionally enforces the exact i128 upper bound."
+    },
+    "contractAddress": { "type": "string", "pattern": "^C[A-Z2-7]{55}$", "description": "Stellar contract StrKey." },
+    "accountAddress": { "type": "string", "pattern": "^G[A-Z2-7]{55}$", "description": "Stellar account StrKey." },
+    "recipientList": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/accountAddress" } },
+    "protocolRule": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contract": { "$ref": "#/$defs/contractAddress" },
+        "fns": { "type": ["array", "null"], "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+      },
+      "required": ["contract"]
+    },
+    "recipientCap": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "recipient": { "$ref": "#/$defs/accountAddress" }, "cap": { "$ref": "#/$defs/nonNegativeI128" } },
+      "required": ["recipient", "cap"]
+    }
+  }
+}

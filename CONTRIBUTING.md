@@ -80,6 +80,10 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
 
 ## Commit Discipline (strict)
 
+`PolicyConfig` changes must update `policy.schema.json` and its conformance test in the same
+PR. The Rust contract remains authoritative; the schema is the tooling/editor fast-feedback
+layer and must not silently diverge.
+
 1. **One commit per logical unit.** A bug fix, a feature, a doc change, a test
    change — each is its own commit. Do **not** batch unrelated fixes into one
    commit "because they're small" — `git log` must be able to distinguish one
