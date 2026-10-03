@@ -16,6 +16,9 @@ cd stellar-agent-guard-contracts
 # Run tests (31 unit + integration tests, no network needed)
 cargo test
 
+# Audit numeric, hash, transaction, and contract-ID claims before README PRs
+scripts/verify-readme.sh
+
 # Lint (clippy all + pedantic are denied via [lints.clippy])
 cargo clippy --all-targets --all-features
 
