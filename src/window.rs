@@ -431,6 +431,199 @@ mod tests {
     }
     use soroban_sdk::{vec, Address, Env};
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ReferenceEntry {
+        ts: u64,
+        amount: i128,
+    }
+
+    #[derive(Default)]
+    struct ReferenceWindow {
+        total: i128,
+        entries: std::vec::Vec<ReferenceEntry>,
+        merges: usize,
+        coalesces: usize,
+    }
+
+    impl ReferenceWindow {
+        fn prune(&mut self, now: u64, window_secs: u64) {
+            while self
+                .entries
+                .first()
+                .is_some_and(|entry| entry.ts.saturating_add(window_secs) <= now)
+            {
+                let expired = self.entries.remove(0);
+                self.total = self.total.saturating_sub(expired.amount);
+            }
+        }
+
+        fn admit(&mut self, now: u64, amount: i128) {
+            if let Some(last) = self.entries.last_mut() {
+                if last.ts == now {
+                    last.amount = last.amount.saturating_add(amount);
+                    self.total = self.total.saturating_add(amount);
+                    self.coalesces += 1;
+                    return;
+                }
+            }
+
+            self.entries.push(ReferenceEntry { ts: now, amount });
+            self.total = self.total.saturating_add(amount);
+            if self.entries.len() > MAX_WINDOW_ENTRIES {
+                let older = self.entries.remove(0);
+                let newer = self.entries.remove(0);
+                self.entries.insert(
+                    0,
+                    ReferenceEntry {
+                        ts: newer.ts,
+                        amount: older.amount.saturating_add(newer.amount),
+                    },
+                );
+                self.merges += 1;
+            }
+        }
+    }
+
+    /// Small fixed-seed generator keeps failures exactly reproducible without
+    /// an external property-testing dependency or an unbounded test runner.
+    struct DeterministicRng(u64);
+
+    impl DeterministicRng {
+        fn next(&mut self) -> u64 {
+            let mut value = self.0;
+            value ^= value << 13;
+            value ^= value >> 7;
+            value ^= value << 17;
+            self.0 = value;
+            value
+        }
+    }
+
+    fn assert_matches_reference(
+        ledger: &Ledger,
+        reference: &ReferenceWindow,
+        now: u64,
+        window_secs: u64,
+        seed: u64,
+        operation: usize,
+        compare_entries: bool,
+    ) {
+        assert_eq!(
+            ledger.total, reference.total,
+            "SPEC §3.1 total mismatch: seed={seed:#x}, operation={operation}, now={now}, window_secs={window_secs}"
+        );
+        assert_eq!(
+            usize::try_from(ledger.entries.len()).unwrap(),
+            reference.entries.len(),
+            "SPEC §3.1 entry count mismatch: seed={seed:#x}, operation={operation}"
+        );
+
+        if compare_entries {
+            let reference_sum = reference
+                .entries
+                .iter()
+                .fold(0i128, |sum, entry| sum.saturating_add(entry.amount));
+            assert_eq!(reference.total, reference_sum);
+
+            for (index, expected) in reference.entries.iter().enumerate() {
+                let actual = ledger
+                    .entries
+                    .get(u32::try_from(index).unwrap())
+                    .unwrap();
+                assert_eq!(
+                    (actual.ts, actual.amount),
+                    (expected.ts, expected.amount),
+                    "SPEC §3.1 entry mismatch: seed={seed:#x}, operation={operation}, index={index}"
+                );
+                assert!(
+                    actual.ts.saturating_add(window_secs) > now,
+                    "expired entry retained: seed={seed:#x}, operation={operation}, index={index}"
+                );
+            }
+        }
+    }
+
+    fn run_reference_trace(
+        env: &Env,
+        seed: u64,
+        operations: usize,
+        window_secs: u64,
+        merge_stress: bool,
+    ) {
+        let mut rng = DeterministicRng(seed);
+        let mut ledger = Ledger::empty(env);
+        let mut reference = ReferenceWindow::default();
+        let mut now = 0u64;
+
+        for operation in 0..operations {
+            let delta = if !merge_stress && operation == 1 {
+                0
+            } else if merge_stress {
+                rng.next() % 3 + 1
+            } else {
+                rng.next() % 4
+            };
+            now = now.saturating_add(delta);
+
+            // A guard evaluation prunes before the transfer is admitted or
+            // rejected. Rejections must not stage or commit a spend.
+            ledger.prune(now, window_secs);
+            reference.prune(now, window_secs);
+            let merges_before = reference.merges;
+            let rejected = if !merge_stress && operation == 2 {
+                true
+            } else if merge_stress {
+                rng.next() % 128 == 0
+            } else {
+                rng.next() % 4 == 0
+            };
+            let before_rejection = rejected.then(|| ledger.clone());
+            if !rejected {
+                let amount = i128::from(rng.next() % 50 + 1);
+                ledger.admit(now, amount);
+                reference.admit(now, amount);
+            }
+            if let Some(before) = before_rejection {
+                assert_eq!(ledger, before, "rejected op changed pruned ledger state");
+            }
+
+            let compare_entries = !merge_stress
+                || operation < 16
+                || operation % 256 == 0
+                || reference.merges > merges_before;
+            assert_matches_reference(
+                &ledger,
+                &reference,
+                now,
+                window_secs,
+                seed,
+                operation,
+                compare_entries,
+            );
+        }
+
+        if merge_stress {
+            assert!(
+                reference.merges > 0,
+                "stress trace did not reach merge-forward: seed={seed:#x}"
+            );
+            assert_matches_reference(
+                &ledger,
+                &reference,
+                now,
+                window_secs,
+                seed,
+                operations,
+                true,
+            );
+        } else {
+            assert!(
+                reference.coalesces > 0,
+                "random trace did not exercise same-second coalescing: seed={seed:#x}"
+            );
+        }
+    }
+
     fn led(env: &Env, entries: &[(u64, i128)]) -> SingleLedger {
         let mut v: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(env);
         for (ts, amount) in entries {
@@ -722,5 +915,25 @@ mod tests {
 
         assert_eq!(restored.protocol_call_total, 3);
         assert_eq!(restored.protocol_call_entries.len(), 2);
+    }
+
+    /// Property-style regression for the rolling-window invariant in SPEC §3.1.
+    /// The deterministic CI workload is bounded to 10,348 operations: four
+    /// 512-operation random traces plus one 8,300-operation trace that crosses
+    /// MAX_WINDOW_ENTRIES. Failures print the seed and operation for replay.
+    #[test]
+    fn spec_3_1_window_total_matches_independent_reference_model() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        for (seed, window_secs) in [
+            (0x5eed_0001, 1),
+            (0x5eed_0002, 37),
+            (0x5eed_0003, 86_400),
+            (0x5eed_0004, 113),
+        ] {
+            run_reference_trace(&env, seed, 512, window_secs, false);
+        }
+
+        run_reference_trace(&env, 0x5eed_cafe, 8_300, 1_000_000, true);
     }
 }
