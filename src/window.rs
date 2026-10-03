@@ -53,9 +53,13 @@ impl RecipientLedger {
     }
 }
 
+/// In-memory rolling spend window (SPEC §3.1): the global ledger plus
+/// per-recipient and protocol-call counters, loaded from and saved to `Window`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ledger {
+    /// Cached rolling total (sum of non-expired global entries).
     pub total: i128,
+    /// Chronological global spend entries (oldest first).
     pub entries: soroban_sdk::Vec<SpendEntry>,
     /// Per-recipient rolling windows, populated only for recipients that have a
     /// configured per-recipient cap override. Storage is bounded by the same
@@ -70,6 +74,7 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    /// An empty window with no entries.
     #[allow(clippy::must_use_candidate)]
     pub fn empty(env: &Env) -> Self {
         Self {
@@ -132,6 +137,7 @@ impl Ledger {
         }
     }
 
+    /// Number of global spend entries.
     #[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
     pub fn len(&self) -> u32 {
         self.entries.len()

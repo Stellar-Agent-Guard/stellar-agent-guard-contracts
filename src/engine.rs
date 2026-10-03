@@ -7,11 +7,15 @@ use crate::window::Ledger;
 use soroban_sdk::auth::{Context, ContractContext};
 use soroban_sdk::{Address, Env, Symbol, TryFromVal, Vec};
 
+/// Account-level state the account gates (SPEC §4 rows 1–2) are evaluated against.
 pub struct AccountState {
+    /// Admin-initiated freeze flag (`AdminFrozen`).
     pub admin_frozen: bool,
+    /// Unix seconds of the last agent heartbeat; `0` = never.
     pub last_heartbeat: u64,
 }
 
+/// Verdict for one authorization context.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     /// Context admitted.
@@ -97,6 +101,7 @@ pub fn dms_health(
 
 // ── Small contains helpers (soroban Vec has no `contains`) ───────────────
 
+/// Whether `a` is in `list` (soroban `Vec` has no `contains`).
 #[allow(clippy::must_use_candidate)]
 pub fn contains_addr(list: &Vec<Address>, a: &Address) -> bool {
     for i in 0..list.len() {
@@ -145,6 +150,7 @@ fn effective_window_cap(cfg: &PolicyConfig, recipient: &Address) -> Option<i128>
 
 // ── Context parsing (SPEC §6) ────────────────────────────────────────────
 
+/// Classifies one auth context into a [`ParsedCall`] (SPEC §6); test-only entry point.
 #[cfg(feature = "testutils")]
 #[allow(clippy::must_use_candidate)]
 pub fn parse_call(env: &Env, self_addr: &Address, ctx: &Context, cfg: &PolicyConfig) -> ParsedCall {
@@ -241,6 +247,9 @@ fn parse_call_inner(
 
 // ── Decision ─────────────────────────────────────────────────────────────
 
+/// Evaluates the SPEC §4 decision table over every auth context, returning one
+/// [`Decision`] per context. Window admissions are staged and committed to
+/// `ledger` only when every context is allowed.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)] // by-value host Vec avoids slice/coercion limits
 pub fn decide(
     env: &Env,
