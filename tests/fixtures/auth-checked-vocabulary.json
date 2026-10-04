@@ -148,6 +148,30 @@
       "spec_ref": "§6.2; §7.1"
     },
     {
+      "code": 6,
+      "error_variant": "NoPendingAdmin",
+      "symbol": "no_pending_admin",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "no_pending_admin"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§7.2"
+    },
+    {
       "code": 10,
       "error_variant": "AdminFrozen",
       "symbol": "admin_frozen",
@@ -515,6 +539,30 @@
         "event_auth_checked",
         "blocked",
         "protocol_call_rate_exceeded"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.3"
+    },
+    {
+      "code": 31,
+      "error_variant": "DecisionInvariantViolation",
+      "symbol": "decision_invariant_violation",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "decision_invariant_violation"
       ],
       "data": {
         "type": "Map",

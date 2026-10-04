@@ -82,6 +82,8 @@ non-custodial, no proxy wrappers, tested end-to-end on testnet.
 
 > ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do
 > not deploy to mainnet without an independent audit. See [SECURITY.md](SECURITY.md).
+>
+> For future contract versions, review the policy on [Enforcement-Equivalent Upgrades](#enforcement-equivalent-upgrade-policy).
 
 ## Enforcement scope — read this before relying on the caps
 
@@ -207,8 +209,25 @@ power — it can only replace the key the account will authenticate. Verified li
 (simulation): emits `EventAgentRotated`.
 
 Full operational runbook — scheduled rotation, suspected-leak ordering
-(freeze → rotate → unfreeze), rollback, and the admin-key immutability
-statement: [`docs/key-rotation.md`](docs/key-rotation.md).
+(freeze → rotate → unfreeze), rollback, and the admin-key handover
+ceremony: [`docs/key-rotation.md`](docs/key-rotation.md).
+
+### `propose_admin_rotation` / `confirm_admin_rotation` / `cancel_admin_rotation`
+```rust
+pub fn propose_admin_rotation(env: Env, new_admin: Address)  // require_auth(Admin)
+pub fn confirm_admin_rotation(env: Env)                       // require_auth(pending admin)
+pub fn cancel_admin_rotation(env: Env)                        // require_auth(Admin)
+```
+Two-step admin handover (SPEC §7.2). The current admin proposes; only the
+*proposed* admin can confirm — the confirmation proves the new key is live, so
+a typo'd proposal can never lock out policy management (it just sits pending
+until cancelled or overwritten). The old admin loses all authority in the same
+write that installs the new one; policy, window, heartbeat, freeze state, and
+`PolicyRevision` are untouched. Proposing the current admin fails with
+`InvalidConfig`; confirming/cancelling with nothing pending fails with
+`NoPendingAdmin`. Emits `EventAdminRotationProposed` (`by`, `proposed`),
+`EventAdminRotated` (`old`, `new`), and `EventAdminRotationCancelled` (`by`,
+`cancelled`) respectively.
 
 ### `heartbeat`
 ```rust
@@ -593,7 +612,8 @@ On-chain state, keyed per the `DataKey` enum in `src/types.rs` (SPEC §3):
 | Key | Type | Kind | Purpose |
 |---|---|---|---|
 | `Initialized` | `bool` | instance | one-time flag for `initialize` |
-| `Admin` | `Address` | instance | policy admin; set once at `initialize` |
+| `Admin` | `Address` | instance | policy admin; set at `initialize`, rotated via propose/confirm |
+| `PendingAdmin` | `Address` | instance | proposed admin awaiting confirmation (absent = none pending) |
 | `AgentPubkey` | `BytesN<32>` | instance | the registered agent's Ed25519 public key |
 | `Policy` | `PolicyConfig` | persistent | current policy (`None` = default-deny) |
 | `Window` | `WindowState` | persistent | rolling spend ledger (`total` + chronological `entries`) |

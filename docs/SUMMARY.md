@@ -12,6 +12,7 @@
   * [set\_policy](functions/set-policy.md)
   * [heartbeat](functions/heartbeat.md)
   * [freeze / unfreeze](functions/freeze-unfreeze.md)
+  * [admin rotation](functions/admin-rotation.md)
   * [check\_auth](functions/check-auth.md)
 * [Policy Templates](policy-templates.md)
 * [Key Rotation](key-rotation.md)

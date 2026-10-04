@@ -329,6 +329,7 @@ impl Error {
             Self::NotInitialized,
             Self::InvalidConfig,
             Self::InvalidAmount,
+            Self::NoPendingAdmin,
             Self::AdminFrozen,
             Self::HeartbeatExpired,
             Self::NoPolicy,
@@ -345,6 +346,7 @@ impl Error {
             Self::SelfFunctionNotAllowed,
             Self::CreateContractNotAllowed,
             Self::ProtocolCallRateExceeded,
+            Self::DecisionInvariantViolation,
         ];
         all_errors
             .into_iter()
@@ -374,8 +376,12 @@ pub struct CheckDetail {
 pub enum DataKey {
     /// Instance: one-time flag for `initialize`.
     Initialized,
-    /// Instance: policy admin; set once at `initialize`.
+    /// Instance: policy admin; set at `initialize`, rotated via the
+    /// two-step `propose_admin_rotation` / `confirm_admin_rotation` (§7.2).
     Admin,
+    /// Instance: proposed admin awaiting confirmation by
+    /// `confirm_admin_rotation`; absent means no rotation is pending.
+    PendingAdmin,
     /// Instance: the registered agent's Ed25519 public key (32 bytes).
     AgentPubkey,
     /// Persistent: current policy (`None` = default-deny).
@@ -400,13 +406,16 @@ pub enum Error {
     NotInitialized = 3,
     InvalidConfig = 4,
     InvalidAmount = 5,
+    /// No admin rotation is pending (`confirm_admin_rotation` /
+    /// `cancel_admin_rotation` with no `PendingAdmin` stored).
+    NoPendingAdmin = 6,
     // Account-level gates (10..=19)
     AdminFrozen = 10,
     HeartbeatExpired = 11,
     NoPolicy = 12,
     Paused = 13,
     OutsideActiveWindow = 14,
-    // Per-call decisions (20..=29)
+    // Per-call decisions (20..=30)
     AssetNotAllowed = 20,
     RecipientNotAllowed = 21,
     PerTxCapExceeded = 22,
@@ -418,6 +427,8 @@ pub enum Error {
     CreateContractNotAllowed = 28,
     RecipientBlocked = 29,
     ProtocolCallRateExceeded = 30,
+    // Internal enforcement invariant (31)
+    DecisionInvariantViolation = 31,
 }
 
 impl Error {
@@ -430,6 +441,7 @@ impl Error {
             Self::NotInitialized => "not_initialized",
             Self::InvalidConfig => "invalid_config",
             Self::InvalidAmount => "invalid_amount",
+            Self::NoPendingAdmin => "no_pending_admin",
             Self::AdminFrozen => "admin_frozen",
             Self::HeartbeatExpired => "heartbeat_expired",
             Self::NoPolicy => "no_policy",
@@ -446,6 +458,7 @@ impl Error {
             Self::SelfFunctionNotAllowed => "self_function_not_allowed",
             Self::CreateContractNotAllowed => "create_contract_not_allowed",
             Self::ProtocolCallRateExceeded => "protocol_call_rate_exceeded",
+            Self::DecisionInvariantViolation => "decision_invariant_violation",
         }
     }
 }
