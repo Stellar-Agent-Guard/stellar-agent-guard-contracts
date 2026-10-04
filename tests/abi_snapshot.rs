@@ -205,6 +205,7 @@ fn error_by_name(name: &str) -> Option<Error> {
         "NotInitialized" => Error::NotInitialized,
         "InvalidConfig" => Error::InvalidConfig,
         "InvalidAmount" => Error::InvalidAmount,
+        "NoPendingAdmin" => Error::NoPendingAdmin,
         "AdminFrozen" => Error::AdminFrozen,
         "HeartbeatExpired" => Error::HeartbeatExpired,
         "NoPolicy" => Error::NoPolicy,
