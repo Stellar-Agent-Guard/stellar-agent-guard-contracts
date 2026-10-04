@@ -40,9 +40,9 @@ fn addr(env: &Env, strkey: &str) -> Address {
 /// per-protocol function allowlist, so the encoder's nested shapes are covered.
 fn full_policy(env: &Env) -> PolicyConfig {
     PolicyConfig {
-        per_tx_cap: 1000,
+        per_tx_cap: 100,
         window_secs: 60,
-        window_cap: 150,
+        window_cap: 1000,
         assets: vec![env, addr(env, ASSET_STRKEY)],
         protocols: vec![
             env,
@@ -234,7 +234,7 @@ fn mutated_policies(env: &Env) -> std::vec::Vec<(&'static str, PolicyConfig)> {
     let mut cases: std::vec::Vec<(&'static str, PolicyConfig)> = std::vec::Vec::new();
 
     let mut c = base.clone();
-    c.per_tx_cap = 2000;
+    c.per_tx_cap = 500;
     cases.push(("per_tx_cap", c));
 
     let mut c = base.clone();
@@ -242,7 +242,7 @@ fn mutated_policies(env: &Env) -> std::vec::Vec<(&'static str, PolicyConfig)> {
     cases.push(("window_secs", c));
 
     let mut c = base.clone();
-    c.window_cap = 300;
+    c.window_cap = 2000;
     cases.push(("window_cap", c));
 
     let mut c = base.clone();
