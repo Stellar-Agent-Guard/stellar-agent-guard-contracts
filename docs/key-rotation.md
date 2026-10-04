@@ -13,20 +13,24 @@ rehearsing the ceremony on testnet.
 | Key | Stored in | Rotation mechanism | Status |
 |---|---|---|---|
 | Agent key (`AgentPubkey`, `BytesN<32>`) | instance storage, set at `initialize` | `rotate_agent_key(new_pubkey)` — admin-only | ✅ Available today |
-| Admin (`Admin`, `Address`) | instance storage, set at `initialize` | none | ❌ No rotation today — the admin is immutable |
+| Admin (`Admin`, `Address`) | instance storage, set at `initialize` | two-step handover: `propose_admin_rotation` (current admin) → `confirm_admin_rotation` (pending admin); `cancel_admin_rotation` aborts | ✅ Available — see [Admin rotation ceremony](#admin-rotation-ceremony-two-step-handover) |
 
-The admin address is written **once** by `initialize` (`src/lib.rs`) and no
-public function changes it. There is deliberately no `rotate_admin` in v1:
-until one lands, treat the admin identity as permanent. If the admin key is
-lost or suspected compromised, the recovery path is to deploy a fresh guard,
-`initialize` it with a new admin, `set_policy` to mirror the old policy, and
-move operations over — there is no in-place admin handover. (If a
-`rotate_admin` issue lands in the tracker, this paragraph must be updated to
-link it.)
+The admin address is written by `initialize` (`src/lib.rs`) and changed only
+by the two-step handover below (SPEC §7.2,
+[function reference](functions/admin-rotation.md)). The ceremony is
+deliberately two transactions: the confirmation must be signed by the
+**incoming** admin, which proves the new key is live and makes a typo'd
+proposal un-harmful (it can never confirm, and the current admin can overwrite
+or cancel it). Until `confirm_admin_rotation` lands, the current admin stays
+fully authoritative.
 
 Losing the admin key does **not** put funds at risk: the admin holds no
 fund-moving authority (SPEC §1, `SECURITY.md`). It means losing the ability
-to change policy, freeze/unfreeze, or rotate the agent key.
+to change policy, freeze/unfreeze, or rotate the agent key. If the admin key
+is lost (not merely compromised), no handover is possible — there is nobody to
+sign the proposal — and the recovery path is still to deploy a fresh guard,
+`initialize` it with a new admin, `set_policy` to mirror the old policy, and
+move operations over.
 
 ## When to rotate the agent key
 
@@ -231,17 +235,94 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 secret is `BLOCKED`. If the new key misbehaves, the rollback (above) still
 applies — re-freeze first if the old key is still considered hostile.
 
+## Admin rotation ceremony (two-step handover)
+
+Prerequisites: the guard contract ID, the current admin identity
+(`guard_admin` below), and the **new** admin address (`GNEW...` below) whose
+secret you control — the confirmation must be signed by the incoming admin, so
+rehearse with access to both identities.
+
+### 1. Propose (current admin transaction)
+
+```bash
+stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+  --network testnet --source-account guard_admin --send=yes -- \
+  propose_admin_rotation --new_admin GNEW...
+# → Event: EventAdminRotationProposed (event_admin_rotation_proposed),
+#    by: "<current admin>", proposed: "<new admin>"
+```
+
+**Verify:** the event's `proposed` is exactly the address you intend. Nothing
+else changed — the current admin is still authoritative, the policy and its
+revision are untouched, and the agent key still spends. If the address is
+wrong, stop here: overwrite with a corrected proposal or `cancel_admin_rotation`
+— no harm done, no second key involved yet.
+
+### 2. Confirm (incoming admin transaction)
+
+```bash
+stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+  --network testnet --source-account guard_admin_new --send=yes -- \
+  confirm_admin_rotation
+# → Event: EventAdminRotated (event_admin_rotated),
+#    old: "<outgoing admin>", new: "<incoming admin>"
+```
+
+**Verify — three reads, in order:**
+
+```bash
+# 1. The handover completed: policy revision unchanged (rotation moves the
+#    manager, not the policy).
+stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+  --network testnet --source-account guard_admin_new --send=no -- status
+# → expect {"has_policy":true,"policy_revision":<same as before>,...}
+
+# 2. The new admin is authoritative (freeze + unfreeze round-trip).
+stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+  --network testnet --source-account guard_admin_new --send=yes -- freeze
+stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+  --network testnet --source-account guard_admin_new --send=yes -- unfreeze
+
+# 3. The old admin is dead: any admin call signed by it is now rejected.
+```
+
+Only now is it safe to retire the old admin secret. There is no rollback
+distinct from rotation itself — handing back is another propose → confirm in
+reverse.
+
+### Incident variant: suspected admin-key compromise
+
+Ordering: **rotate first, then audit policy.** Unlike the agent-key leak, there
+is no freeze-first shortcut that helps beyond the normal one: the compromised
+key *is* an admin, so it can unfreeze itself. `freeze` still buys a window
+(the attacker must issue an `unfreeze` to act, which is itself an auditable
+event), but treat the policy as hostile until re-attested:
+
+1. `freeze` from a still-honest admin path if one exists (delays, does not stop).
+2. Complete the handover to a fresh admin (propose → confirm).
+3. From the new admin: re-`set_policy` to a known-good config (this resets the
+   window and restarts the DMS clock — review both), `unfreeze` if frozen, and
+   `rotate_agent_key` if the agent key may also be exposed.
+4. Reconcile the event log (`admin_rotation_proposed` → `admin_rotated`,
+   any `policy_set` by the old key) before resuming operations.
+
 ## Storage keys touched
 
 | Function | Key | Kind | Action |
 |---|---|---|---|
 | `rotate_agent_key` | `AgentPubkey` | instance (`BytesN<32>`) | overwritten with the new key |
+| `propose_admin_rotation` | `PendingAdmin` | instance (`Address`) | set to the proposed admin (overwrites) |
+| `confirm_admin_rotation` | `Admin` | instance (`Address`) | set to the pending admin |
+| `confirm_admin_rotation` | `PendingAdmin` | instance (`Address`) | removed |
+| `cancel_admin_rotation` | `PendingAdmin` | instance (`Address`) | removed |
 | `freeze` (incident only) | `AdminFrozen` | persistent (`bool`) | set to `true` |
 | `unfreeze` (incident only) | `AdminFrozen` | persistent (`bool`) | set to `false` |
 | `unfreeze` (incident only) | `LastHeartbeat` | persistent (`u64`) | set to `now` (full grace restart) |
 
 ## See also
 
+- [admin rotation](functions/admin-rotation.md) — the propose/confirm/cancel
+  function reference with typo-recovery steps
 - [freeze / unfreeze](functions/freeze-unfreeze.md) — the kill switch and
   reversal used by the incident variant
 - [heartbeat](functions/heartbeat.md) — proving the new key through the
