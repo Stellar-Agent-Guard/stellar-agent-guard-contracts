@@ -77,6 +77,9 @@ For other calls, the arguments are not interpretable — see [Enforcement Scope]
 | `UnknownContract` | 26 | Contract not in assets or protocols |
 | `SelfFunctionNotAllowed` | 27 | Self-call to non-heartbeat function |
 | `CreateContractNotAllowed` | 28 | Contract creation denied in v1 |
+| `RecipientBlocked` | 29 | Transfer to an explicitly blocked recipient |
+| `ProtocolCallRateExceeded` | 30 | Protocol call rate limit exceeded |
+| `DecisionInvariantViolation` | 31 | Internal enforcement verdict invariant failed |
 
 ## How agent-tx drives `__check_auth`
 

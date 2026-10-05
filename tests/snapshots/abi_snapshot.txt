@@ -34,11 +34,15 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 pub fn set_policy(env: Env, config: PolicyConfig)
 pub fn revoke_policy(env: Env)
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
+pub fn propose_admin_rotation(env: Env, new_admin: Address)
+pub fn confirm_admin_rotation(env: Env)
+pub fn cancel_admin_rotation(env: Env)
 pub fn heartbeat(env: Env)
 pub fn freeze(env: Env)
 pub fn unfreeze(env: Env)
 pub fn policy(env: Env) -> Option<PolicyConfig>
 pub fn policy_hash(env: Env) -> BytesN<32>
+pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
 pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus
 pub fn status(env: Env) -> Status
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
@@ -50,6 +54,25 @@ enum DmsHealthStatus
   Ok
   Warn
   Expired
+enum PolicyRuleId
+  AmountSign
+  WindowRequiresWidth
+  ActiveWindowOrder
+  SelfAddressInList
+  DuplicateAddressInList
+  DuplicateRecipientCap
+  RecipientListTooLong
+  RecipientCapSign
+  RecipientAllowAndBlocked
+  ProtocolContractDuplicate
+  ProtocolFnListInvalid
+  DurationExceedsBound
+  AssetListTooLong
+  ProtocolListTooLong
+  PerTxCapExceedsWindowCap
+enum ValidationOutcome
+  Valid
+  Invalid(PolicyRuleId)
 struct WindowState
   total: i128
   entries: Vec<SpendEntry>
@@ -108,6 +131,7 @@ struct CheckDetail
 enum DataKey
   Initialized
   Admin
+  PendingAdmin
   AgentPubkey
   Policy
   Window
@@ -125,6 +149,7 @@ struct RecipientLedger
 3 NotInitialized not_initialized
 4 InvalidConfig invalid_config
 5 InvalidAmount invalid_amount
+6 NoPendingAdmin no_pending_admin
 10 AdminFrozen admin_frozen
 11 HeartbeatExpired heartbeat_expired
 12 NoPolicy no_policy
@@ -141,3 +166,4 @@ struct RecipientLedger
 28 CreateContractNotAllowed create_contract_not_allowed
 29 RecipientBlocked recipient_blocked
 30 ProtocolCallRateExceeded protocol_call_rate_exceeded
+31 DecisionInvariantViolation decision_invariant_violation

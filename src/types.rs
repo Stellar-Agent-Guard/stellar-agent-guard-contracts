@@ -19,10 +19,81 @@ pub enum DmsHealthStatus {
 /// oldest entries forward (conservative over-count) — see SPEC §3.1.
 pub const MAX_WINDOW_ENTRIES: usize = 8192;
 
-/// Hard bound on the number of entries in `recipients` and
-/// `recipient_window_caps`. Keeps allowlist scans and per-recipient storage
-/// bounded and predictable (SPEC §3 / §8).
+/// Maximum number of asset contracts in a policy (SPEC §8).
+pub const MAX_POLICY_ASSETS: usize = 256;
+
+/// Maximum number of protocol contracts in a policy (SPEC §8).
+pub const MAX_POLICY_PROTOCOLS: usize = 256;
+
+/// Hard bound on the number of entries in `recipients`, `blocked_recipients`,
+/// and `recipient_window_caps`. Keeps allowlist scans and per-recipient
+/// storage bounded and predictable (SPEC §3 / §8).
 pub const MAX_RECIPIENT_ENTRIES: usize = 256;
+
+/// Upper bound on `window_secs` and `dms_grace_secs` (issue #34). `3_650` days
+/// ≈ 10 years: far beyond any legitimate rolling spend window or dead-man
+/// grace, while still catching the classic seconds/milliseconds confusion
+/// (e.g. a 90-day window passed as `7_776_000_000` ms) and "effectively
+/// disables pruning forever" configs such as `u64::MAX`.
+pub const MAX_WINDOW_SECS: u64 = 315_360_000; // 86_400 × 3_650
+/// Same upper bound as `MAX_WINDOW_SECS`, applied to the DMS grace.
+pub const MAX_DMS_GRACE_SECS: u64 = MAX_WINDOW_SECS;
+
+/// Which SPEC §8 validation rule rejected a policy (issue #35). `validate_policy`
+/// reports the **first** failing rule. Variants added after the original set
+/// preserve their established contract-type ordinals.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyRuleId {
+    /// `per_tx_cap` or `window_cap` is negative.
+    AmountSign,
+    /// `window_cap != 0` (or a per-recipient cap `> 0`) requires
+    /// `window_secs != 0`.
+    WindowRequiresWidth,
+    /// `active_until != 0 && active_until <= active_from`.
+    ActiveWindowOrder,
+    /// The contract's own address appears in `assets`, `protocols`,
+    /// `recipients`, `blocked_recipients`, or a `recipient_window_caps` entry.
+    SelfAddressInList,
+    /// A duplicate address within `assets`, `recipients`,
+    /// `blocked_recipients`, or a duplicate fn name within one protocol rule.
+    DuplicateAddressInList,
+    /// The same recipient appears twice in `recipient_window_caps`.
+    DuplicateRecipientCap,
+    /// `recipients`, `recipient_window_caps`, or `blocked_recipients`
+    /// exceeds `MAX_RECIPIENT_ENTRIES`.
+    RecipientListTooLong,
+    /// A per-recipient cap is negative.
+    RecipientCapSign,
+    /// A recipient is listed in both `recipients` and `blocked_recipients`.
+    RecipientAllowAndBlocked,
+    /// The same contract appears in two protocol rules.
+    ProtocolContractDuplicate,
+    /// A protocol rule's fn list is empty or contains duplicates.
+    ProtocolFnListInvalid,
+    /// `window_secs` or `dms_grace_secs` exceeds `MAX_WINDOW_SECS`
+    /// (`315_360_000` s ≈ 10 years; issue #34). Evaluated after the other
+    /// rules so the previously documented variant ordinals stay wire-stable.
+    DurationExceedsBound,
+    /// `assets` exceeds `MAX_POLICY_ASSETS`.
+    AssetListTooLong,
+    /// `protocols` exceeds `MAX_POLICY_PROTOCOLS`.
+    ProtocolListTooLong,
+    /// `per_tx_cap > window_cap` when both are enabled (both > 0; issue #33).
+    PerTxCapExceedsWindowCap,
+}
+
+/// Result of the `validate_policy` read (issue #35): whether a candidate
+/// policy would pass `set_policy` and, if not, which §8 rule fails first.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValidationOutcome {
+    /// Every §8 rule passes; `set_policy` would accept this policy.
+    Valid,
+    /// The policy would be rejected; the payload names the first failing
+    /// §8 rule (rules are evaluated in §8 order).
+    Invalid(PolicyRuleId),
+}
 
 /// Per-policy rolling spend ledger for SAC asset transfers and protocol call counts.
 #[contracttype]
@@ -258,6 +329,7 @@ impl Error {
             Self::NotInitialized,
             Self::InvalidConfig,
             Self::InvalidAmount,
+            Self::NoPendingAdmin,
             Self::AdminFrozen,
             Self::HeartbeatExpired,
             Self::NoPolicy,
@@ -274,6 +346,7 @@ impl Error {
             Self::SelfFunctionNotAllowed,
             Self::CreateContractNotAllowed,
             Self::ProtocolCallRateExceeded,
+            Self::DecisionInvariantViolation,
         ];
         all_errors
             .into_iter()
@@ -303,8 +376,12 @@ pub struct CheckDetail {
 pub enum DataKey {
     /// Instance: one-time flag for `initialize`.
     Initialized,
-    /// Instance: policy admin; set once at `initialize`.
+    /// Instance: policy admin; set at `initialize`, rotated via the
+    /// two-step `propose_admin_rotation` / `confirm_admin_rotation` (§7.2).
     Admin,
+    /// Instance: proposed admin awaiting confirmation by
+    /// `confirm_admin_rotation`; absent means no rotation is pending.
+    PendingAdmin,
     /// Instance: the registered agent's Ed25519 public key (32 bytes).
     AgentPubkey,
     /// Persistent: current policy (`None` = default-deny).
@@ -329,13 +406,16 @@ pub enum Error {
     NotInitialized = 3,
     InvalidConfig = 4,
     InvalidAmount = 5,
+    /// No admin rotation is pending (`confirm_admin_rotation` /
+    /// `cancel_admin_rotation` with no `PendingAdmin` stored).
+    NoPendingAdmin = 6,
     // Account-level gates (10..=19)
     AdminFrozen = 10,
     HeartbeatExpired = 11,
     NoPolicy = 12,
     Paused = 13,
     OutsideActiveWindow = 14,
-    // Per-call decisions (20..=29)
+    // Per-call decisions (20..=30)
     AssetNotAllowed = 20,
     RecipientNotAllowed = 21,
     PerTxCapExceeded = 22,
@@ -347,6 +427,8 @@ pub enum Error {
     CreateContractNotAllowed = 28,
     RecipientBlocked = 29,
     ProtocolCallRateExceeded = 30,
+    // Internal enforcement invariant (31)
+    DecisionInvariantViolation = 31,
 }
 
 impl Error {
@@ -359,6 +441,7 @@ impl Error {
             Self::NotInitialized => "not_initialized",
             Self::InvalidConfig => "invalid_config",
             Self::InvalidAmount => "invalid_amount",
+            Self::NoPendingAdmin => "no_pending_admin",
             Self::AdminFrozen => "admin_frozen",
             Self::HeartbeatExpired => "heartbeat_expired",
             Self::NoPolicy => "no_policy",
@@ -375,6 +458,7 @@ impl Error {
             Self::SelfFunctionNotAllowed => "self_function_not_allowed",
             Self::CreateContractNotAllowed => "create_contract_not_allowed",
             Self::ProtocolCallRateExceeded => "protocol_call_rate_exceeded",
+            Self::DecisionInvariantViolation => "decision_invariant_violation",
         }
     }
 }

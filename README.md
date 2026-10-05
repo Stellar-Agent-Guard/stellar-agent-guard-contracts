@@ -82,6 +82,8 @@ non-custodial, no proxy wrappers, tested end-to-end on testnet.
 
 > ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do
 > not deploy to mainnet without an independent audit. See [SECURITY.md](SECURITY.md).
+>
+> For future contract versions, review the policy on [Enforcement-Equivalent Upgrades](#enforcement-equivalent-upgrade-policy).
 
 ## Enforcement scope — read this before relying on the caps
 
@@ -180,9 +182,10 @@ Other validation rules (SPEC §8): negative caps, `window_cap > 0` or a positive
 `recipient_window_caps` entry with `window_secs == 0`, duplicate
 assets/recipients/blocked_recipients/protocol contracts, duplicate recipients in
 `recipient_window_caps`, a non-empty intersection between `recipients` and
-`blocked_recipients`, more than 256 recipients, blocked recipients, or per-recipient
-cap entries, empty per-protocol fn lists, or the self-address in
-`assets`/`protocols`/`recipients`/`blocked_recipients` all fail with `InvalidConfig`.
+`blocked_recipients`, more than 256 `assets`, `protocols`, or `recipients` (and more
+than 256 `blocked_recipients` or per-recipient cap entries), empty per-protocol fn
+lists, or the self-address in `assets`/`protocols`/`recipients`/`blocked_recipients`
+all fail with `InvalidConfig`.
 
 **Not sure where to start?** Copy-paste presets for common operator personas —
 day-trader agent, payments bot, watch-only + heartbeat, max security — each with
@@ -206,8 +209,25 @@ power — it can only replace the key the account will authenticate. Verified li
 (simulation): emits `EventAgentRotated`.
 
 Full operational runbook — scheduled rotation, suspected-leak ordering
-(freeze → rotate → unfreeze), rollback, and the admin-key immutability
-statement: [`docs/key-rotation.md`](docs/key-rotation.md).
+(freeze → rotate → unfreeze), rollback, and the admin-key handover
+ceremony: [`docs/key-rotation.md`](docs/key-rotation.md).
+
+### `propose_admin_rotation` / `confirm_admin_rotation` / `cancel_admin_rotation`
+```rust
+pub fn propose_admin_rotation(env: Env, new_admin: Address)  // require_auth(Admin)
+pub fn confirm_admin_rotation(env: Env)                       // require_auth(pending admin)
+pub fn cancel_admin_rotation(env: Env)                        // require_auth(Admin)
+```
+Two-step admin handover (SPEC §7.2). The current admin proposes; only the
+*proposed* admin can confirm — the confirmation proves the new key is live, so
+a typo'd proposal can never lock out policy management (it just sits pending
+until cancelled or overwritten). The old admin loses all authority in the same
+write that installs the new one; policy, window, heartbeat, freeze state, and
+`PolicyRevision` are untouched. Proposing the current admin fails with
+`InvalidConfig`; confirming/cancelling with nothing pending fails with
+`NoPendingAdmin`. Emits `EventAdminRotationProposed` (`by`, `proposed`),
+`EventAdminRotated` (`old`, `new`), and `EventAdminRotationCancelled` (`by`,
+`cancelled`) respectively.
 
 ### `heartbeat`
 ```rust
@@ -433,9 +453,14 @@ When submitting transactions via `agent-tx` (run `agent-tx --help` for usage and
 ## Installation
 
 ### Prerequisites
-- **Rust 1.85+** with the `wasm32v1-none` target (Soroban 27 targets `wasm32v1-none`,
-  not `wasm32-unknown-unknown`):
-  `rustup target add wasm32v1-none`
+- **The pinned Rust toolchain** — `rust-toolchain.toml` in this repository root
+  pins the exact compiler, the `wasm32v1-none` target (Soroban 27 targets
+  `wasm32v1-none`, not `wasm32-unknown-unknown`), and `clippy`/`rustfmt`.
+  `rustup` reads that file automatically, so from a clone inside this
+  repository `cargo build`, `cargo test`, and `cargo fmt` already use it —
+  `rustup toolchain install` once, or just run a `cargo` command and let rustup
+  install it. Confirm with `rustc --version` (issue #67, see
+  [Reproducible builds](#reproducible-builds)).
 - **Soroban CLI** (`stellar` / `stellar-cli` 22+ — verified against 27.1.0) for deployment
   and admin invocations
 - **Network access** to a Soroban RPC endpoint for anything on-chain
@@ -445,6 +470,39 @@ When submitting transactions via `agent-tx` (run `agent-tx --help` for usage and
 | `testnet` | `https://soroban-testnet.stellar.org` |
 | `mainnet` | `https://soroban.stellar.org` |
 | `futurenet` | `https://rpc-futurenet.stellar.org` |
+
+#### Network presets in `agent-tx`
+
+The submission helper resolves its endpoint from a named preset — both the RPC URL
+*and* the network passphrase, which is what the signed auth payload commits to — so
+`--network` replaces the raw URL instead of adding a flag to remember:
+
+```bash
+agent-tx status --guard C...                    # no flag needed: testnet is the default
+agent-tx status --guard C... --network futurenet
+agent-tx preflight --guard C... --asset C... --to G... --amount 1100 --network testnet
+```
+
+| `--network` | Endpoint | Network passphrase |
+|---|---|---|
+| `testnet` (default) | `https://soroban-testnet.stellar.org` | `Test SDF Network ; September 2015` |
+| `futurenet` | `https://rpc-futurenet.stellar.org` | `Test SDF Future Network ; October 2022` |
+| `mainnet` | `https://soroban.stellar.org` | `Public Global Stellar Network ; September 2015` |
+
+- `--rpc-url <url>` still overrides the endpoint for a custom or self-hosted node.
+  Passing `--network` *and* `--rpc-url` together is an error that names both flags
+  rather than a silent precedence rule. A preset's own URL given through `--rpc-url`
+  is recognised, and gets that preset's passphrase.
+- `--network-passphrase <phrase>` overrides the passphrase — for a local
+  `stellar standalone` instance or a fork.
+- Selecting mainnet, by preset or by URL, prints a one-line reminder to stderr: this
+  contract is unaudited and gates real funds (see [SECURITY.md](SECURITY.md)).
+- Every address flag (`--guard`, `--asset`/`--token`, `--to`, and the `guards add`
+  address and admin) is validated as a StrKey of the right kind before any network
+  call, so a truncated or mistyped ID fails locally instead of burning a simulation.
+  The leading character is a *key type*, not a network (`G` account, `C` contract),
+  so no prefix check can catch a testnet ID aimed at mainnet — the preset plus the
+  passphrase decide where a call lands.
 
 ### Build from source
 ```bash
@@ -485,10 +543,52 @@ sha256sum -c stellar_agent_guard_contracts.wasm.sha256
 # → stellar_agent_guard_contracts.wasm: OK
 ```
 
-Then cross-check `provenance.txt` from the same release (it pins the git tag
-and commit the WASM was built from — rebuild that tag yourself and compare
-hashes for a reproducibility check) and `sbom.cdx.json` for the dependency
-inventory. See [SECURITY.md](SECURITY.md) for the full verification steps.
+Then cross-check `provenance.txt` from the same release (it pins the git tag,
+commit, and `rustc` version the WASM was built from — see
+[Reproducible builds](#reproducible-builds)) and `sbom.cdx.json` for the
+dependency inventory. See [SECURITY.md](SECURITY.md) for the full verification
+steps.
+
+### Reproducible builds
+
+The released WASM ships with a SHA-256 checksum, and downstream bytecode
+verification pins that hash. A pinned hash only means something if the build is
+deterministic, so the compiler is pinned too:
+
+- `rust-toolchain.toml` pins `channel`, the `wasm32v1-none` target, and the
+  `clippy`/`rustfmt` components. It is the single place the version is written;
+  every workflow reads it from there.
+- CI job `wasm-reproducible` builds the contract **twice in clean target
+  directories** and fails unless both builds produce the same SHA-256. It runs
+  no cargo cache on purpose — a warm `target/` could hide non-determinism.
+
+Run exactly the same check locally:
+
+```bash
+./scripts/check-wasm-reproducible.sh
+# toolchain: rustc 1.99.0 …
+# build A: 3f1c…
+# build B: 3f1c…
+# OK: both builds produced 3f1c…
+```
+
+Two honest caveats:
+
+- **No hash was pinned in this repository before this pin existed.** The
+  `f47919…` prefix some consumers reference predates `rust-toolchain.toml`: it
+  was produced by whatever `stable` happened to be on the build runner at the
+  time, and it cannot be reproduced from this repository today — the compiler
+  version that produced it was never recorded. Treat any hash from before the
+  pin as historical, not verifiable. From this commit on, every release records
+  the exact `rustc` version in `provenance.txt`, and the double-build check
+  keeps that record meaningful.
+- The script compares **two builds of the same working tree**. It proves the
+  build is deterministic; it does not prove your tree matches a release tag.
+  To check that, check out the tag and compare against the published
+  `stellar_agent_guard_contracts.wasm.sha256`.
+
+Bumping `channel` in `rust-toolchain.toml` changes the artifact hash. Do it in
+its own commit so the hash change is reviewable on its own.
 
 ## How it works
 
@@ -559,7 +659,8 @@ On-chain state, keyed per the `DataKey` enum in `src/types.rs` (SPEC §3):
 | Key | Type | Kind | Purpose |
 |---|---|---|---|
 | `Initialized` | `bool` | instance | one-time flag for `initialize` |
-| `Admin` | `Address` | instance | policy admin; set once at `initialize` |
+| `Admin` | `Address` | instance | policy admin; set at `initialize`, rotated via propose/confirm |
+| `PendingAdmin` | `Address` | instance | proposed admin awaiting confirmation (absent = none pending) |
 | `AgentPubkey` | `BytesN<32>` | instance | the registered agent's Ed25519 public key |
 | `Policy` | `PolicyConfig` | persistent | current policy (`None` = default-deny) |
 | `Window` | `WindowState` | persistent | rolling spend ledger (`total` + chronological `entries`) |
@@ -571,6 +672,8 @@ maximum TTL on writes and refreshed to maximum when a read finds less than half 
 TTL remaining (`persist_get`; SPEC §9.5). The `Window` ledger is bounded at
 `MAX_WINDOW_ENTRIES = 8192` — beyond that, the two oldest entries merge *forward*
 (conservative over-count), so the `window_cap` ceiling is never exceeded (SPEC §3.1).
+Each successful admission that triggers the merge emits `event_window_merged` with the ledger
+kind, retained timestamp, and merged spend amount or protocol call count (SPEC §9).
 See [Storage rent and TTL cost model](docs/rent-and-ttl.md) for approximate XLM costs,
 who pays extension rent, and the underfunded-expiry failure mode.
 
@@ -631,6 +734,12 @@ Stellar Agent Guard operates across three dedicated repositories:
   with a machine-readable scenario index in
   [`tests/fixtures/index.json`](tests/fixtures/index.json) (scenario → tx hash →
   ledger → expected reason → contract ID) that CI keeps consistent with the prose.
+- [`decision-table.json`](decision-table.json) — the machine-readable twin of the
+  SPEC §4 decision table: every row, the `Error` variants the engine can return
+  for it, and the test that pins each one. `tests/decision_table.rs` fails the
+  build if that file, the SPEC §4 table, the “How it works” walkthrough above, the
+  `Error` enum, and `src/engine.rs` disagree — so the three artifacts cannot drift
+  apart silently.
 - `SPEC.md` — the full architecture specification.
 
 ## ✅ Verified against live testnet
@@ -688,8 +797,10 @@ cargo fmt --check
 
 Every push runs these gates on GitHub Actions (`.github/workflows/ci.yml`, job `ci`):
 format → clippy (`-D warnings`) → unit + integration tests → contract wasm build →
-`agent-tx` build. `main` is protected by a branch ruleset — the `ci` check must be green
-and a review approved for changes to merge.
+`agent-tx` build. A second job, `wasm-reproducible`, builds the contract twice in clean
+target directories and fails unless both builds hash identically (see
+[Reproducible builds](#reproducible-builds)). `main` is protected by a branch ruleset —
+the `ci` check must be green and a review approved for changes to merge.
 
 ## Topics
 

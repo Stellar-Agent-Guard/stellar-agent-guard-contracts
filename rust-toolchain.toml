@@ -1,0 +1,31 @@
+# Pinned Rust toolchain for every build of this repository (issue #67).
+#
+# Why this file exists: a tagged release publishes the contract WASM together
+# with its SHA-256, and downstream bytecode verification pins that hash. An
+# artifact is only *verifiable* if the compiler, the target, and the codegen
+# flags are fixed — `stable` moves, and a moved compiler changes the bytes
+# without any change to this repository. Pinning turns "reproducible" from a
+# claim into a checked property.
+#
+# `rustup` reads this file automatically from the repository root, so
+# `cargo build` / `cargo test` / `cargo fmt` here all run on this exact
+# toolchain. CI installs it explicitly in every workflow (reading the version
+# from this file, never hardcoding it) so a contributor and CI cannot drift.
+#
+# `channel = "1.99.0"` is the version `stable` already resolved to when this
+# pin was added, so pinning changed no build output on the day it landed — the
+# `wasm-reproducible` CI job then proves it stays that way.
+#
+# Note on the MSRV: `Cargo.toml` declares `rust-version = "1.85"`, but
+# `soroban-sdk` 27.0.6 sets `rust-version = "1.91.0"` itself, so the real
+# floor is 1.91 regardless of what this field says.
+#
+# Bumping `channel` changes the released artifact hash. Bump it in its own
+# commit, and re-record the resulting hash when you cut the release (the
+# `release` workflow writes it into `provenance.txt` automatically).
+
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32v1-none"]
