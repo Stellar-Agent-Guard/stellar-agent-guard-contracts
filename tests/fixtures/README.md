@@ -319,7 +319,7 @@ machine contract, and `schema_version` is what a consumer checks first.
 | `setup_transactions[]` | array | The Phase 1 setup table: `step` (stable key), `label` (prose), `tx`, and `ledger` (`null` — setup ledgers were not recorded individually). |
 | `scenarios[]` | array | Exactly five entries with `id` 1–5 matching the headings below. |
 | `scenarios[].outcome` | `"allowed"` \| `"blocked"` | Verdict of the recorded run. |
-| `scenarios[].expected_reason` | string | `allowed` when admitted, otherwise the block reason symbol (`per_tx_cap_exceeded`, `window_cap_exceeded`, `recipient_not_allowed`, `heartbeat_expired`) — the same vocabulary as [`docs/reason-glossary.md`](../../docs/reason-glossary.md). |
+| `scenarios[].expected_reason` | string | `allowed` when admitted, otherwise the block reason symbol (`per_tx_cap_exceeded`, `window_cap_exceeded`, `recipient_not_allowed`, `heartbeat_expired`) — the same vocabulary as [`docs/reason-glossary.md`](../../docs/reason-glossary.md). Cross-checked against the contract's `Error::reason()` list and the committed SDK vocabulary copy [`sdk-reasons.json`](sdk-reasons.json) by `tests/reason_parity.rs` and `scripts/check-reason-parity.sh` (issue #41); a blocked `expected_reason` the contract never emits fails CI. |
 | `scenarios[].guard` / `.token` / `.policy_tx` | string | Contract IDs the scenario ran against, plus the `set_policy` transaction that armed the policy in effect. |
 | `scenarios[].recipient` / `.amount` | string \| null / int | Transfer shape as recorded; `recipient` is `null` where the command above elided it. |
 | `scenarios[].tx` | string \| null | Confirmed transaction hash, or `null` — blocked scenarios are caught pre-broadcast and have no hash. |
