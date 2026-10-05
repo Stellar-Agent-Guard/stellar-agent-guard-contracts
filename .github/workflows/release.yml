@@ -26,11 +26,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
-          components: clippy, rustfmt
+      # Read the pin from rust-toolchain.toml so the compiler that gates the
+      # release is the compiler that builds the artifact (issue #67).
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^channel = "(.*)"$/\1/p' rust-toolchain.toml)"
+          if [[ -z "$channel" ]]; then
+            echo "rust-toolchain.toml declares no [toolchain] channel" >&2
+            exit 1
+          fi
+          echo "Pinned channel: $channel"
+          rustup toolchain install "$channel" --profile minimal --no-self-update \
+            --target wasm32v1-none --component clippy --component rustfmt
+          rustc --version
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -58,10 +67,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
+      # Same pin as the gates job: the checksum published below is only
+      # meaningful if it names a toolchain nobody can silently move.
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^channel = "(.*)"$/\1/p' rust-toolchain.toml)"
+          if [[ -z "$channel" ]]; then
+            echo "rust-toolchain.toml declares no [toolchain] channel" >&2
+            exit 1
+          fi
+          echo "Pinned channel: $channel"
+          rustup toolchain install "$channel" --profile minimal --no-self-update \
+            --target wasm32v1-none
+          rustc --version
 
       - name: Cache cargo
         uses: actions/cache@v4
