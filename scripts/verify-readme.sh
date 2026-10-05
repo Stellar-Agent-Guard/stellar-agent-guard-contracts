@@ -34,7 +34,7 @@ trap 'rm -f "$test_output"' EXIT
 if cargo test 2>&1 | tee "$test_output" >/dev/null; then
   expected_count="$(grep -Eo '[0-9]+ tests' "$README" | awk '{print $1}' | sort -nu | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
   actual_count="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$test_output" | awk '{total += $1} END {print total + 0}')"
-  if [[ "$expected_count" == "206" && "$actual_count" == "$expected_count" ]]; then
+  if [[ "$expected_count" == "223" && "$actual_count" == "$expected_count" ]]; then
     check_pass "README test count is ${actual_count}"
   else
     check_fail "README test count claims [${expected_count}], cargo test reports ${actual_count}"

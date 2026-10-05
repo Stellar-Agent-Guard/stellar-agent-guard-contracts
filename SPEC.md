@@ -971,6 +971,11 @@ exists to drift. Notes:
   deployment-time constant), and `set_policy` can only run post-initialize, so the check
   always compares against the real deployed contract ID.
 
+Each bullet above is pinned by a parametrized unit test in `src/lib.rs` (one case per rule,
+test name quoting the bullet, e.g. `rejects_window_cap_without_window_secs`). Invalid configs
+must return `InvalidConfig` with the stored policy unchanged; valid boundary configs must be
+accepted. Adding a new §8 rule without a corresponding test case fails CI (CONTRIBUTING rule 2).
+
 Invalid config → `InvalidConfig`, policy unchanged (fail-closed, never partially applied).
 
 ### 8.1 Identifying the failing rule: `validate_policy` (issue #35)
@@ -1024,6 +1029,7 @@ those repositories.
 Events are the contract's audit trail and Phase-2 telemetry vocabulary. Topics chosen for cheap
 filtering by the SDK listener.
 
+<!-- §8 validation rules are enumerated exhaustively in the parametrized test matrix; see §8. -->
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
 | `auth_checked` | event-name topic `event_auth_checked`, then `result: Symbol` (`allowed`/`blocked`) and `reason: Symbol` (empty on allow) | Map: `context_index: u32`, `revision: u64` | every `__check_auth` / `check` decision |

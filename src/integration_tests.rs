@@ -1,4 +1,4 @@
-//! Contract-level integration tests (SPEC §11).
+//! Contract-level integration tests (SPEC §11) and exhaustive SPEC §8 validation coverage.
 //!
 //! These drive the *real host routing*: `require_auth` on the guard contract
 //! makes the host invoke `PolicyEngine::__check_auth` with a signature payload
@@ -24,6 +24,8 @@
 //! assert that the allowlist check runs *before* any arg inspection (a
 //! protocol named like an SAC is still classified as a protocol, not a
 //! transfer).
+//!
+//! The `spec_section_8_*` tests below pin every §8 validation rule one-per-test.
 
 use crate::types::{
     AssetCap, CheckResult, DataKey, DmsHealthStatus, Error as GuardError, PolicyConfig,
@@ -51,6 +53,8 @@ fn symbol_val(s: &str) -> ScVal {
     ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from(s)).unwrap())
 }
 
+/// Off-chain reproduction of the contract's key fingerprint (SPEC §9):
+/// `sha256(pubkey)[0..8]`, as the `ScVal::Bytes` an event data map carries.
 /// Off-chain reproduction of the contract's key fingerprint (SPEC §9):
 /// `sha256(pubkey)[0..8]`, as the `ScVal::Bytes` an event data map carries.
 fn fingerprint(pubkey: &[u8; 32]) -> ScVal {
@@ -380,6 +384,7 @@ impl Harness {
     }
 
     // ── Admin ops (mock mode: before any `set_auths`) ────────────────────
+    // ── Admin ops (mock mode: before any `set_auths`) ────────────────────
     fn install_policy(&self, cfg: &PolicyConfig) {
         PolicyEngineClient::new(&self.env, &self.guard).set_policy(&cfg.clone());
     }
@@ -388,6 +393,7 @@ impl Harness {
         PolicyEngineClient::new(&self.env, &self.guard).revoke_policy();
     }
 
+    // ── Auth-entry construction ──────────────────────────────────────────
     // ── Auth-entry construction ──────────────────────────────────────────
 
     fn invocation(
@@ -521,6 +527,7 @@ impl Harness {
     }
 
     // ── Guarded operations (enforcing) ───────────────────────────────────
+    // ── Guarded operations (enforcing) ───────────────────────────────────
 
     fn transfer(&mut self, to: &Address, amount: i128) {
         let root = self.transfer_invocation(&self.guard, to, amount);
@@ -639,6 +646,7 @@ impl Harness {
         })
     }
 
+    /// Did the guard emit an `auth_checked` event with `result = allowed`?
     /// Did the guard emit an `auth_checked` event with `result = allowed`?
     /// `#[contractevent]` prepends the event name to the topic list, so the
     /// `result` topic (SPEC §9) is at index 1.
@@ -3306,6 +3314,231 @@ fn policy_config_debug_snapshot() {
         );
         last_pos = pos;
     }
+}
+// ── SPEC §8 exhaustive validation coverage ───────────────────────────────
+//
+// One test per §8 bullet. Each invalid case asserts `set_policy` fails with
+// `InvalidConfig` and that the previously-installed policy is unchanged
+// (revision + status snapshot). Each valid boundary case asserts acceptance.
+
+/// Snapshot of the observable policy state used to prove "policy unchanged".
+fn snapshot_policy(h: &Harness) -> (u64, bool, u64, u64) {
+    let st = h.status();
+    (st.policy_revision, st.has_policy, st.now, st.last_heartbeat)
+}
+
+/// Assert `set_policy(cfg)` fails with `InvalidConfig` and leaves the
+/// installed policy untouched.
+fn assert_rejects_invalid_config(h: &Harness, cfg: &PolicyConfig) {
+    let before = snapshot_policy(h);
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.set_policy(&cfg.clone());
+    }));
+    assert!(res.is_err(), "expected InvalidConfig rejection");
+    let after = snapshot_policy(h);
+    assert_eq!(before, after, "policy must be unchanged after rejection");
+}
+
+/// Assert `set_policy(cfg)` is accepted (valid boundary).
+fn assert_accepts_valid_config(h: &Harness, cfg: &PolicyConfig) {
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    h.env.mock_all_auths();
+    client.set_policy(&cfg.clone());
+    assert!(h.status().has_policy, "valid config must be accepted");
+}
+
+/// §8 bullet: negative `per_tx_cap` is rejected.
+#[test]
+fn rejects_negative_per_tx_cap() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    p.per_tx_cap = -1;
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 bullet: negative `window_cap` is rejected.
+#[test]
+fn rejects_negative_window_cap() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    p.window_cap = -1;
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 bullet: `window_cap > 0` with `window_secs == 0` is rejected.
+#[test]
+fn rejects_window_cap_without_window_secs() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    p.window_secs = 0;
+    p.window_cap = 1;
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 bullet: `window_cap == 0` with `window_secs == 0` is accepted (boundary).
+#[test]
+fn accepts_zero_window_cap_with_zero_window_secs() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.window_secs = 0;
+    p.window_cap = 0;
+    assert_accepts_valid_config(&h, &p);
+}
+
+/// §8 bullet: `active_until <= active_from` (both non-zero) is rejected.
+#[test]
+fn rejects_active_until_not_after_active_from() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    p.active_from = 100;
+    p.active_until = 100;
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 bullet: `active_until == 0` (open-ended) is accepted even with `active_from > 0`.
+#[test]
+fn accepts_open_ended_active_until() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.active_from = 100;
+    p.active_until = 0;
+    assert_accepts_valid_config(&h, &p);
+}
+
+/// §8 bullet: duplicate entries in `assets` are rejected.
+#[test]
+fn rejects_duplicate_assets() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    p.assets = soroban_sdk::vec![&h.env, h.asset.clone(), h.asset.clone()];
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 bullet: duplicate entries in `recipients` are rejected.
+#[test]
+fn rejects_duplicate_recipients() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, h.recv.clone(), h.recv.clone()];
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 bullet: duplicate protocol contracts are rejected.
+#[test]
+fn rejects_duplicate_protocols() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    let rule = ProtocolRule {
+        contract: h.other.clone(),
+        fns: Some(soroban_sdk::vec![&h.env, Symbol::new(&h.env, "swap")]),
+    };
+    p.protocols = soroban_sdk::vec![&h.env, rule.clone(), rule];
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 bullet: an empty `fns` list on a protocol rule is rejected.
+#[test]
+fn rejects_empty_protocol_fn_list() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    p.protocols = soroban_sdk::vec![
+        &h.env,
+        ProtocolRule {
+            contract: h.other.clone(),
+            fns: Some(soroban_sdk::Vec::new(&h.env)),
+        },
+    ];
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 bullet: `None` `fns` (wildcard) is accepted.
+#[test]
+fn accepts_wildcard_protocol_fn_list() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.protocols = soroban_sdk::vec![
+        &h.env,
+        ProtocolRule {
+            contract: h.other.clone(),
+            fns: None,
+        },
+    ];
+    assert_accepts_valid_config(&h, &p);
+}
+
+/// §8 bullet: the guard's own address in `assets` is rejected.
+#[test]
+fn rejects_self_address_in_assets() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    p.assets = soroban_sdk::vec![&h.env, h.guard.clone()];
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 bullet: the guard's own address as a protocol contract is rejected.
+#[test]
+fn rejects_self_address_in_protocols() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    p.protocols = soroban_sdk::vec![
+        &h.env,
+        ProtocolRule {
+            contract: h.guard.clone(),
+            fns: None,
+        },
+    ];
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 bullet: the guard's own address in `recipients` is rejected.
+#[test]
+fn rejects_self_address_in_recipients() {
+    let h = Harness::new();
+    h.install_policy(&h.base_policy());
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::vec![&h.env, h.guard.clone()];
+    assert_rejects_invalid_config(&h, &p);
+}
+
+/// §8 boundary: an empty `assets` list is accepted (no asset restriction).
+#[test]
+fn accepts_empty_assets_list() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.assets = soroban_sdk::Vec::new(&h.env);
+    assert_accepts_valid_config(&h, &p);
+}
+
+/// §8 boundary: an empty `recipients` list with `allow_any_recipient == false`
+/// is accepted (deny-all recipients is a valid, if restrictive, policy).
+#[test]
+fn accepts_empty_recipients_list() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::Vec::new(&h.env);
+    p.allow_any_recipient = false;
+    assert_accepts_valid_config(&h, &p);
+}
+
+/// §8 boundary: an empty `protocols` list is accepted (no protocol restriction).
+#[test]
+fn accepts_empty_protocols_list() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.protocols = soroban_sdk::Vec::new(&h.env);
+    assert_accepts_valid_config(&h, &p);
 }
 
 #[test]
