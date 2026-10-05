@@ -262,6 +262,13 @@ pub fn decide(
 ) -> alloc::vec::Vec<Decision> {
     let mut verdicts = alloc::vec::Vec::new();
 
+    if state.admin_frozen {
+        for _ in 0..contexts.len() {
+            verdicts.push(Decision::Blocked(Error::AdminFrozen));
+        }
+        return verdicts;
+    }
+
     let Some(cfg) = policy else {
         for _ in 0..contexts.len() {
             verdicts.push(Decision::Blocked(Error::NoPolicy));
@@ -269,9 +276,7 @@ pub fn decide(
         return verdicts;
     };
 
-    let account_error = if state.admin_frozen {
-        Some(Error::AdminFrozen)
-    } else if cfg.dms_grace_secs > 0
+    let account_error = if cfg.dms_grace_secs > 0
         && state.last_heartbeat != 0
         && now.saturating_sub(state.last_heartbeat) > cfg.dms_grace_secs
     {
