@@ -21,10 +21,10 @@ vocabulary. For each reason this table gives the seat-specific read:
 > incident noise. SDK middleware that turns the agent column into
 > user-facing messages must reproduce this constraint verbatim.
 
-> **Vocabulary note.** Issue planning and SPEC §7 quote 17 codes; the current
-> enum in `src/types.rs` has 19 — `CreateContractNotAllowed` (28) was added
-> after that count and is not yet reflected in SPEC §7 (tracked separately,
-> see issue #132). This table covers every current enum variant exactly once.
+> **Vocabulary note.** The enum in `src/types.rs` has 22 variants; this table
+> covers every current policy-decision reason. `decision_invariant_violation`
+> is an internal guard for impossible verdict data and is surfaced as a stable
+> contract error if triggered.
 > Blocked reasons from *rejected* frames live in the client-side event log /
 > diagnostics, not in persisted ledger events (SPEC §9, issue #37) — the
 > auditor column assumes that evidence source.
@@ -36,6 +36,7 @@ vocabulary. For each reason this table gives the seat-specific read:
 | `not_initialized` | 3 | A call before `initialize` ran. | Not agent-facing. | Run `initialize` with the admin and the registered agent key. | Marks the pre-activation window where all calls were default-denied. | §7 |
 | `invalid_config` | 4 | `set_policy` given a config that fails §8 validation. | Not agent-facing (admin op refused). | Correct the config per §8 (e.g. `window_cap != 0` requires `window_secs != 0`; no self-address in `assets`/`protocols`; no duplicate addresses) and re-apply. | The proposed policy was refused; the on-chain policy is unchanged (fail-closed). | §8 |
 | `invalid_amount` | 5 | SAC transfer parsed with amount ≤ 0. | Fix the caller: zero/negative amounts are a client bug, not a policy limit. | Check the agent's code path is not emitting non-positive amounts; high frequency = noisy client. | Attests the account never admits a non-positive transfer. | §6.2 |
+| `no_pending_admin` | 6 | `confirm_admin_rotation` / `cancel_admin_rotation` with no rotation pending. | Not agent-facing. | Propose first (`propose_admin_rotation`), or check whether a concurrent operator already confirmed/cancelled. | Records an out-of-order rotation attempt; admin, policy, and revision are unchanged. | §6.6, §7.2 |
 | `admin_frozen` | 10 | Any spend or heartbeat while the admin kill switch is set. | Halt immediately; do not retry until the operator clears. Heartbeat is blocked too — escalate. | Establish why the freeze was set, then `unfreeze()` (also re-arms `LastHeartbeat`). | A hard stop; the later `unfrozen` event is the admin's recovery attestation. | §4 rule 1, §5 |
 | `heartbeat_expired` | 11 | Any call after the dead-man grace elapsed (agent silent longer than `dms_grace_secs`). | Cannot self-recover; notify the operator immediately and stop operations. | Verify agent liveness, then `unfreeze()` to re-arm `LastHeartbeat`; consider raising `dms_grace_secs`. | Proves the dead-man switch fired for the recorded silence window; reconcile with policy. | §4 rule 2, §5 |
 | `no_policy` | 12 | Any spend while no policy is installed (revoked or never set). | Cease — default-deny is by design; request a policy from the operator. | Install a policy with `set_policy`. | At revoke time default-deny held; the later `policy_set` event is the record. | §4 rule 3 |
@@ -50,6 +51,9 @@ vocabulary. For each reason this table gives the seat-specific read:
 | `unknown_contract` | 26 | A call to a contract that is neither this account, an allowlisted asset, nor an allowlisted protocol. | Unknown contracts are default-deny in v1; consult `policy()` and do not attempt workarounds. | Allowlist the contract if it should be callable under v1 intent. | Default-deny held at T. | §6.4 |
 | `self_function_not_allowed` | 27 | A call to one of the account's own functions outside the agent-allowed path (only `heartbeat` — and the `check` pre-flight — are agent-facing). | The agent may only call its own `heartbeat`; management functions belong to the admin seat. | Use the admin path for management; align tooling, no contract change needed. | Records the self-call surface being contained to the heartbeat/check path. | §6.1, §7 |
 | `create_contract_not_allowed` | 28 | Authorizing a host `CreateContract` context. | The account never authorizes contract creation in v1 — route creation to a dedicated operator-owned account. | Create contracts from a non-guarded account. | Proves the account never authorizes creation. | §6.4, §7 (enum) |
+| `recipient_blocked` | 29 | SAC transfer to an explicitly blocked recipient. | Do not retry to disguise the destination; stop and escalate. | Remove the denylist entry only if policy intent changed. | The explicit recipient denylist blocked this destination. | §6.2 |
+| `protocol_call_rate_exceeded` | 30 | An allowlisted protocol call exceeds its rolling-window call limit. | Wait for calls in the rolling window to expire; do not route around the configured protocol limit. | Raise `protocol_calls_per_window` only if justified by policy. | Records the configured auth-context protocol call limit enforcing the rate bound. | §3, §6.3, §7 |
+| `decision_invariant_violation` | 31 | Internal verdict data was inconsistent (empty result for a submitted preflight call, invalid context index, or a blocked result without a reason). | Stop and escalate; do not retry around the contract error. | Report the contract version and transaction details to maintainers. | Signals an enforcement implementation invariant failure; preserve the failed transaction diagnostics. | §7 |
 
 ## Consumers
 
