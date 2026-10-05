@@ -26,8 +26,8 @@
 //! transfer).
 
 use crate::types::{
-AssetCap, CheckResult, DataKey, DmsHealthStatus, Error as GuardError, PolicyConfig, PolicyRuleId,
-    ProtocolRule, RecipientCap, ValidationOutcome, WindowState,
+    AssetCap, CheckResult, DataKey, DmsHealthStatus, Error as GuardError, PolicyConfig,
+    PolicyRuleId, ProtocolRule, RecipientCap, ValidationOutcome, WindowState,
 };
 use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
 
@@ -364,7 +364,7 @@ impl Harness {
             protocols: soroban_sdk::Vec::new(&self.env),
             recipients: soroban_sdk::vec![&self.env, self.recv.clone()],
             recipient_window_caps: soroban_sdk::Vec::new(&self.env),
-asset_caps: soroban_sdk::Vec::new(&self.env),
+            asset_caps: soroban_sdk::Vec::new(&self.env),
             blocked_recipients: soroban_sdk::Vec::new(&self.env),
             allow_any_recipient: false,
             active_from: 0,
@@ -2694,7 +2694,7 @@ fn policy_config_debug_snapshot() {
                 cap: 10_000,
             },
         ],
-asset_caps: vec![
+        asset_caps: vec![
             &env,
             AssetCap {
                 asset: asset_a.clone(),
@@ -2720,8 +2720,8 @@ asset_caps: vec![
         "protocols",
         "recipients",
         "recipient_window_caps",
-"asset_caps",
         "blocked_recipients",
+        "asset_caps",
         "allow_any_recipient",
         "active_from",
         "active_until",
@@ -3150,7 +3150,7 @@ fn invalid_duplicate_per_asset_cap_rejected() {
 
 #[test]
 fn detailed_check_reports_effective_per_asset_cap() {
-    let mut h = Harness::new();
+    let h = Harness::new();
     let recv = h.recv.clone();
     let mut p = h.base_policy();
     p.per_tx_cap = 100;

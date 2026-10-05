@@ -147,11 +147,11 @@ fn effective_window_cap(cfg: &PolicyConfig, recipient: &Address) -> Option<i128>
 /// present, otherwise the global `per_tx_cap`. Returns `None` when no cap
 /// applies.
 #[allow(clippy::must_use_candidate)]
-fn effective_per_tx_cap(cfg: &PolicyConfig, asset: &Address) -> Option<i128> {
-    for i in 0..cfg.asset_per_tx_caps.len() {
-        if let Some(ac) = cfg.asset_per_tx_caps.get(i) {
+pub fn effective_per_tx_cap(cfg: &PolicyConfig, asset: &Address) -> Option<i128> {
+    for i in 0..cfg.asset_caps.len() {
+        if let Some(ac) = cfg.asset_caps.get(i) {
             if &ac.asset == asset {
-                return (ac.cap > 0).then_some(ac.cap);
+                return (ac.per_tx_cap > 0).then_some(ac.per_tx_cap);
             }
         }
     }
@@ -490,6 +490,7 @@ mod tests {
             recipients: vec![env, addr(env, 2)],
             recipient_window_caps: Vec::new(env),
             blocked_recipients: Vec::new(env),
+            asset_caps: Vec::new(env),
             allow_any_recipient: false,
             active_from: 0,
             active_until: 0,

@@ -173,7 +173,6 @@ impl Ledger {
     }
 
     /// Record a spend against the global window at `now`.
-    /// Record a spend against the global window at `now`.
     pub fn admit(&mut self, now: u64, amount: i128) {
         if let Some((merged_ts, merged_value)) =
             admit_to_ledger(&mut self.total, &mut self.entries, now, amount)
@@ -200,7 +199,6 @@ impl Ledger {
         0
     }
 
-    /// Record a spend for `recipient` against that recipient's per-recipient
     /// Record a spend for `recipient` against that recipient's per-recipient
     /// window. If this is the first spend for the recipient, a fresh ledger is
     /// created. Callers must ensure the recipient is meant to be tracked (i.e.,

@@ -66,6 +66,9 @@ enum PolicyRuleId
   DurationExceedsBound
   AssetListTooLong
   ProtocolListTooLong
+  AssetCapListTooLong
+  AssetCapUnknownAsset
+  DuplicateAssetCap
 enum ValidationOutcome
   Valid
   Invalid(PolicyRuleId)
@@ -87,6 +90,9 @@ struct ProtocolCallEntry
 struct RecipientCap
   recipient: Address
   cap: i128
+struct AssetCap
+  asset: Address
+  per_tx_cap: i128
 struct PolicyConfig
   per_tx_cap: i128
   window_secs: u64
@@ -96,6 +102,7 @@ struct PolicyConfig
   recipients: Vec<Address>
   recipient_window_caps: Vec<RecipientCap>
   blocked_recipients: Vec<Address>
+  asset_caps: Vec<AssetCap>
   allow_any_recipient: bool
   active_from: u64
   active_until: u64

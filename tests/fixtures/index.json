@@ -11,13 +11,13 @@
     "ledger_range_note": "ledgers ~4565xxx-4566xxx"
   },
   "contracts": {
-    "guard": "CAYJZT4XHWSWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
-    "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLtGTJC7"
+    "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+    "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"
   },
   "accounts": [
     {
       "role": "admin",
-      "address": "GD5SOO2MZ6FSMFH6QILG37KSQNRVR3RPSWBTTV4JOUJ7J6TWLLL5LAVS",
+      "address": "GD5S5O2MZ6FSMFH6QILG37KSQNRVR3RPSWBTTV4JOUJ7J6TWLLL5LAVS",
       "key_alias": "guard_admin"
     },
     {
@@ -27,12 +27,12 @@
     },
     {
       "role": "allowed_recipient",
-      "address": "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLLNKLISKL26LJGKUVRRX",
+      "address": "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX",
       "key_alias": "guard_recv"
     },
     {
       "role": "non_allowlisted_recipient",
-      "address": "GDMVA2IQH63BYCFZMOVDYCUDGJZYSUCDGCVFDPU5BLTHFUZ6BF5EPP7",
+      "address": "GDMVA2IQH63BYCFZMOVDYCUDGJZYSUCDGCVFDPU5BLTHFUEZ6BF5EPP7",
       "key_alias": "guard_other"
     }
   ],
@@ -98,10 +98,10 @@
       "title": "Allowed transaction",
       "outcome": "allowed",
       "expected_reason": "allowed",
-      "guard": "CAYJZT4XHWSWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
-      "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLtGTJC7",
+      "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+      "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7",
       "policy_tx": "6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174",
-      "recipient": "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLLNKLISKL26LJGKUVRRX",
+      "recipient": "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX",
       "amount": 50,
       "tx": "4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8",
       "ledger": 4566285,
@@ -117,10 +117,10 @@
       "title": "Per-tx cap violation",
       "outcome": "blocked",
       "expected_reason": "per_tx_cap_exceeded",
-      "guard": "CAYJZT4XHWSWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+      "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
       "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7",
       "policy_tx": "6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174",
-      "recipient": "GDUYLFVFLVISVOM5FK5KVBA446VQQ7NBRRFMLLNLKLISKL26LJGKUVRRX",
+      "recipient": "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX",
       "amount": 1100,
       "tx": null,
       "ledger": null,
@@ -135,10 +135,10 @@
       "title": "Rolling-window cap violation",
       "outcome": "blocked",
       "expected_reason": "window_cap_exceeded",
-      "guard": "CAYJZT4XHWSWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+      "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
       "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7",
       "policy_tx": "6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174",
-      "recipient": "GDUYLFVFLVISVOM5FK5KVBA446VQQ7NBRRFMLLNLKLISKL26LJGKUVRRX",
+      "recipient": "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX",
       "amount": 110,
       "tx": null,
       "ledger": null,
@@ -154,10 +154,10 @@
       "title": "Allowlist violation",
       "outcome": "blocked",
       "expected_reason": "recipient_not_allowed",
-      "guard": "CAYJZT4XHWSWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+      "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
       "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7",
       "policy_tx": "6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174",
-      "recipient": "GDMVA2IQH63BYCFZMOVDYCUDGJZYSUCDGCVFDPU5BLTHFUZ6BF5EPP7",
+      "recipient": "GDMVA2IQH63BYCFZMOVDYCUDGJZYSUCDGCVFDPU5BLTHFUEZ6BF5EPP7",
       "amount": 10,
       "tx": null,
       "ledger": null,
@@ -172,7 +172,7 @@
       "title": "Dead-man switch - trigger FROZEN, then reversal UNFROZEN",
       "outcome": "blocked",
       "expected_reason": "heartbeat_expired",
-      "guard": "CAYJZT4XHWSWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+      "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
       "token": "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7",
       "policy_tx": "1ddad388f914e267b282855ddc8e5478fabfb8542e7798e4402447e5341e3f9a",
       "recipient": null,
@@ -187,7 +187,7 @@
       ],
       "reversal": {
         "action": "unfreeze",
-        "by": "GD5SOO2MZ6FSMFH6QILG37KSQNRVR3RPSWBTTV4JOUJ7J6TWLLL5LAVS",
+        "by": "GD5S5O2MZ6FSMFH6QILG37KSQNRVR3RPSWBTTV4JOUJ7J6TWLLL5LAVS",
         "tx": "dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5",
         "ledger": null,
         "event_topics": ["event_unfrozen"]

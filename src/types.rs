@@ -4,7 +4,7 @@
 use soroban_sdk::{contracterror, contracttype, Address, Bytes, Env, Symbol, Vec};
 
 /// Warning threshold percentage for dead-man switch health evaluation (80%).
-pub const DMS_W@I_THRESHOLD_PERCENT: u64 = 80;
+pub const DMS_WARN_THRESHOLD_PERCENT: u64 = 80;
 
 /// Dead-man switch health status returned by `dms_health`.
 #[contracttype]
@@ -83,6 +83,12 @@ pub enum PolicyRuleId {
     AssetListTooLong,
     /// `protocols` exceeds `MAX_POLICY_PROTOCOLS`.
     ProtocolListTooLong,
+    /// `asset_caps` exceeds `MAX_ASSET_CAP_ENTRIES`.
+    AssetCapListTooLong,
+    /// An `asset_caps` entry overrides an asset not present in `assets`.
+    AssetCapUnknownAsset,
+    /// The same asset appears twice in `asset_caps`.
+    DuplicateAssetCap,
 }
 
 /// Result of the `validate_policy` read (issue #35): whether a candidate
@@ -159,7 +165,7 @@ pub struct AssetCap {
     pub per_tx_cap: i128,
 }
 
-/// The policy an admin installs on the account. See SPEC §3/§.
+/// The policy an admin installs on the account. See SPEC §3/§4.
 #[contracttype]
 #[derive(Clone, PartialEq, Eq)]
 pub struct PolicyConfig {
@@ -178,7 +184,7 @@ pub struct PolicyConfig {
     /// Per-recipient rolling-window cap overrides; recipients not listed here
     /// use the global `window_cap`. Storage bounded by `MAX_RECIPIENT_ENTRIES`.
     pub recipient_window_caps: Vec<RecipientCap>,
-/// Denied SAC transfer destinations. Checked before the allowlist and
+    /// Denied SAC transfer destinations. Checked before the allowlist and
     /// before `allow_any_recipient`; an empty list leaves behavior unchanged.
     pub blocked_recipients: Vec<Address>,
 
@@ -207,8 +213,6 @@ pub struct PolicyConfig {
 /// inspect scripts — it is NOT the canonical encoding for `policy_hash`.
 /// The canonical encoding hashed by `policy_hash` is the `ScVal` XDR form of the
 /// policy map (sorted symbol keys; see SPEC §7.3).
-/// Canonical encoding for hashing must be a separate, unambiguous serialization
-/// (e.g., XDR with deterministic field tags); see SPEC §8/®9 discussion.
 impl core::fmt::Debug for PolicyConfig {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PolicyConfig")
@@ -219,7 +223,7 @@ impl core::fmt::Debug for PolicyConfig {
             .field("protocols", &self.protocols)
             .field("recipients", &self.recipients)
             .field("recipient_window_caps", &self.recipient_window_caps)
-.field("blocked_recipients", &self.blocked_recipients)
+            .field("blocked_recipients", &self.blocked_recipients)
             .field("asset_caps", &self.asset_caps)
             .field("allow_any_recipient", &self.allow_any_recipient)
             .field("active_from", &self.active_from)
@@ -338,11 +342,11 @@ impl Error {
     #[allow(clippy::must_use_candidate)]
     pub fn to_block_reason(self) -> Symbol {
         // Uses the existing reason() string which matches SPEC §7 / reason glossary.
-        Symbol::new(&soroban_sdk:Env::default(), self.reason())
+        Symbol::new(&soroban_sdk::Env::default(), self.reason())
     }
 
     /// Attempt to convert a `BlockReason` symbol back to an `Error` variant.
-    [#allow(clippy::must_use_candidate)]
+    #[allow(clippy::must_use_candidate)]
     pub fn from_block_reason(symbol: &Symbol) -> Option<Self> {
         let env = soroban_sdk::Env::default();
         let all_errors = [
