@@ -125,6 +125,7 @@ fn setup(env: &Env) -> (Address, Address, SigningKey) {
         recipients: Vec::new(env),
         recipient_window_caps: Vec::new(env),
         blocked_recipients: Vec::new(env),
+        asset_caps: Vec::new(env),
         allow_any_recipient: true,
         active_from: 0,
         active_until: 0,

@@ -3754,7 +3754,9 @@ fn per_asset_cap_window_still_uses_global_window() {
     let mut h = Harness::new();
     let recv = h.recv.clone();
     let mut p = h.base_policy();
-    p.per_tx_cap = 1_000;
+    // Global per-tx cap must not exceed the window cap (validate_policy rejects
+    // that combination); the per-asset override is the binding per-tx limit here.
+    p.per_tx_cap = 100;
     p.window_cap = 100;
     p.asset_caps = soroban_sdk::vec![
         &h.env,

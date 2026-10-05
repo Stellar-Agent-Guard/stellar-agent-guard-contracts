@@ -62,6 +62,7 @@ fn policy(env: &Env, paused: bool, outside_window: bool, dms_expired: bool) -> P
         recipients: vec![env, address(env, RECIPIENT_ADDRESS)],
         recipient_window_caps: Vec::new(env),
         blocked_recipients: Vec::new(env),
+        asset_caps: Vec::new(env),
         allow_any_recipient: false,
         active_from: if outside_window { NOW + 1 } else { 0 },
         active_until: 0,
