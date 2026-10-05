@@ -87,6 +87,13 @@ mod event_types {
         pub(super) expires_at: u64,
     }
 
+    /// Dead-man switch auto-freeze explicitly recorded: data `at` (unix seconds).
+    #[contractevent]
+    #[derive(Clone)]
+    pub(super) struct EventDmsAutoFrozen {
+        pub(super) at: u64,
+    }
+
     /// Admin lifecycle events: data `by` (the admin address that acted).
     #[contractevent]
     #[derive(Clone)]
@@ -507,6 +514,10 @@ fn emit_heartbeat(env: &Env, at: u64, expires_at: u64) {
     EventHeartbeat { at, expires_at }.publish(env);
 }
 
+fn emit_dms_auto_frozen(env: &Env, at: u64) {
+    EventDmsAutoFrozen { at }.publish(env);
+}
+
 fn emit_initialized(env: &Env, by: &Address) {
     EventInitialized { by: by.clone() }.publish(env);
 }
@@ -762,6 +773,25 @@ mod policy_engine_type {
             let admin = Self::admin_or_panic(&env);
             persist_set(&env, &DataKey::AdminFrozen, &true);
             emit_frozen(&env, &admin);
+        }
+
+        /// Explicitly records and emits an event if the dead-man switch has expired.
+        /// This is permissionless (no auth required) because it only records an
+        /// already-true fact (the account is already lazily frozen by rule #2).
+        /// If the account is not expired, or already recorded, this is a no-op.
+        pub fn refresh_deadman(env: Env) {
+            let now = env.ledger().timestamp();
+            let grace =
+                persist_get::<PolicyConfig>(&env, &DataKey::Policy).map_or(0, |c| c.dms_grace_secs);
+            let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+
+            if grace > 0 && last_heartbeat != 0 && now.saturating_sub(last_heartbeat) > grace {
+                let recorded = persist_get::<u64>(&env, &DataKey::AutoFrozenAt).unwrap_or(0);
+                if recorded == 0 {
+                    persist_set(&env, &DataKey::AutoFrozenAt, &now);
+                    emit_dms_auto_frozen(&env, now);
+                }
+            }
         }
 
         /// Admin liveness attestation: clears the admin freeze and restarts the

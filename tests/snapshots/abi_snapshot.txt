@@ -39,6 +39,7 @@ pub fn confirm_admin_rotation(env: Env)
 pub fn cancel_admin_rotation(env: Env)
 pub fn heartbeat(env: Env)
 pub fn freeze(env: Env)
+pub fn refresh_deadman(env: Env)
 pub fn unfreeze(env: Env)
 pub fn policy(env: Env) -> Option<PolicyConfig>
 pub fn policy_hash(env: Env) -> BytesN<32>
@@ -137,6 +138,7 @@ enum DataKey
   Window
   LastHeartbeat
   AdminFrozen
+  AutoFrozenAt
   PolicyRevision
 struct RecipientLedger
   recipient: Address
