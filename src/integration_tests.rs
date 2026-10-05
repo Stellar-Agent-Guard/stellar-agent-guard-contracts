@@ -3346,6 +3346,127 @@ fn batch_events_emit_in_order_with_context_index() {
     assert_eq!(auth_events[2].1, build_map(2, revision));
 }
 
+/// SPEC §3.1 / §6 Invariant: Staged window admissions commit only if every context passes (all-or-nothing).
+///
+/// **Invariant (window)** (SPEC §3.1):
+/// > "for every authorization decision, the global `total` after any admission equals the sum
+/// > of `entries[i].amount` over global entries with `ts + window_secs > now`, and a new asset
+/// > transfer is admitted only if the running total (plus amounts already staged in the same request)
+/// > ≤ the effective cap for that transfer."
+///
+/// **All-or-nothing commit** (SPEC §6, README §6):
+/// > "Each `Context` in `auth_contexts` is classified independently; every context must pass or the
+/// > whole authorization fails (`__check_auth` returns an error → transaction rejected)."
+/// > "Window admissions are staged and only committed to storage if *every* context passes.
+/// > A partially-validating batch can never spend."
+///
+/// This test constructs a two-context authorization batch `[valid transfer, blocked transfer]`
+/// and asserts:
+/// 1. `__check_auth` returns `Err(GuardError::PerTxCapExceeded)`.
+/// 2. The window total in storage is unchanged afterward (staged admission was not committed).
+/// 3. A subsequent in-window transfer still fits the pre-batch budget and succeeds on-chain.
+#[test]
+#[allow(clippy::too_many_lines)] // pins pre-batch and post-spend batch behavior in one sequential flow
+fn failed_multi_context_batch_never_commits_staged_window_admissions() {
+    let mut h = Harness::new();
+    let mut p = h.base_policy();
+    p.window_cap = 100;
+    p.per_tx_cap = 80;
+    p.allow_any_recipient = true;
+    h.install_policy(&p);
+
+    let to = Address::generate(&h.env);
+    assert_eq!(h.status().window_remaining, Some(100));
+
+    let env = h.env.clone();
+    let guard = h.guard.clone();
+    let asset = h.asset.clone();
+    let agent = h.agent.clone();
+
+    let transfer_ctx = |to: &Address, amount: i128| {
+        soroban_sdk::auth::Context::Contract(soroban_sdk::auth::ContractContext {
+            contract: asset.clone(),
+            fn_name: Symbol::new(&env, "transfer"),
+            args: soroban_sdk::vec![
+                &env,
+                guard.clone().into_val(&env),
+                to.clone().into_val(&env),
+                amount.into_val(&env),
+            ],
+        })
+    };
+
+    let check_batch = |contexts: soroban_sdk::Vec<soroban_sdk::auth::Context>, nonce: u8| {
+        let payload_bytes = [nonce; 32];
+        let payload = soroban_sdk::BytesN::from_array(&env, &payload_bytes);
+        let sig = agent.sign(&payload_bytes).to_bytes();
+        let signatures = soroban_sdk::BytesN::from_array(&env, &sig);
+        env.as_contract(&guard, || {
+            <PolicyEngine as soroban_sdk::auth::CustomAccountInterface>::__check_auth(
+                env.clone(),
+                unsafe {
+                    std::mem::transmute::<soroban_sdk::BytesN<32>, soroban_sdk::crypto::Hash<32>>(
+                        payload,
+                    )
+                },
+                signatures,
+                contexts,
+            )
+        })
+    };
+
+    let read_window_total = || {
+        env.as_contract(&guard, || {
+            env.storage()
+                .persistent()
+                .get::<DataKey, crate::types::WindowState>(&DataKey::Window)
+                .as_ref()
+                .map_or(0i128, |w| w.total)
+        })
+    };
+
+    // Two-context auth batch: ctx1 (40, valid), ctx2 (90, exceeds per_tx_cap 80).
+    let contexts = soroban_sdk::vec![&h.env, transfer_ctx(&to, 40), transfer_ctx(&to, 90)];
+    let res = check_batch(contexts, 0);
+
+    // 1. Assert __check_auth returns Err.
+    assert_eq!(res, Err(GuardError::PerTxCapExceeded));
+
+    // 2. Assert the window total is unchanged afterward in persistent storage.
+    assert_eq!(
+        read_window_total(),
+        0i128,
+        "window total must remain 0 after failed batch"
+    );
+    assert_eq!(h.status().window_remaining, Some(100));
+
+    // 3. Subsequent transfer of 70 fits the uncommitted budget (70 <= 100).
+    // If ctx1's staged 40 had committed, 40 + 70 = 110 > 100 would fail.
+    h.transfer(&to, 70);
+    assert_eq!(h.status().window_remaining, Some(30));
+    assert_eq!(read_window_total(), 70i128);
+
+    // 4. Invariant holds when the window already contains prior spend:
+    // Batch with ctx3 (20, valid) and ctx4 (90, blocked).
+    let contexts2 = soroban_sdk::vec![&h.env, transfer_ctx(&to, 20), transfer_ctx(&to, 90)];
+    let res2 = check_batch(contexts2, 1);
+    assert_eq!(res2, Err(GuardError::PerTxCapExceeded));
+
+    // Staged 20 must not be added to the existing 70 total.
+    assert_eq!(
+        read_window_total(),
+        70i128,
+        "window total must remain 70 after second failed batch"
+    );
+    assert_eq!(h.status().window_remaining, Some(30));
+
+    // Subsequent transfer of 25 fits the remaining 30 budget (70 + 25 = 95 <= 100).
+    // If staged 20 had committed, 70 + 20 + 25 = 115 > 100 would have been blocked.
+    h.transfer(&to, 25);
+    assert_eq!(h.status().window_remaining, Some(5));
+    assert_eq!(read_window_total(), 95i128);
+}
+
 #[test]
 fn per_recipient_window_cap_enforced_on_chain() {
     let mut h = Harness::new();

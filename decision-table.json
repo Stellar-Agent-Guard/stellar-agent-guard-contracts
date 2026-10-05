@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "spec_section": "§4",
+  "purpose": "Single machine-readable source of truth for the policy decision table. `condition` and `result` are rendered verbatim into the SPEC §4 table; `reasons` is what the engine actually returns for that row. tests/decision_table.rs fails `cargo test` if any of these drift apart.",
+  "notes": [
+    "SPEC §4 is the prose table; this file is the data behind it. Edit `condition`/`result` here and paste the rendered row back into SPEC.md — never edit the SPEC row alone, the drift test will reject it.",
+    "`result` reproduces SPEC §4's cell verbatim, including reasons SPEC lists there that the v1 engine cannot emit. `reasons` below is engine truth. Where the two disagree, the per-row `note` says so and points at the audit that records it; see docs/scenario-matrix.md findings F-2, F-3 and F-4.",
+    "Adding or removing an `Error::` branch in src/engine.rs changes the set of reasons, which fails tests/decision_table.rs until this file is updated in the same commit. That is the point: drift is a CI failure, not a review miss."
+  ],
+  "readme_gate_order_anchor": "**Account-level gates** (in this order):",
+  "readme_gate_order": [
+    "admin freeze",
+    "dead-man switch",
+    "pause",
+    "active window"
+  ],
+  "rows": [
+    {
+      "id": 1,
+      "condition": "`AdminFrozen` is set",
+      "result": "**Block** (`Reason::AdminFrozen`)",
+      "verdict": "block",
+      "readme_terms": [
+        "admin freeze"
+      ],
+      "reasons": [
+        {
+          "error": "AdminFrozen",
+          "tests": [
+            "account_gates_order_beats_calls"
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "condition": "dead-man switch enabled AND `LastHeartbeat != 0` AND `now - LastHeartbeat > dms_grace_secs`",
+      "result": "**Block** (`Reason::HeartbeatExpired`) — automatic freeze, derived lazily, no background write",
+      "verdict": "block",
+      "readme_terms": [
+        "dead-man switch"
+      ],
+      "reasons": [
+        {
+          "error": "HeartbeatExpired",
+          "tests": [
+            "account_gates_order_beats_calls",
+            "heartbeat_allowed_but_expired_blocked_even_for_heartbeat"
+          ]
+        }
+      ],
+      "note": "The gate also blocks `heartbeat` itself once the grace elapsed: reviving the account is the admin's `unfreeze` (§5)."
+    },
+    {
+      "id": 3,
+      "condition": "no `Policy` stored (revoked or never set)",
+      "result": "**Block** (`Reason::NoPolicy`) — default deny",
+      "verdict": "block",
+      "readme_terms": [
+        "NoPolicy"
+      ],
+      "reasons": [
+        {
+          "error": "NoPolicy",
+          "tests": [
+            "no_policy_is_default_deny"
+          ]
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "condition": "`paused`",
+      "result": "**Block** (`Reason::Paused`)",
+      "verdict": "block",
+      "readme_terms": [
+        "pause"
+      ],
+      "reasons": [
+        {
+          "error": "Paused",
+          "tests": [
+            "account_gates_order_beats_calls"
+          ]
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "condition": "`active_from != 0 && now < active_from`, or `active_until != 0 && now > active_until`",
+      "result": "**Block** (`Reason::OutsideActiveWindow`)",
+      "verdict": "block",
+      "readme_terms": [
+        "active window"
+      ],
+      "reasons": [
+        {
+          "error": "OutsideActiveWindow",
+          "tests": [
+            "outside_active_window_blocks_before_classification"
+          ]
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "condition": "context is a call to this account's own administrative/self functions (`heartbeat`, `check`)",
+      "result": "allow into §5 handling (heartbeat state update only)",
+      "verdict": "mixed",
+      "readme_terms": [
+        "heartbeat"
+      ],
+      "kinds": [
+        "SelfCall"
+      ],
+      "reasons": [
+        {
+          "error": "SelfFunctionNotAllowed",
+          "tests": [
+            "other_self_function_rejected"
+          ]
+        }
+      ],
+      "note": "Only `heartbeat` is admitted; `check` and `check_detailed` never require auth so they never reach `auth_contexts` at all. SPEC's cell names both, which overstates the allowed set — see docs/scenario-matrix.md finding F-4."
+    },
+    {
+      "id": 7,
+      "condition": "per-context classification (§6) applies all allowlist / cap / window rules",
+      "result": "allow or **Block** (`Reason::AssetNotAllowed`, `Reason::RecipientNotAllowed`, `Reason::PerTxCapExceeded`, `Reason::WindowCapExceeded`, `Reason::ProtocolNotAllowed`, `Reason::FunctionNotAllowed`, `Reason::UnknownContract`)",
+      "verdict": "mixed",
+      "readme_terms": [
+        "parse_call"
+      ],
+      "kinds": [
+        "AssetTransfer",
+        "AssetOther",
+        "Protocol",
+        "Unknown",
+        "CreateContract"
+      ],
+      "reasons": [
+        {
+          "error": "InvalidAmount",
+          "tests": [
+            "invalid_amount_rejections_do_not_mutate_window"
+          ]
+        },
+        {
+          "error": "RecipientBlocked",
+          "tests": [
+            "blocked_recipient_wins_over_allowlist_and_escape_hatch",
+            "empty_blocked_recipients_list_is_no_op"
+          ]
+        },
+        {
+          "error": "RecipientNotAllowed",
+          "tests": [
+            "recipient_allowlist_enforced_and_escaped"
+          ]
+        },
+        {
+          "error": "PerTxCapExceeded",
+          "tests": [
+            "per_tx_cap_enforced"
+          ]
+        },
+        {
+          "error": "WindowCapExceeded",
+          "tests": [
+            "window_cap_blocks_across_transactions_and_rolls_over",
+            "window_checks_all_contexts_before_commit"
+          ]
+        },
+        {
+          "error": "FunctionNotAllowed",
+          "tests": [
+            "asset_other_function_is_function_not_allowed",
+            "protocol_unlisted_fn_denied"
+          ]
+        },
+        {
+          "error": "UnknownContract",
+          "tests": [
+            "unlisted_asset_is_unknown_contract",
+            "protocol_unknown_contract_denied",
+            "arity_guard_transfer_4_args_is_denied"
+          ]
+        },
+        {
+          "error": "ProtocolCallRateExceeded",
+          "tests": [
+            "protocol_call_rate_limit_blocks_at_threshold"
+          ]
+        },
+        {
+          "error": "CreateContractNotAllowed",
+          "tests": [],
+          "note": "Reachable only through a host-function create-contract context, which no test constructs; tracked as an orphan variant in docs/reason-glossary.md (issue #132)."
+        },
+        {
+          "error": "ProtocolNotAllowed",
+          "tests": [],
+          "note": "Unreachable defensive arm: parse_call only yields ParsedCall::Protocol after confirming membership in cfg.protocols, so `!found` inside decide()'s protocol arm cannot fire. SPEC §6.3 lists it as an outcome — see docs/scenario-matrix.md finding F-2."
+        }
+      ],
+      "note": "The `result` cell is SPEC's own wording and is deliberately left untouched: it lists `Reason::AssetNotAllowed`, which the v1 engine never emits (an unlisted SAC is parsed as `Unknown` and denied with `unknown_contract`), and omits `CreateContractNotAllowed`, `SelfFunctionNotAllowed`, `RecipientBlocked`, `InvalidAmount`, and `ProtocolCallRateExceeded`, which the engine does emit. Both directions are audit findings F-2 and F-3 in docs/scenario-matrix.md; correcting the SPEC cell is a semantics call for a maintainer, so this file records the engine truth in `reasons` and leaves the prose alone."
+    }
+  ]
+}
