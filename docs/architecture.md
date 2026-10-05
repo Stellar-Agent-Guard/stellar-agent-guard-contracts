@@ -95,7 +95,8 @@ The full decision table from SPEC §4, evaluated against ledger time (which Soro
 | Key | Type | Kind | Purpose |
 |---|---|---|---|
 | `Initialized` | `bool` | instance | One-time flag for `initialize` |
-| `Admin` | `Address` | instance | Policy admin; set once at `initialize` |
+| `Admin` | `Address` | instance | Policy admin; set at `initialize`, rotated via §7.2 handover |
+| `PendingAdmin` | `Address` | instance | Proposed admin awaiting confirmation (absent = none pending) |
 | `AgentPubkey` | `BytesN<32>` | instance | Agent's Ed25519 public key |
 | `Policy` | `PolicyConfig` | persistent | Current policy (`None` = default-deny) |
 | `Window` | `WindowState` | persistent | Rolling spend ledger |
@@ -103,6 +104,21 @@ The full decision table from SPEC §4, evaluated against ledger time (which Soro
 | `AdminFrozen` | `bool` | persistent | Admin-initiated freeze flag |
 
 Instance keys auto-refresh TTL on every invocation; persistent keys are extended to the maximum TTL on every write.
+
+## Enforcement-Equivalent Upgrade Policy
+
+Contracts on Soroban are immutable once deployed. When operators ask whether to redeploy for new contract versions (v2+), the decision follows our **enforcement-equivalent upgrade** policy:
+
+- **Security Fixes:** Mandatory redeploy advisory. Operators must upgrade as soon as practical to maintain platform security guarantees.
+- **Additive Features:** Optional redeploy. Existing policies and state continue functioning without modification.
+- **Guarantee Changes:** Explicit migration checklist required:
+  1. Export existing policy (`policy()`).
+  2. Deploy new contract artifact.
+  3. Initialize new contract and set policy (`initialize`, `set_policy`).
+  4. Rotate keys if needed.
+  5. Verify operational status (`status()`).
+
+**Note on State Migration:** There is no automatic on-chain migration primitive; state is moved by admin re-entry (export/reimport). Window history resets upon migration (fresh window on new contract instance).
 
 ## Code layout
 

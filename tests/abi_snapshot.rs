@@ -57,16 +57,18 @@ fn normalize_sig(text: &str) -> String {
         .replace(",)", ")")
 }
 
-/// Contract entrypoints from `src/lib.rs`: every 4-space-indented `pub fn`
-/// (the `PolicyEngine` contract methods — top-level `fn` helpers sit at
-/// column 0 and are not entrypoints) plus the host-invoked `__check_auth`.
+/// Contract entrypoints from `src/lib.rs`: indented `pub fn` declarations
+/// inside the contract implementation (top-level `fn` helpers sit at column 0)
+/// plus the host-invoked `__check_auth`.
 fn extract_functions(src: &str) -> Vec<String> {
     let lines: Vec<&str> = src.lines().collect();
     let mut fns = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        let body = lines[i].strip_prefix("    ").unwrap_or("");
-        let is_entrypoint = body.starts_with("pub fn ") || body.starts_with("fn __check_auth(");
+        let body = lines[i].trim_start();
+        let is_indented = body.len() < lines[i].len();
+        let is_entrypoint =
+            is_indented && (body.starts_with("pub fn ") || body.starts_with("fn __check_auth("));
         if is_entrypoint {
             let mut sig = body.to_string();
             while !sig.contains('{') && i + 1 < lines.len() {
@@ -205,6 +207,7 @@ fn error_by_name(name: &str) -> Option<Error> {
         "NotInitialized" => Error::NotInitialized,
         "InvalidConfig" => Error::InvalidConfig,
         "InvalidAmount" => Error::InvalidAmount,
+        "NoPendingAdmin" => Error::NoPendingAdmin,
         "AdminFrozen" => Error::AdminFrozen,
         "HeartbeatExpired" => Error::HeartbeatExpired,
         "NoPolicy" => Error::NoPolicy,

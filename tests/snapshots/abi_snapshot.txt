@@ -34,8 +34,12 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 pub fn set_policy(env: Env, config: PolicyConfig)
 pub fn revoke_policy(env: Env)
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
+pub fn propose_admin_rotation(env: Env, new_admin: Address)
+pub fn confirm_admin_rotation(env: Env)
+pub fn cancel_admin_rotation(env: Env)
 pub fn heartbeat(env: Env)
 pub fn freeze(env: Env)
+pub fn refresh_deadman(env: Env)
 pub fn unfreeze(env: Env)
 pub fn policy(env: Env) -> Option<PolicyConfig>
 pub fn policy_hash(env: Env) -> BytesN<32>
@@ -66,6 +70,7 @@ enum PolicyRuleId
   DurationExceedsBound
   AssetListTooLong
   ProtocolListTooLong
+  PerTxCapExceedsWindowCap
   AssetCapListTooLong
   AssetCapUnknownAsset
   DuplicateAssetCap
@@ -134,11 +139,13 @@ struct CheckDetail
 enum DataKey
   Initialized
   Admin
+  PendingAdmin
   AgentPubkey
   Policy
   Window
   LastHeartbeat
   AdminFrozen
+  AutoFrozenAt
   PolicyRevision
 struct RecipientLedger
   recipient: Address
@@ -151,6 +158,7 @@ struct RecipientLedger
 3 NotInitialized not_initialized
 4 InvalidConfig invalid_config
 5 InvalidAmount invalid_amount
+6 NoPendingAdmin no_pending_admin
 10 AdminFrozen admin_frozen
 11 HeartbeatExpired heartbeat_expired
 12 NoPolicy no_policy
