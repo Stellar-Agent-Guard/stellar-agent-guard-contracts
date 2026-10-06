@@ -10,6 +10,9 @@
 //! verifies the Ed25519 signature presented over the transaction auth payload
 //! and then evaluates the policy (SPEC §4/§6/§7). No CAP-71 delegation in v1.
 
+// Test fixtures intentionally use unwrap/expect/panic; production source stays deny-listed.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 extern crate alloc;
 
 #[cfg(test)]
