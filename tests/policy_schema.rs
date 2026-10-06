@@ -1,6 +1,8 @@
 //! Keeps copy-paste policy examples and the SPEC parity vector aligned with
 //! the machine-readable schema used by tooling.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test assertions are not contract code
+
 use jsonschema::Validator;
 use serde_json::Value;
 use std::{fs, path::PathBuf};
