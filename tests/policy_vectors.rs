@@ -95,6 +95,7 @@ fn policy_from_json(env: &Env, value: &Value) -> PolicyConfig {
         recipients: addresses(env, field(value, "recipients")),
         recipient_window_caps,
         blocked_recipients: addresses(env, field(value, "blocked_recipients")),
+        asset_caps: soroban_sdk::Vec::new(env),
         allow_any_recipient: field(value, "allow_any_recipient")
             .as_bool()
             .expect("allow_any_recipient must be a boolean"),

@@ -13,11 +13,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
-          components: clippy, rustfmt
+      # The toolchain version is read from rust-toolchain.toml, never repeated
+      # here: one pin, one place. `dtolnay/rust-toolchain@stable` would install
+      # a moving compiler and silently override the file, which is exactly the
+      # drift issue #67 removes.
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^channel = "(.*)"$/\1/p' rust-toolchain.toml)"
+          if [[ -z "$channel" ]]; then
+            echo "rust-toolchain.toml declares no [toolchain] channel" >&2
+            exit 1
+          fi
+          echo "Pinned channel: $channel"
+          rustup toolchain install "$channel" --profile minimal --no-self-update \
+            --target wasm32v1-none --component clippy --component rustfmt
+          rustc --version
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -49,8 +60,43 @@ jobs:
       - name: Unit + integration tests
         run: cargo test
 
+      - name: Public API documentation
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
       - name: Contract build (wasm32v1-none)
         run: cargo build --release --target wasm32v1-none
 
+      - name: Verify README claims
+        run: scripts/verify-readme.sh
+
       - name: Agent submission tool build (tools/agent-tx)
         run: cargo build --release --manifest-path tools/agent-tx/Cargo.toml
+
+  # Issue #67: the released artifact ships with a SHA-256 that downstream
+  # bytecode verification pins, so "two clean builds of this commit agree"
+  # has to be a checked property, not an assumption. Separate job from `ci`
+  # because it needs two *uncached* builds — reusing the `ci` cache would let a
+  # warm target directory hide non-determinism. Runs the same script a
+  # contributor can run locally.
+  wasm-reproducible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^channel = "(.*)"$/\1/p' rust-toolchain.toml)"
+          if [[ -z "$channel" ]]; then
+            echo "rust-toolchain.toml declares no [toolchain] channel" >&2
+            exit 1
+          fi
+          echo "Pinned channel: $channel"
+          rustup toolchain install "$channel" --profile minimal --no-self-update \
+            --target wasm32v1-none
+          rustc --version
+
+      # No cargo cache on purpose: each build must compile from scratch in its
+      # own target directory (see scripts/check-wasm-reproducible.sh).
+      - name: Build twice in clean target dirs, compare SHA-256
+        run: ./scripts/check-wasm-reproducible.sh

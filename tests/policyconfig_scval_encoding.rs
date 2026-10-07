@@ -13,7 +13,7 @@ use soroban_sdk::{
     xdr::{Int128Parts, ScVal},
     Address, Env, IntoVal, Symbol, TryFromVal, Val, Vec as SdkVec,
 };
-use stellar_agent_guard_contracts::{PolicyConfig, ProtocolRule, RecipientCap};
+use stellar_agent_guard_contracts::{AssetCap, PolicyConfig, ProtocolRule, RecipientCap};
 
 /// Converts a host value to its exact `ScVal` via the host (`Val`) representation,
 /// the same path a real `set_policy` invocation takes through the SDK. Takes the
@@ -25,10 +25,11 @@ fn to_scval(env: &Env, v: impl IntoVal<Env, Val>) -> ScVal {
 }
 
 /// The sorted symbol keys of `PolicyConfig` — SPEC §3.2 table column 2.
-const EXPECTED_KEYS: [&str; 14] = [
+const EXPECTED_KEYS: [&str; 15] = [
     "active_from",
     "active_until",
     "allow_any_recipient",
+    "asset_caps",
     "assets",
     "blocked_recipients",
     "dms_grace_secs",
@@ -95,6 +96,11 @@ fn sample_policy(env: &Env) -> PolicyConfig {
     });
     let mut blocked = SdkVec::new(env);
     blocked.push_back(Address::generate(env));
+    let mut asset_caps = SdkVec::new(env);
+    asset_caps.push_back(AssetCap {
+        asset: Address::generate(env),
+        per_tx_cap: 250i128,
+    });
     let mut recipients = SdkVec::new(env);
     // A real account (G…) strkey from the Phase-1 fixture policy so the
     // recipients vec exercises the ScAddress::Account shape (SPEC §3.2).
@@ -111,6 +117,7 @@ fn sample_policy(env: &Env) -> PolicyConfig {
         protocols,
         recipients,
         recipient_window_caps: caps,
+        asset_caps,
         blocked_recipients: blocked,
         allow_any_recipient: true,
         active_from: 0u64,
@@ -122,7 +129,7 @@ fn sample_policy(env: &Env) -> PolicyConfig {
 }
 
 #[test]
-fn top_level_map_has_exactly_the_fourteen_fields_in_sorted_symbol_order() {
+fn top_level_map_has_exactly_the_fifteen_fields_in_sorted_symbol_order() {
     let env = Env::default();
     let entries = map_entries(&to_scval(&env, sample_policy(&env)));
 

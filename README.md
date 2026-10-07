@@ -1,5 +1,5 @@
 <p align="center">
-<img src="Gemini_Generated_Image_mvimg2mvimg2mvim.jpeg" alt="Stellar Agent Guard" width="700"/>
+<img src="assets/logo.jpeg" alt="Stellar Agent Guard" width="700"/>
 </p>
 <p align="center">
 <a href="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/ci.yml">
@@ -14,7 +14,7 @@
 <a href="https://www.rust-lang.org/">
 <img src="https://img.shields.io/badge/rust-1.85%2B-blue" alt="Rust 1.85+"/>
 </a>
-<a href="https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/">
+<a href="https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/">....
 <img src="https://img.shields.io/badge/docs-GitBook-blue" alt="Documentation"/>
 </a>
 </p>
@@ -82,6 +82,8 @@ non-custodial, no proxy wrappers, tested end-to-end on testnet.
 
 > ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do
 > not deploy to mainnet without an independent audit. See [SECURITY.md](SECURITY.md).
+>
+> For future contract versions, review the policy on [Enforcement-Equivalent Upgrades](#enforcement-equivalent-upgrade-policy).
 
 ## Enforcement scope — read this before relying on the caps
 
@@ -94,7 +96,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 68 tests, isolated (no network)
+cargo test                                      # 206 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only)
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -147,9 +149,13 @@ Admin-only (`require_auth(Admin)`). Replaces the policy, resets the rolling wind
 starts the dead-man-switch clock at install time (a fresh policy gets full grace). The
 `PolicyConfig` fields:
 
+Tooling can validate this CLI JSON shape against the checked-in
+[`policy.schema.json`](policy.schema.json); the contract remains the authoritative validator.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `per_tx_cap` | `i128` | per asset-transfer call cap; `0` = disabled |
+| `asset_caps` | `Vec<AssetCap>` | optional per-asset `per_tx_cap` overrides (asset + cap); unlisted assets fall back to the global `per_tx_cap` |
 | `window_secs` | `u64` | rolling window width in seconds (default 86_400) |
 | `window_cap` | `i128` | rolling cap within `window_secs`; `0` = disabled |
 | `assets` | `Vec<Address>` | SAC token contracts whose transfers get parsed and enforced |
@@ -185,6 +191,15 @@ than 256 `blocked_recipients` or per-recipient cap entries), empty per-protocol 
 lists, or the self-address in `assets`/`protocols`/`recipients`/`blocked_recipients`
 all fail with `InvalidConfig`.
 
+Per-asset caps are additive: an absent `asset_caps` entry (or an empty
+vector) leaves the global `per_tx_cap` in force for every asset, so existing
+policies encode byte-identically. A `asset_caps` entry whose asset is not
+listed in `assets` is rejected with `InvalidConfig` rather than silently
+ignored, and every per-asset cap must be `>= 0`. Window accounting stays a
+single rolling window: an admitted transfer is compared against the asset's
+*effective* per-tx cap (override if present, else the global `per_tx_cap`),
+and the shared `window_cap` still bounds total spend across assets.
+
 **Not sure where to start?** Copy-paste presets for common operator personas —
 day-trader agent, payments bot, watch-only + heartbeat, max security — each with
 rationale, explicit "what it does NOT protect against", and unaudited/mainnet/DMS-grace
@@ -207,8 +222,25 @@ power — it can only replace the key the account will authenticate. Verified li
 (simulation): emits `EventAgentRotated`.
 
 Full operational runbook — scheduled rotation, suspected-leak ordering
-(freeze → rotate → unfreeze), rollback, and the admin-key immutability
-statement: [`docs/key-rotation.md`](docs/key-rotation.md).
+(freeze → rotate → unfreeze), rollback, and the admin-key handover
+ceremony: [`docs/key-rotation.md`](docs/key-rotation.md).
+
+### `propose_admin_rotation` / `confirm_admin_rotation` / `cancel_admin_rotation`
+```rust
+pub fn propose_admin_rotation(env: Env, new_admin: Address)  // require_auth(Admin)
+pub fn confirm_admin_rotation(env: Env)                       // require_auth(pending admin)
+pub fn cancel_admin_rotation(env: Env)                        // require_auth(Admin)
+```
+Two-step admin handover (SPEC §7.2). The current admin proposes; only the
+*proposed* admin can confirm — the confirmation proves the new key is live, so
+a typo'd proposal can never lock out policy management (it just sits pending
+until cancelled or overwritten). The old admin loses all authority in the same
+write that installs the new one; policy, window, heartbeat, freeze state, and
+`PolicyRevision` are untouched. Proposing the current admin fails with
+`InvalidConfig`; confirming/cancelling with nothing pending fails with
+`NoPendingAdmin`. Emits `EventAdminRotationProposed` (`by`, `proposed`),
+`EventAdminRotated` (`old`, `new`), and `EventAdminRotationCancelled` (`by`,
+`cancelled`) respectively.
 
 ### `heartbeat`
 ```rust
@@ -434,9 +466,14 @@ When submitting transactions via `agent-tx` (run `agent-tx --help` for usage and
 ## Installation
 
 ### Prerequisites
-- **Rust 1.85+** with the `wasm32v1-none` target (Soroban 27 targets `wasm32v1-none`,
-  not `wasm32-unknown-unknown`):
-  `rustup target add wasm32v1-none`
+- **The pinned Rust toolchain** — `rust-toolchain.toml` in this repository root
+  pins the exact compiler, the `wasm32v1-none` target (Soroban 27 targets
+  `wasm32v1-none`, not `wasm32-unknown-unknown`), and `clippy`/`rustfmt`.
+  `rustup` reads that file automatically, so from a clone inside this
+  repository `cargo build`, `cargo test`, and `cargo fmt` already use it —
+  `rustup toolchain install` once, or just run a `cargo` command and let rustup
+  install it. Confirm with `rustc --version` (issue #67, see
+  [Reproducible builds](#reproducible-builds)).
 - **Soroban CLI** (`stellar` / `stellar-cli` 22+ — verified against 27.1.0) for deployment
   and admin invocations
 - **Network access** to a Soroban RPC endpoint for anything on-chain
@@ -519,10 +556,52 @@ sha256sum -c stellar_agent_guard_contracts.wasm.sha256
 # → stellar_agent_guard_contracts.wasm: OK
 ```
 
-Then cross-check `provenance.txt` from the same release (it pins the git tag
-and commit the WASM was built from — rebuild that tag yourself and compare
-hashes for a reproducibility check) and `sbom.cdx.json` for the dependency
-inventory. See [SECURITY.md](SECURITY.md) for the full verification steps.
+Then cross-check `provenance.txt` from the same release (it pins the git tag,
+commit, and `rustc` version the WASM was built from — see
+[Reproducible builds](#reproducible-builds)) and `sbom.cdx.json` for the
+dependency inventory. See [SECURITY.md](SECURITY.md) for the full verification
+steps.
+
+### Reproducible builds
+
+The released WASM ships with a SHA-256 checksum, and downstream bytecode
+verification pins that hash. A pinned hash only means something if the build is
+deterministic, so the compiler is pinned too:
+
+- `rust-toolchain.toml` pins `channel`, the `wasm32v1-none` target, and the
+  `clippy`/`rustfmt` components. It is the single place the version is written;
+  every workflow reads it from there.
+- CI job `wasm-reproducible` builds the contract **twice in clean target
+  directories** and fails unless both builds produce the same SHA-256. It runs
+  no cargo cache on purpose — a warm `target/` could hide non-determinism.
+
+Run exactly the same check locally:
+
+```bash
+./scripts/check-wasm-reproducible.sh
+# toolchain: rustc 1.99.0 …
+# build A: 3f1c…
+# build B: 3f1c…
+# OK: both builds produced 3f1c…
+```
+
+Two honest caveats:
+
+- **No hash was pinned in this repository before this pin existed.** The
+  `f47919…` prefix some consumers reference predates `rust-toolchain.toml`: it
+  was produced by whatever `stable` happened to be on the build runner at the
+  time, and it cannot be reproduced from this repository today — the compiler
+  version that produced it was never recorded. Treat any hash from before the
+  pin as historical, not verifiable. From this commit on, every release records
+  the exact `rustc` version in `provenance.txt`, and the double-build check
+  keeps that record meaningful.
+- The script compares **two builds of the same working tree**. It proves the
+  build is deterministic; it does not prove your tree matches a release tag.
+  To check that, check out the tag and compare against the published
+  `stellar_agent_guard_contracts.wasm.sha256`.
+
+Bumping `channel` in `rust-toolchain.toml` changes the artifact hash. Do it in
+its own commit so the hash change is reviewable on its own.
 
 ## How it works
 
@@ -593,7 +672,8 @@ On-chain state, keyed per the `DataKey` enum in `src/types.rs` (SPEC §3):
 | Key | Type | Kind | Purpose |
 |---|---|---|---|
 | `Initialized` | `bool` | instance | one-time flag for `initialize` |
-| `Admin` | `Address` | instance | policy admin; set once at `initialize` |
+| `Admin` | `Address` | instance | policy admin; set at `initialize`, rotated via propose/confirm |
+| `PendingAdmin` | `Address` | instance | proposed admin awaiting confirmation (absent = none pending) |
 | `AgentPubkey` | `BytesN<32>` | instance | the registered agent's Ed25519 public key |
 | `Policy` | `PolicyConfig` | persistent | current policy (`None` = default-deny) |
 | `Window` | `WindowState` | persistent | rolling spend ledger (`total` + chronological `entries`) |
@@ -667,6 +747,12 @@ Stellar Agent Guard operates across three dedicated repositories:
   with a machine-readable scenario index in
   [`tests/fixtures/index.json`](tests/fixtures/index.json) (scenario → tx hash →
   ledger → expected reason → contract ID) that CI keeps consistent with the prose.
+- [`decision-table.json`](decision-table.json) — the machine-readable twin of the
+  SPEC §4 decision table: every row, the `Error` variants the engine can return
+  for it, and the test that pins each one. `tests/decision_table.rs` fails the
+  build if that file, the SPEC §4 table, the “How it works” walkthrough above, the
+  `Error` enum, and `src/engine.rs` disagree — so the three artifacts cannot drift
+  apart silently.
 - `SPEC.md` — the full architecture specification.
 
 ## ✅ Verified against live testnet
@@ -684,6 +770,23 @@ Phase 1 was proven end-to-end against a **real deployed contract** on Stellar te
 - **Admin unfreeze** (DMS reversal):
   `dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5`
 
+The fixture index records these setup and transfer transactions:
+
+| Fixture transaction | Hash |
+|---|---|
+| Upload guard WASM | `d43edd086ac9b376371f33b72ad89b37a9b6b4d43bf34dfea9717a29688b887c` |
+| Create guard contract | `a968bc517af34b0cb1ed53a4523d1cb8b9e562e9a9b1e8367acfabcbf18211b1` |
+| Create token (SAC) | `19f1e36cf4c67feab4e6eb490b4ef424a7fbcc978fcbfa2cad96a079e93ec828` |
+| Mint tokens to guard | `bdeab1808f83c8db3c7a8cf675690afa7039a7aaae5e92fdc9fb7d6700adfeb2` |
+| Initialize guard | `cb17b7b1c65bff74b6bc99f67fe3cf1070c7a28f14bdd71527ba60c9d4a81264` |
+| Policy for scenarios 1-4 | `6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174` |
+| Recipient trustline | `81479a058dd03457fb91e7b129f941eef64e0bc0752a7f0a5fb3928d5f644fb4` |
+| Policy with DMS grace | `1ddad388f914e267b282855ddc8e5478fabfb8542e7798e4402447e5341e3f9a` |
+| Admin unfreeze | `dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5` |
+| Allowed transfer | `4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8` |
+| Debug-era transfer | `6f5dd410d62e8d83b4d70330d3541ac40678f05b545a4584cbf8e4dce6d07d9b` |
+| Transfer after unfreeze | `b39457afa59f20d6ac90cd137e917c7efd51e27af4913c6c6308a6e5d0eff512` |
+
 The five scenarios — allowed transfer, per-tx cap block, rolling-window cap block,
 recipient-allowlist block, and dead-man trigger + reversal — plus the setup transaction
 hashes, the event output from the contract's own `auth_checked` topics, and full
@@ -699,6 +802,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 |---|---|
 | Custom-account `__check_auth` enforcement | ✅ |
 | Per-transaction spend cap | ✅ |
+| Per-asset per-transaction spend caps (override global `per_tx_cap`) | ✅ |
 | Rolling window spend cap | ✅ |
 | Recipient allowlist (SAC transfers) | ✅ |
 | Recipient denylist / blocklist (SAC transfers) | ✅ |
@@ -710,11 +814,11 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-68 tests (unit + integration) cover the policy decision engine — including the regression
+206 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `68 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green this session: `206 passed; 0 failed`.
 
 ```bash
 cargo test
@@ -724,8 +828,10 @@ cargo fmt --check
 
 Every push runs these gates on GitHub Actions (`.github/workflows/ci.yml`, job `ci`):
 format → clippy (`-D warnings`) → unit + integration tests → contract wasm build →
-`agent-tx` build. `main` is protected by a branch ruleset — the `ci` check must be green
-and a review approved for changes to merge.
+`agent-tx` build. A second job, `wasm-reproducible`, builds the contract twice in clean
+target directories and fails unless both builds hash identically (see
+[Reproducible builds](#reproducible-builds)). `main` is protected by a branch ruleset —
+the `ci` check must be green and a review approved for changes to merge.
 
 ## Topics
 

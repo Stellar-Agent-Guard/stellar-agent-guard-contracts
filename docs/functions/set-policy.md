@@ -45,6 +45,7 @@ The following rules are checked before anything is written. Invalid config retur
 
 - `per_tx_cap >= 0` and `window_cap >= 0` (no negative caps)
 - If `window_cap > 0` then `window_secs > 0`
+- `per_tx_cap <= window_cap` when both are enabled (both > 0)
 - If `active_until != 0` then `active_until > active_from`
 - No duplicate addresses in `assets` or `recipients`
 - No duplicate protocol contracts

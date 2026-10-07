@@ -13,8 +13,16 @@ We welcome contributions! Here's how to get started.
 git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
+# The toolchain is pinned in rust-toolchain.toml (channel + wasm32v1-none target
+# + clippy/rustfmt). rustup applies it automatically from this directory, so
+# every cargo command below runs on the pinned compiler — install it once with
+# `rustup toolchain install`, or just run a cargo command and let rustup do it.
+
 # Run tests (31 unit + integration tests, no network needed)
 cargo test
+
+# Audit numeric, hash, transaction, and contract-ID claims before README PRs
+scripts/verify-readme.sh
 
 # Lint (clippy all + pedantic are denied via [lints.clippy])
 cargo clippy --all-targets --all-features
@@ -25,9 +33,18 @@ cargo fmt --check
 # Build the contract wasm (Soroban 27 targets wasm32v1-none)
 cargo build --release --target wasm32v1-none
 
+# Prove the wasm build is deterministic (builds twice, diffs SHA-256);
+# this is the same check CI's `wasm-reproducible` job runs.
+./scripts/check-wasm-reproducible.sh
+
 # Build the agent-tx submission helper
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
+
+The pin is what makes the released WASM hash verifiable: a `stable` toolchain
+would move and change the bytes without any change to the repository. Bumping
+`channel` in `rust-toolchain.toml` changes the released artifact hash, so do it
+in its own commit (issue #67).
 
 The `stellar` CLI cannot sign Soroban authorization entries whose address is a
 contract. Heartbeat testing uses the guard contract's own address, so the CLI
@@ -62,6 +79,16 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    the quoted sentence itself changes). Copies in sibling repositories
    (`stellar-agent-guard-sdk`, `stellar-agent-guard-dashboard`) are out of scope
    here; they are tracked in their own issue trackers.
+
+   The decision table is single-sourced too, and mechanically so (issue #76):
+   [`decision-table.json`](decision-table.json) is the source of truth, the SPEC
+   §4 table is rendered from it, and `tests/decision_table.rs` fails `cargo test`
+   — therefore CI — when the JSON, the SPEC §4 table, the README walkthrough, the
+   `Error` enum, and `src/engine.rs` drift apart. When you change what a call can
+   be blocked with, the order is: `src/engine.rs` → `decision-table.json` (row,
+   reason, and the test that pins it) → paste the rendered row into SPEC §4 →
+   run `cargo test`. Adding an `Error::` branch without a JSON row fails the
+   build on purpose.
 3. **`clippy::all` and `clippy::pedantic` clean** — enforced in CI with
    `-D warnings`.
 4. **`cargo fmt` clean** — enforced in CI.
@@ -79,6 +106,10 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    its agent/operator/auditor columns instead of inventing new phrasing.
 
 ## Commit Discipline (strict)
+
+`PolicyConfig` changes must update `policy.schema.json` and its conformance test in the same
+PR. The Rust contract remains authoritative; the schema is the tooling/editor fast-feedback
+layer and must not silently diverge.
 
 1. **One commit per logical unit.** A bug fix, a feature, a doc change, a test
    change — each is its own commit. Do **not** batch unrelated fixes into one
@@ -126,6 +157,9 @@ examples/
 tools/
   agent-tx/          # Sign+submit helper for the custom-account address
 tests/fixtures/      # Real testnet evidence (tx hashes, contract IDs, events)
+tests/decision_table.rs  # Drift gate: SPEC §4 ↔ decision-table.json ↔ engine
+decision-table.json  # Machine-readable source of truth for the SPEC §4 table
+rust-toolchain.toml  # Pinned toolchain: reproducible WASM hashes (issue #67)
 SPEC.md              # Architecture specification (mechanism is settled)
 ```
 
