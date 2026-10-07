@@ -882,6 +882,12 @@ impl PolicyEngine {
     /// window ledger. An allowed transfer is staged before the next item is
     /// evaluated, so the returned verdicts match the all-or-nothing admission
     /// rules used by `__check_auth`. The local ledger is discarded afterwards.
+    ///
+    /// # Panics
+    ///
+    /// This function can panic only if its internal decision list contains
+    /// more than `u32::MAX` entries. Soroban vectors are u32-indexed, so a
+    /// valid input batch cannot trigger this condition.
     #[allow(clippy::must_use_candidate)]
     pub fn check_batch(
         env: Env,
