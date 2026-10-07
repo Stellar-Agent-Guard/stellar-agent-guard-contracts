@@ -283,7 +283,10 @@ fn prune_entries(
     let mut high = n;
     while low < high {
         let mid = low + (high - low) / 2;
-        if let Some(entry) = entries.get(mid as u32) {
+        let Ok(index) = u32::try_from(mid) else {
+            return;
+        };
+        if let Some(entry) = entries.get(index) {
             if entry.ts.saturating_add(window_secs) <= now {
                 low = mid + 1;
             } else {
