@@ -888,36 +888,64 @@ impl PolicyEngine {
         asset: Address,
         transfers: Vec<BatchTransfer>,
     ) -> BatchCheckResult {
-        let cfg = persist_get::<PolicyConfig>(&env, &DataKey::Policy);
-        let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
-        let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let Some(snapshot) = AuthSnapshot::load(&env) else {
+            let mut verdicts = Vec::new(&env);
+            for i in 0..transfers.len() {
+                emit_auth(&env, false, Some(Error::NoPolicy), i);
+                verdicts.push_back(CheckResult::Blocked(Symbol::new(
+                    &env,
+                    Error::NoPolicy.reason(),
+                )));
+            }
+            return BatchCheckResult {
+                verdicts,
+                admissible: false,
+            };
+        };
+
+        let AuthSnapshot {
+            policy,
+            admin_frozen,
+            last_heartbeat,
+            mut ledger,
+            ..
+        } = snapshot;
         let now = env.ledger().timestamp();
         let self_addr = env.current_contract_address();
-        let mut ledger = load_ledger(&env);
+        let mut contexts = Vec::new(&env);
+        for transfer in transfers.iter() {
+            contexts.push_back(transfer_context(
+                &env,
+                &asset,
+                &transfer.to,
+                transfer.amount,
+            ));
+        }
+
+        let decisions = decide(
+            &env,
+            &self_addr,
+            Some(&policy),
+            &AccountState {
+                admin_frozen,
+                last_heartbeat,
+            },
+            &mut ledger,
+            now,
+            contexts,
+        );
         let mut verdicts = Vec::new(&env);
         let mut admissible = true;
-
-        for transfer in transfers.iter() {
-            let call = transfer_context(&env, &asset, &transfer.to, transfer.amount);
-            let result = match decide(
-                &env,
-                &self_addr,
-                cfg.as_ref(),
-                &AccountState {
-                    admin_frozen: frozen,
-                    last_heartbeat,
-                },
-                &mut ledger,
-                now,
-                vec![&env, call],
-            ) {
+        for (i, decision) in decisions.iter().enumerate() {
+            let context_index = u32::try_from(i).unwrap();
+            let result = match decision {
                 Decision::Allowed => {
-                    emit_auth(&env, true, None);
+                    emit_auth(&env, true, None, context_index);
                     CheckResult::Allowed
                 }
                 Decision::Blocked(error) => {
                     admissible = false;
-                    emit_auth(&env, false, Some(error));
+                    emit_auth(&env, false, Some(*error), context_index);
                     CheckResult::Blocked(Symbol::new(&env, error.reason()))
                 }
             };
