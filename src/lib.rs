@@ -1073,6 +1073,7 @@ mod policy_engine_type {
                 now,
                 vec![&env, call],
             );
+            // Rationale: one submitted context must yield one verdict; fail closed on an engine invariant violation instead of unwrapping.
             let Some(verdict) = verdicts.first() else {
                 panic_with_error!(&env, Error::DecisionInvariantViolation);
             };
@@ -1207,6 +1208,7 @@ mod policy_engine_type {
             } else {
                 match first_error {
                     Some(error) => Err(error),
+                    // Rationale: every auth context must yield a verdict; an empty result is an engine invariant violation.
                     None => panic_with_error!(&env, Error::DecisionInvariantViolation),
                 }
             }
