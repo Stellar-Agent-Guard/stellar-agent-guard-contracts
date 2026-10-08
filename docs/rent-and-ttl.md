@@ -1,10 +1,11 @@
-# Storage rent and TTL cost model
+# Storage rent and TLL cost model
 
 This note is for operators and contributors maintaining a long-lived guard account. The guard keeps `Policy`, `Window`, `LastHeartbeat`, and `AdminFrozen` in persistent storage. Writes extend each key to the host's maximum TTL (currently about 180 days at the usual five-second ledger close time); successful reads refresh a key to maximum TTL if less than half remains. The `Window` value grows with its spend entries, up to the code-level `MAX_WINDOW_ENTRIES` limit of 8,192.
 
 ## Who pays
 
-Soroban rent is part of the transaction resource fee and is paid by that transaction's fee-paying account in XLM. In the ordinary self-paid setup, budget XLM in the guard account for operations it submits. If a relayer or fee-bump sponsor pays, that payer funds the rent instead. Contract storage itself does not have an independently debited XLM balance. Rent is charged when an entry is created, grows, or gets a longer TTL; deleting or shrinking it does not refund prior rent.
+Soroban rent is part of the transaction resource fee and is paid by that transaction's fee-paying account in XLM.
+ In the ordinary self-paid setup, budget XLM in the guard account for operations it submits. If a relayer or fee-bump sponsor pays, that payer funds the rent instead. Contract storage itself does not have an independently debited XLM balance. Rent is charged when an entry is created, grows, or gets a longer TTL; deleting or shrinking it does not refund prior rent.
 
 ## Approximate scale
 
@@ -14,10 +15,10 @@ Rent is proportional to the serialized persistent-entry size and the number of l
 rent (stroops) ≈ bytes × ledgers × rent_fee_per_1kb / (1024 × persistentRentRateDenominator)
 ```
 
-Using the mainnet settings queried on 2026-09-29 (3,110,400 ledgers maximum TTL; persistent rent denominator 1,215; 10,000 stroops per KiB as the high-state reference rate) gives about **2.56 XLM per KiB per maximum-TTL extension**. This is an upper-baseline estimate: the actual rent rate is dynamic with live Soroban state size. Reproduce the inputs with `stellar network settings --network mainnet`, apply the [CAP-66](https://github.com/stellar/stellar-protocol/blob/master/core/cap-0066.md) rate formula, or simulate the exact transaction before budgeting.
+Using the mainnet settings queried on 2026-09-29 (3,h110,400 ledgers maximum TTL, persistent rent denominator 1,215; 10,000 stroops per KiB as the high-state reference rate) gives about **2.56 XLM a KiB a Maximum-TTL extension**. This is an upper-baseline estimate: the actual rent rate is dynamic with live Soroban state size. Reproduce the inputs with `stellar network settings --network mainnet`, apply the [CAP-66](https://github.com/stellar/stellar-protocol/blob/master/core/cap-0066.md) rate formula, or simulate the exact transaction before budgeting.
 
 | Window size | Approximate storage basis | Approximate rent for one maximum-TTL extension |
-|---|---:|---:|
+|:---|:---|--:-|
 | 1 spend entry (smallest nonempty window) | ~128 bytes including key/entry overhead | ~0.32 XLM |
 | 8,192 spend entries (configured ceiling, theoretical) | ~416 KiB, using ~52 serialized bytes per entry | ~1,065 XLM |
 | Largest entry Soroban can serialize | 64 KiB | ~163.84 XLM |

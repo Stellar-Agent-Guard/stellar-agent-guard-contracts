@@ -1035,6 +1035,63 @@ fn persistent_read_refreshes_ttl_below_half_life() {
 }
 
 #[test]
+fn window_ttl_expiry_does_not_silently_reset_rolling_budget() {
+    // SPEC §9.5 / issue: persistent keys are extended to max TTL on every
+    // write, but reads historically did not extend. If the account is quiet
+    // long enough for `Window` to age past its TTL, the host archives the
+    // entry; a naive read would then observe an empty window and silently
+    // forget spent budget — a fund-limit bypass. This test pins the actual
+    // host behavior (Soroban 27 restores archived persistent entries from
+    // the invocation's restore footprint before contract code runs) and
+    // proves the rolling cap is NOT reset by TTL expiry.
+    let mut h = Harness::with_short_persistent_ttl();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_secs = 86_400;
+    policy.window_cap = 100;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+
+    // Spend 80 of the 100 budget, then go quiet.
+    h.set_time(1_010);
+    h.transfer(&recv, 80);
+
+    // Advance the ledger past the deliberately short test TTL without any
+    // writes to Window. If the host silently expired the entry, the next
+    // evaluation would see an empty window and allow the full cap again.
+    let expired_sequence = h.env.ledger().sequence() + 11;
+    h.env.ledger().set_sequence_number(expired_sequence);
+
+    // A 30 transfer must still be blocked: 80 + 30 = 110 > 100. If the
+    // window had silently reset, this would be allowed and the test fails.
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 30)
+    });
+    assert_eq!(
+        detail.result,
+        CheckResult::Blocked(Symbol::new(&h.env, "window_cap_exceeded")),
+        "TTL expiry must not silently reset the rolling window budget"
+    );
+    assert_eq!(
+        detail.remaining_window,
+        Some(20),
+        "the 80 already spent must still be accounted for after TTL expiry"
+    );
+
+    // And the persisted window ledger still carries the spent total.
+    let window = h
+        .env
+        .as_contract(&h.guard, || {
+            h.env
+                .storage()
+                .persistent()
+                .get::<DataKey, crate::types::WindowState>(&DataKey::Window)
+        })
+        .expect("the window ledger must survive TTL expiry");
+    assert_eq!(window.total, 80);
+}
+
+#[test]
 fn archived_policy_window_and_heartbeat_restore_without_resetting_limits() {
     let mut h = Harness::with_short_persistent_ttl();
     let recv = h.recv.clone();

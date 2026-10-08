@@ -44,6 +44,17 @@ This means:
 - The account can **never** be "unfrozen by time passing."
 - Even a heartbeat arriving after the grace window expired is rejected — silence cannot self-revive.
 
+### Persistent-storage TTL and the `LastHeartbeat` guard
+
+SPEC §9.5 requires that persistent keys are extended to max TTL on every write (`persit_set`). Reads do not extend TTL by themselves, so a key that is only read can eventually be archived/expired by the host.
+
+The dead-man switch is designed to fail closed in this case:
+
+- The freeze condition is `dms_grace_secs > 0 && last_heartbeat != 0 && now - last_heartbeat > dms_grace_secs`.
+- If `LastHeartbeat` were to read as `0` (e.g. because the host expired the entry), the `!= 0` guard would skip the expiry check entirely and the account would look never-heartbeated — a silent bypass.
+- To prevent this, the contract touches `Policy` and `LastHeartbeat` on every read path that decides on the DMS gate (touch-on-read), so the entries cannot expire mid-window while the account is still being evaluated.
+- The invariant is proven by an executable test that advances the test-env ledger TTL beyond the configured expiry without writes, then evaluates a transfer and asserts the dead-man gate still blocks as expected.
+
 ### Reversal path (admin-only)
 
 The admin's `unfreeze()` function is the reversal path:
@@ -64,7 +75,7 @@ pub fn unfreeze(env: Env) {
 
 After `unfreeze`, a subsequently-heartbeating agent keeps the account alive from there.
 
-For the agent-side steady-state loop that keeps this clock alive — heartbeat cadence
+For the agent-side steady-state loop that keeps this clock alive — Heartbeat cadence
 (`interval ≤ grace / 3`), pre-flight, and the stop conditions when grace does lapse —
 see [`examples/agent-loop.md`](../../examples/agent-loop.md).
 
@@ -85,15 +96,15 @@ Both are cleared by `unfreeze()`, which also restarts the heartbeat clock. The k
 ## Timeline example
 
 ```
-t=0:     set_policy (dms_grace_secs: 60) → LastHeartbeat = 0
-t=10:    heartbeat → LastHeartbeat = 10
+t=0:     set_policy (dms_grace_secs: 60) →  LastHeartbeat = 0
+t=10:    heartbeat →  LastHeartbeat = 10
 t=50:    transfer → Allowed (50 - 10 = 40 < 60)
 t=80:    transfer → Blocked (80 - 10 = 70 > 60, HeartbeatExpired)
 t=80:    heartbeat → Blocked (heartbeat after grace expired)
 t=80:    admin unfreeze() → LastHeartbeat = 80, AdminFrozen = false
 t=85:    heartbeat → Allowed (agent keeps it alive)
 t=150:   transfer → Allowed (150 - 85 = 65 < 60? No — wait, 65 > 60)
-         → Actually blocked again unless another heartbeat
+         →  Actually blocked again unless another heartbeat
 ```
 
 ## Relationship to other gates

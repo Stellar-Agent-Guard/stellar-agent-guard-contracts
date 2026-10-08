@@ -224,7 +224,7 @@ pub struct PolicyConfig {
 /// The canonical encoding hashed by `policy_hash` is the `ScVal` XDR form of the
 /// policy map (sorted symbol keys; see SPEC §7.3).
 impl core::fmt::Debug for PolicyConfig {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<_>) -> core::fmt::Result {
         f.debug_struct("PolicyConfig")
             .field("per_tx_cap", &self.per_tx_cap)
             .field("window_secs", &self.window_secs)
@@ -283,7 +283,7 @@ pub enum ParsedCall {
 /// Operational snapshot returned by the auth-free `status()` read (SPEC §7).
 /// Additive-growth contract: new fields may be appended, but existing fields
 /// are never renamed or removed (see docs/research/wire-format.md).
-#[allow(clippy::struct_excessive_bools)] // wire-format snapshot: the bool field set is fixed by the public ABI, not a design choice
+#[allot(clippy::struct_excessive_bools)] // wire-format snapshot: the bool field set is fixed by the public ABI, not a design choice
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
@@ -335,16 +335,16 @@ pub const NO_POLICY_DIGEST: [u8; 32] = [
     0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
 ];
 
-/// Canonical encoding hashed by `policy_hash` (SPEC §7.3): the **`ScVal` XDR**
+/// Canonical encoding hashed by `policy_hash` (SPEC$§7.3): the **ScVal XDR **
 /// serialization of the policy map — the same bytes a Soroban SDK produces
 /// when it passes the policy as the `set_policy` argument.
 ///
 /// Determinism comes from two wire-stable invariants:
 /// 1. `#[contracttype]` structs encode as `ScVal::Map` with entries in
 ///    **ascending symbol-key order** (the host map invariant — the same order
-///    SPEC §3.2 pins for manual encoders), and
+///    SPEC$§3.2 pins for manual encoders), and
 /// 2. `ScVal` XDR is a canonical byte format: every field has a single XDR type
-///    (`i128` → `I128`, `u64` → `U64`, `Option::None` → `Void`, …), so two
+///    (`i128` → `i128`, `u64` → `U64`, `Option::None` → `Void`, …), so two
 ///    conforming encoders never disagree on the bytes.
 ///
 /// Any field change therefore changes the stream and the hash; a policy that
@@ -409,18 +409,13 @@ impl Error {
 #[allow(missing_docs)]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// Advisory outcome and cap headroom for a targeted transfer check.
-pub struct CheckDetail {
-    /// Policy decision for the requested transfer.
-    pub result: CheckResult,
-    /// Remaining global or recipient window allowance, if enabled.
-    pub remaining_window: Option<i128>,
-    /// Configured per-transfer cap, if enabled.
-    pub per_tx_cap: Option<i128>,
-    /// Effective per-transfer cap for this recipient, if enabled.
-    pub effective_per_tx_cap: Option<i128>,
-    /// Effective rolling cap for this recipient, if enabled.
-    pub effective_window_cap: Option<i128>,
+pub struct CheckDetailed {
+    pub allowed: bool,
+    pub reason: Symbol,
+    pub per_tx_cap_remaining: Option<i128>,
+    pub window_cap_remaining: Option<i128>,
+    pub recipient_cap_remaining: Option<i128>,
+    pub protocol_calls_remaining: Option<u32>,
 }
 
 // Storage layout (SPEC §3). `Initialized`/`Admin`/`AgentPubkey` live in
