@@ -13,6 +13,9 @@
 //!
 //! The test only reads files; it never touches the network or a ledger.
 
+// This integration test uses panics for failed assertions; it is not shipped contract code.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
