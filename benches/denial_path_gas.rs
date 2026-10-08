@@ -12,12 +12,13 @@ extern crate std;
 use core::hint::black_box;
 use std::println;
 
+use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{
     auth::{Context, ContractContext},
     vec, Address, Env, IntoVal, Symbol, TryFromVal, Val, Vec,
 };
 use stellar_agent_guard_contracts::testutils::{
-    decide, AccountState, Decision, Ledger, PolicyConfig, ProtocolRule,
+    decide, AccountState, Decision, Ledger, PolicyConfig, ProtocolRule, RecipientCap,
 };
 
 /// Build a test contract address from a byte
@@ -29,9 +30,13 @@ fn addr(env: &Env, n: u8) -> Address {
 
 /// Build a transfer Context for the given asset, recipient, and amount
 fn transfer_ctx(env: &Env, asset: u8, to: u8, amount: i128) -> Context {
+    transfer_ctx_to(env, asset, &addr(env, to), amount)
+}
+
+fn transfer_ctx_to(env: &Env, asset: u8, to: &Address, amount: i128) -> Context {
     let mut args: Vec<Val> = Vec::new(env);
     args.push_back(addr(env, 9).into_val(env)); // from (ignored)
-    args.push_back(addr(env, to).into_val(env));
+    args.push_back(to.into_val(env));
     args.push_back(amount.into_val(env));
     Context::Contract(ContractContext {
         contract: addr(env, asset),
@@ -98,6 +103,13 @@ where
     let instructions = budget.cpu_instruction_cost();
     println!("{name}: {instructions} instructions");
     instructions
+}
+
+fn assert_cpu_ceiling(name: &str, actual: u64, ceiling: u64) {
+    assert!(
+        actual <= ceiling,
+        "{name} used {actual} CPU instructions; ceiling is {ceiling}"
+    );
 }
 
 #[allow(clippy::too_many_lines, unused_mut, clippy::similar_names)]
@@ -372,6 +384,127 @@ fn main() {
             vec![&env, transfer_ctx(&env, 1, 2, 5)],
         )
     });
+
+    // ─── Worst-case bounded input sizes for CI/reference tracking ───
+    let mut p_max_lists = base_policy(&env);
+    p_max_lists.assets = Vec::new(&env);
+    p_max_lists.recipients = Vec::new(&env);
+    p_max_lists.blocked_recipients = Vec::new(&env);
+    p_max_lists.protocols = Vec::new(&env);
+    p_max_lists.recipient_window_caps = Vec::new(&env);
+    for i in 0_u8..=u8::MAX {
+        p_max_lists.assets.push_back(addr(&env, i));
+        let recipient = Address::generate(&env);
+        p_max_lists
+            .blocked_recipients
+            .push_back(Address::generate(&env));
+        p_max_lists.recipient_window_caps.push_back(RecipientCap {
+            recipient: recipient.clone(),
+            cap: 0,
+        });
+        p_max_lists.recipients.push_back(recipient);
+        p_max_lists.protocols.push_back(ProtocolRule {
+            contract: addr(&env, i),
+            fns: None,
+        });
+    }
+    let last_recipient = p_max_lists.recipients.get(255).unwrap();
+    let mut max_list_ledger = Ledger::empty(&env);
+    let max_asset_list_cost = measure_decide(
+        &env,
+        "Stress: 256-entry lists, successful tail lookup",
+        || {
+            decide(
+                &env,
+                &self_addr,
+                Some(&p_max_lists),
+                &alive(),
+                &mut max_list_ledger,
+                1000,
+                vec![&env, transfer_ctx_to(&env, 255, &last_recipient, 1)],
+            )
+        },
+    );
+    assert_cpu_ceiling(
+        "256-entry asset/recipient/deny/override lists",
+        max_asset_list_cost,
+        1_250_000,
+    );
+
+    let mut max_protocol_ledger = Ledger::empty(&env);
+    let max_protocol_list_cost = measure_decide(
+        &env,
+        "Stress: 256-entry protocol list, successful tail lookup",
+        || {
+            decide(
+                &env,
+                &self_addr,
+                Some(&p_max_lists),
+                &alive(),
+                &mut max_protocol_ledger,
+                1000,
+                vec![&env, proto_ctx(&env, 255, "swap")],
+            )
+        },
+    );
+    assert_cpu_ceiling("256-entry protocol list", max_protocol_list_cost, 500_000);
+
+    for size in [0_u32, 100, 8192] {
+        let mut policy = base_policy(&env);
+        policy.window_cap = 1_000_000;
+        policy.window_secs = 10_000;
+        let mut ledger = Ledger::empty(&env);
+        for i in 0..size {
+            ledger.admit(u64::from(i), 1);
+        }
+        let ceiling = match size {
+            0 | 100 => 35_000,
+            8192 => 60_000,
+            _ => unreachable!(),
+        };
+        let cost = measure_decide(
+            &env,
+            &std::format!("Stress: {size} live window entries"),
+            || {
+                decide(
+                    &env,
+                    &self_addr,
+                    Some(&policy),
+                    &alive(),
+                    &mut ledger,
+                    u64::from(size) + 1,
+                    vec![&env, transfer_ctx(&env, 1, 2, 1)],
+                )
+            },
+        );
+        assert_cpu_ceiling(&std::format!("{size}-entry rolling window"), cost, ceiling);
+    }
+
+    let mut p_batch = base_policy(&env);
+    p_batch.protocols = vec![
+        &env,
+        ProtocolRule {
+            contract: addr(&env, 3),
+            fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+        },
+    ];
+    let mut contexts = Vec::new(&env);
+    for _ in 0..16 {
+        contexts.push_back(proto_ctx(&env, 3, "swap"));
+    }
+    let mut batch_ledger = Ledger::empty(&env);
+    let batch_cost = measure_decide(&env, "Stress: 16-context protocol batch", || {
+        decide(
+            &env,
+            &self_addr,
+            Some(&p_batch),
+            &alive(),
+            &mut batch_ledger,
+            1000,
+            contexts.clone(),
+        )
+    });
+    assert_cpu_ceiling("16-context protocol batch", batch_cost, 150_000);
 
     println!();
     println!("=== Summary ===");
