@@ -81,7 +81,7 @@ fn extract_functions(src: &str) -> Vec<String> {
         let body = &lines[start + 1..start + 1 + end_offset];
         let mut i = 0;
         while i < body.len() {
-            let signature = body[i].strip_prefix("    ").unwrap_or("");
+            let signature = body[i].trim_start();
             if signature.starts_with(method_prefix) {
                 let mut sig = signature.to_string();
                 while !sig.contains('{') && i + 1 < body.len() {
