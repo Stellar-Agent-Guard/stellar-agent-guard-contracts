@@ -373,6 +373,26 @@ fn main() {
         )
     });
 
+    // ─── 8192 Stale Entries Prune Cost + Authorization ───
+    let mut p_heavy = base_policy(&env);
+    p_heavy.window_cap = 100_000;
+    p_heavy.window_secs = 1000;
+    let mut ledger_heavy = Ledger::empty(&env);
+    for i in 0..8192 {
+        ledger_heavy.admit(i, 1);
+    }
+    measure_decide(&env, "Prune 8192 stale entries + authorization", || {
+        decide(
+            &env,
+            &self_addr,
+            Some(&p_heavy),
+            &alive(),
+            &mut ledger_heavy,
+            100_000, // far in future, making all 8192 entries stale
+            vec![&env, transfer_ctx(&env, 1, 2, 5)],
+        )
+    });
+
     println!();
     println!("=== Summary ===");
     println!("Gate order in SPEC §4 is semantic-first (admin freeze → dead-man → policy gates → classification).");
