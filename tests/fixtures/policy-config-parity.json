@@ -1,0 +1,16 @@
+{
+  "active_from": 0,
+  "active_until": 0,
+  "allow_any_recipient": false,
+  "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
+  "blocked_recipients": [],
+  "dms_grace_secs": 60,
+  "paused": false,
+  "per_tx_cap": "1000",
+  "protocol_calls_per_window": 0,
+  "protocols": [],
+  "recipient_window_caps": [],
+  "recipients": ["GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"],
+  "window_cap": "150",
+  "window_secs": 60
+}

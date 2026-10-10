@@ -95,7 +95,8 @@ The full decision table from SPEC §4, evaluated against ledger time (which Soro
 | Key | Type | Kind | Purpose |
 |---|---|---|---|
 | `Initialized` | `bool` | instance | One-time flag for `initialize` |
-| `Admin` | `Address` | instance | Policy admin; set once at `initialize` |
+| `Admin` | `Address` | instance | Policy admin; set at `initialize`, rotated via §7.2 handover |
+| `PendingAdmin` | `Address` | instance | Proposed admin awaiting confirmation (absent = none pending) |
 | `AgentPubkey` | `BytesN<32>` | instance | Agent's Ed25519 public key |
 | `Policy` | `PolicyConfig` | persistent | Current policy (`None` = default-deny) |
 | `Window` | `WindowState` | persistent | Rolling spend ledger |

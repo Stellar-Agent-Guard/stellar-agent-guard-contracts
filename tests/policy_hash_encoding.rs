@@ -40,9 +40,9 @@ fn addr(env: &Env, strkey: &str) -> Address {
 /// per-protocol function allowlist, so the encoder's nested shapes are covered.
 fn full_policy(env: &Env) -> PolicyConfig {
     PolicyConfig {
-        per_tx_cap: 1000,
+        per_tx_cap: 100,
         window_secs: 60,
-        window_cap: 150,
+        window_cap: 1000,
         assets: vec![env, addr(env, ASSET_STRKEY)],
         protocols: vec![
             env,
@@ -60,6 +60,7 @@ fn full_policy(env: &Env) -> PolicyConfig {
             },
         ],
         blocked_recipients: vec![env, addr(env, OTHER_STRKEY)],
+        asset_caps: soroban_sdk::Vec::new(env),
         allow_any_recipient: false,
         active_from: 0,
         active_until: 0,
@@ -187,6 +188,7 @@ fn empty_policy_hashes_differently_from_no_policy() {
         recipients: vec![&env],
         recipient_window_caps: soroban_sdk::Vec::new(&env),
         blocked_recipients: soroban_sdk::Vec::new(&env),
+        asset_caps: soroban_sdk::Vec::new(&env),
         allow_any_recipient: false,
         active_from: 0,
         active_until: 0,
@@ -234,7 +236,7 @@ fn mutated_policies(env: &Env) -> std::vec::Vec<(&'static str, PolicyConfig)> {
     let mut cases: std::vec::Vec<(&'static str, PolicyConfig)> = std::vec::Vec::new();
 
     let mut c = base.clone();
-    c.per_tx_cap = 2000;
+    c.per_tx_cap = 500;
     cases.push(("per_tx_cap", c));
 
     let mut c = base.clone();
@@ -242,7 +244,7 @@ fn mutated_policies(env: &Env) -> std::vec::Vec<(&'static str, PolicyConfig)> {
     cases.push(("window_secs", c));
 
     let mut c = base.clone();
-    c.window_cap = 300;
+    c.window_cap = 2000;
     cases.push(("window_cap", c));
 
     let mut c = base.clone();
@@ -367,6 +369,7 @@ fn offchain_reproducer_matches_the_on_chain_hash() {
         recipients: soroban_sdk::Vec::new(&env),
         recipient_window_caps: soroban_sdk::Vec::new(&env),
         blocked_recipients: soroban_sdk::Vec::new(&env),
+        asset_caps: soroban_sdk::Vec::new(&env),
         allow_any_recipient: true,
         active_from: 7,
         active_until: 0,
@@ -470,6 +473,7 @@ mod vec_order_note {
             recipients: soroban_sdk::vec![e, a.clone(), b.clone()],
             recipient_window_caps: soroban_sdk::Vec::new(e),
             blocked_recipients: soroban_sdk::Vec::new(e),
+            asset_caps: soroban_sdk::Vec::new(e),
             allow_any_recipient: false,
             active_from: 0,
             active_until: 0,

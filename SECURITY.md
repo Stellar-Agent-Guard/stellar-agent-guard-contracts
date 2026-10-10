@@ -136,7 +136,14 @@ Before deploying a released artifact:
    do not deploy it.
 2. Confirm `provenance.txt` pins the git tag and commit you expect, then
    rebuild that tag yourself (`cargo build --release --target wasm32v1-none`)
-   and compare hashes for a reproducibility check.
+   and compare hashes for a reproducibility check. The compiler is pinned in
+   `rust-toolchain.toml`, so `rustup` builds that tag with the same `rustc`
+   version the release used; run `./scripts/check-wasm-reproducible.sh` to
+   confirm your environment is deterministic before trusting the comparison
+   (issue #67). Hashes published **before** that pin existed cannot be
+   reproduced from this repository — the toolchain that produced them was never
+   recorded — so verify those by checksum and provenance only, and prefer a
+   release cut after the pin.
 3. Diff the SBOM component list against a locally regenerated one as described
    above.
 

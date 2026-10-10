@@ -52,6 +52,7 @@ functions it needs — everything else is default-deny.
   "active_until": 0,
   "allow_any_recipient": false,
   "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
+  "blocked_recipients": [],
   "dms_grace_secs": 300,
   "paused": false,
   "per_tx_cap": "50000",
@@ -61,6 +62,8 @@ functions it needs — everything else is default-deny.
       "fns": ["swap", "add_liquidity"]
     }
   ],
+  "protocol_calls_per_window": 0,
+  "recipient_window_caps": [],
   "recipients": ["GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"],
   "window_cap": "250000",
   "window_secs": 300
@@ -93,10 +96,13 @@ freezing the account.
   "active_until": 0,
   "allow_any_recipient": false,
   "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
+  "blocked_recipients": [],
   "dms_grace_secs": 86400,
   "paused": false,
   "per_tx_cap": "1000",
   "protocols": [],
+  "protocol_calls_per_window": 0,
+  "recipient_window_caps": [],
   "recipients": [
     "GBQ6OQUM5FTH7M5AU4PXFGB5GZXDF742E6ORZUP6UUJ6IHA653Z6LPQL",
     "GCR2RCC7QOFAHRNGHTAMQ4VZFXSG2ICZGL6DGW7X2OMKOJHY2MAWJANI"
@@ -131,10 +137,13 @@ allowlists are empty, so even an unpause without further edits cannot move funds
   "active_until": 0,
   "allow_any_recipient": false,
   "assets": [],
+  "blocked_recipients": [],
   "dms_grace_secs": 604800,
   "paused": true,
   "per_tx_cap": "0",
   "protocols": [],
+  "protocol_calls_per_window": 0,
+  "recipient_window_caps": [],
   "recipients": [],
   "window_cap": "0",
   "window_secs": 86400
@@ -168,10 +177,13 @@ savings account an agent can top up but never meaningfully spend from.
   "active_until": 0,
   "allow_any_recipient": false,
   "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
+  "blocked_recipients": [],
   "dms_grace_secs": 3600,
   "paused": false,
   "per_tx_cap": "100",
   "protocols": [],
+  "protocol_calls_per_window": 0,
+  "recipient_window_caps": [],
   "recipients": ["GCDCESJSIFS2K2MI5OIUWJUJZVEM2WM2PBEAZMFRC5QU7HVJETCXYC3G"],
   "window_cap": "500",
   "window_secs": 3600

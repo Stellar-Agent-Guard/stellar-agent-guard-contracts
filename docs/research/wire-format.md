@@ -131,6 +131,7 @@ Pre-flight simulation of an SAC transfer decision. Returns an enum with two vari
 | `not_initialized` | `NotInitialized` |
 | `invalid_config` | `InvalidConfig` |
 | `invalid_amount` | `InvalidAmount` |
+| `no_pending_admin` | `NoPendingAdmin` |
 | `admin_frozen` | `AdminFrozen` |
 | `heartbeat_expired` | `HeartbeatExpired` |
 | `no_policy` | `NoPolicy` |

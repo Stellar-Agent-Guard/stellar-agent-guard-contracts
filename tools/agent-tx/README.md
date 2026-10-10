@@ -159,3 +159,31 @@ It does not increment the account sequence or broadcast a transaction.
 require `--agent-secret` (or `AGENT_SECRET`). They are distinct from the
 non-broadcasting `preflight` command. See the repository README for the
 submission error mapping and troubleshooting guidance.
+
+## Planned: generic `invoke` subcommand (scenario 7)
+
+`transfer` and `heartbeat` only build SAC-transfer and self-call auth entries,
+so the protocol-allowlist proof (SPEC section 11, scenario 7) needs a generic
+call path. The executing PR adds `invoke`, reusing the existing
+simulate-then-submit flow (`run`) and the `Call::invocation` auth-entry
+construction with a parameterized variant:
+
+```text
+agent-tx invoke --guard C... --contract C... --fn <name> [--arg <type:value> ...] --agent-secret S...
+```
+
+Contract for the implementation (kept small on purpose):
+
+- New `Call::Invoke { contract: ScAddress, fn_name: ScSymbol, args: Vec<ScVal> }`
+  variant; `invocation()` returns it verbatim as the `InvokeContractArgs` for
+  both the operation and the guard's auth entry root — the same "exact args in
+  both places" rule `Transfer` follows today.
+- `--arg` repeats; each value parses as `address:<C|G...>`, `i128:<n>`,
+  `u64:<n>`, or `symbol:<name>` (extend only with a documented reason; the
+  scenario-7 protocol contract needs no more than this).
+- Unknown `--arg` types and malformed values fail before any simulation, with
+  exit code `2` and no broadcast.
+- Admit/block reporting and exit codes match `transfer` (admitted submits and
+  prints the hash; `--expect-blocked` inverts the verdict for deny runs 7b/7c).
+- Unit tests mirror the existing `MockPreflightRpc` exit-code tests for at
+  least one admit and one deny shape.
