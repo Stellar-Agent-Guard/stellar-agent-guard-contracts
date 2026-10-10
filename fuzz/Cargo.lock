@@ -1793,6 +1793,7 @@ dependencies = [
  "libfuzzer-sys",
  "soroban-sdk",
  "stellar-agent-guard-contracts",
+ "stellar-xdr",
 ]
 
 [[package]]

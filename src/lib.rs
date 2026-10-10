@@ -535,7 +535,7 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
 /// single stable `InvalidConfig` error code — deliberately unchanged by
 /// issue #35 so the on-chain error surface (and every consumer matching on
 /// it) stays byte-compatible.
-fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
+pub(crate) fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
     first_failing_rule(env, cfg).map_err(|_| Error::InvalidConfig)
 }
 
@@ -1235,4 +1235,115 @@ pub mod testutils {
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};
     pub use soroban_sdk::{vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Val, Vec};
+    fn has_exact_scval_fields(value: &soroban_sdk::xdr::ScVal, expected: &[&str]) -> bool {
+        use soroban_sdk::xdr::ScVal;
+
+        let ScVal::Map(Some(entries)) = value else {
+            return false;
+        };
+        if entries.len() != expected.len() {
+            return false;
+        }
+        let mut previous_key: Option<alloc::string::String> = None;
+        for entry in entries.iter() {
+            let ScVal::Symbol(symbol) = &entry.key else {
+                return false;
+            };
+            let Ok(key) = symbol.to_utf8_string() else {
+                return false;
+            };
+            if previous_key
+                .as_deref()
+                .is_some_and(|previous| previous >= key.as_str())
+                || !expected.contains(&key.as_str())
+            {
+                return false;
+            }
+            previous_key = Some(key);
+        }
+        expected.iter().all(|field| {
+            entries.iter().any(|entry| {
+                matches!(
+                    &entry.key,
+                    ScVal::Symbol(symbol)
+                        if symbol.to_utf8_string().is_ok_and(|key| key == *field)
+                )
+            })
+        })
+    }
+
+    fn scval_field<'a>(
+        value: &'a soroban_sdk::xdr::ScVal,
+        field: &str,
+    ) -> Option<&'a soroban_sdk::xdr::ScVal> {
+        use soroban_sdk::xdr::ScVal;
+
+        let ScVal::Map(Some(entries)) = value else {
+            return None;
+        };
+        entries.iter().find_map(|entry| match &entry.key {
+            ScVal::Symbol(symbol) if symbol.to_utf8_string().is_ok_and(|key| key == field) => {
+                Some(&entry.val)
+            }
+            _ => None,
+        })
+    }
+
+    fn policy_config_scval_has_safe_struct_shape(value: &soroban_sdk::xdr::ScVal) -> bool {
+        use soroban_sdk::xdr::ScVal;
+
+        const POLICY_FIELDS: &[&str] = &[
+            "per_tx_cap",
+            "window_secs",
+            "window_cap",
+            "assets",
+            "protocols",
+            "recipients",
+            "recipient_window_caps",
+            "blocked_recipients",
+            "allow_any_recipient",
+            "active_from",
+            "active_until",
+            "paused",
+            "dms_grace_secs",
+            "protocol_calls_per_window",
+        ];
+        if !has_exact_scval_fields(value, POLICY_FIELDS) {
+            return false;
+        }
+        let Some(ScVal::Vec(Some(protocols))) = scval_field(value, "protocols") else {
+            return false;
+        };
+        if !protocols
+            .iter()
+            .all(|rule| has_exact_scval_fields(rule, &["contract", "fns"]))
+        {
+            return false;
+        }
+        let Some(ScVal::Vec(Some(recipient_caps))) = scval_field(value, "recipient_window_caps")
+        else {
+            return false;
+        };
+        recipient_caps
+            .iter()
+            .all(|cap| has_exact_scval_fields(cap, &["recipient", "cap"]))
+    }
+    /// Decode and validate a host-provided policy `ScVal` without panicking.
+    ///
+    /// Conversion failures use the same stable error as policy validation.
+    /// Call from a contract context so address self-entry checks match production.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidConfig` when `ScVal` conversion or policy validation fails.
+    pub fn validate_policy_config_scval(
+        env: &Env,
+        scval: &soroban_sdk::xdr::ScVal,
+    ) -> Result<(), Error> {
+        if !policy_config_scval_has_safe_struct_shape(scval) {
+            return Err(Error::InvalidConfig);
+        }
+        let value = Val::try_from_val(env, scval).map_err(|_| Error::InvalidConfig)?;
+        let config = PolicyConfig::try_from_val(env, &value).map_err(|_| Error::InvalidConfig)?;
+        super::validate_config(env, &config)
+    }
 }

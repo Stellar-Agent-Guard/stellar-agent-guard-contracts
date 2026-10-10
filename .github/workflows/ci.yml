@@ -42,6 +42,9 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+      - name: Format fuzz crate
+        run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+
       # Guard deployable enforcement code. Test-only modules intentionally use
       # unwraps for fixture assertions; integration_tests.rs is also test-only.
       - name: Guard enforcement code against unwrap and expect
@@ -71,6 +74,25 @@ jobs:
 
       - name: Agent submission tool build (tools/agent-tx)
         run: cargo build --release --manifest-path tools/agent-tx/Cargo.toml
+      - name: Install nightly for cargo-fuzz
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Seed valid PolicyConfig corpus
+        run: cargo +nightly run --manifest-path fuzz/Cargo.toml --bin seed-policy-config
+
+      - name: Fuzz PolicyConfig decoding and validation
+        run: cargo +nightly fuzz run policy_config_deserialization -- -max_total_time=60 -max_len=4096
+
+      - name: Preserve fuzz crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-config-fuzz-artifacts
+          path: fuzz/artifacts/policy_config_deserialization/
+          if-no-files-found: ignore
 
   # Issue #67: the released artifact ships with a SHA-256 that downstream
   # bytecode verification pins, so "two clean builds of this commit agree"
