@@ -60,6 +60,8 @@ jobs:
       - name: Unit + integration tests
         run: cargo test
 
+      - name: Decision-path CPU ceilings
+        run: cargo run --manifest-path benches/Cargo.toml --bin denial_path_gas
       - name: Public API documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
