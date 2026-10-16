@@ -733,7 +733,7 @@ Stellar Agent Guard operates across three dedicated repositories:
 - `src/integration_tests.rs` — contract-level tests that exercise the real
   `__check_auth` path, including Ed25519 auth-signature verification (SPEC §11).
 - `tools/agent-tx/` — submission helper that signs Soroban auth entries for the guard
-  (custom-account) address and submits real testnet transactions. The `stellar` CLI
+  (custom-account) address and submits real testnet transactions. See [tools/agent-tx/README.md](tools/agent-tx/README.md) for install, usage, secret handling, and what it is for. The `stellar` CLI
   cannot sign auth entries whose address is a contract, so this tool fills that gap; it
   is the prototype of the Phase 2 SDK's signing path.
 - `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat

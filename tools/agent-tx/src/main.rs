@@ -45,6 +45,36 @@ use strkey::KeyKind;
 
 const INCLUSION_FEE: u32 = 100;
 
+/// Outcome of the transaction submission process.
+enum RunOutcome {
+    /// The pre-flight simulation was blocked by policy.
+    SimulationBlocked {
+        error_code: Option<String>,
+        error_message: Option<String>,
+        events: Option<Vec<serde_json::Value>>,
+    },
+    /// The pre-flight simulation succeeded but `--expect-blocked` was set.
+    SimulationSuccessUnexpectedBlock,
+    /// An error occurred while sending the transaction.
+    SendError(String),
+    /// The submitted transaction had an empty hash.
+    EmptyHash(String),
+    /// The transaction was submitted and succeeded.
+    TransactionSuccess {
+        hash: String,
+        status: String,
+    },
+    /// The transaction was submitted but failed.
+    TransactionFailure {
+        hash: String,
+        result_xdr: Option<String>,
+    },
+    /// The transaction submission timed out.
+    TransactionTimeout {
+        hash: String,
+    },
+}
+
 // ── strkey (base32 + CRC16-XModem) ───────────────────────────────────────
 
 const B32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -632,7 +662,7 @@ impl Call {
     }
 }
 
-fn run(call: &Call, args: &Args) {
+fn run(call: &Call, args: &Args) -> RunOutcome {
     let guard = &args.guard;
     let seed = secret_to_seed(args.secret.as_deref().expect("--agent-secret required"));
     let agent = SigningKey::from_bytes(&seed);
@@ -701,11 +731,15 @@ fn run(call: &Call, args: &Args) {
             println!("  diagnostic events:");
             print_events(&serde_json::Value::Array(events.clone()));
         }
-        std::process::exit(if args.expect_blocked { 0 } else { 1 });
+        return RunOutcome::SimulationBlocked {
+            error_code: err["code"].as_str().map(|s| s.to_string()),
+            error_message: err["message"].as_str().map(|s| s.to_string()),
+            events: err["data"]["events"].as_array().map(|arr| arr.clone()),
+        };
     }
     if args.expect_blocked {
         println!("expected a block, but the enforced simulation succeeded");
-        std::process::exit(1);
+        return RunOutcome::SimulationSuccessUnexpectedBlock;
     }
 
     // Assemble the final envelope from the simulation's resources and submit.
@@ -774,36 +808,49 @@ fn run(call: &Call, args: &Args) {
         let err_str = err.to_string();
         let human = map_submission_error(&err_str);
         eprintln!("Error: {human}");
-        std::process::exit(1);
+        return RunOutcome::SendError(human);
     }
     let hash = sent["hash"].as_str().unwrap_or_default().to_string();
     if hash.is_empty() {
         let err_str = sent.to_string();
         let human = map_submission_error(&err_str);
         eprintln!("Error: {human}");
-        std::process::exit(1);
+        return RunOutcome::EmptyHash(human);
     }
     let status = sent["status"].as_str().unwrap_or("?").to_string();
     println!("submitted: hash={hash} status={status}");
 
+    let mut outcome = None;
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_secs(3));
         let gt = args.rpc.get_tx(&hash);
         let st = gt["status"].as_str().unwrap_or("PENDING");
         if st == "SUCCESS" {
             println!("RESULT: ALLOWED tx={hash}");
-            std::process::exit(0);
+            outcome = Some(RunOutcome::TransactionSuccess {
+                hash: hash.clone(),
+                status: st.to_string(),
+            });
+            break;
         }
         if st == "FAILED" {
             println!("RESULT: FAILED tx={hash}");
-            if let Some(errx) = gt["resultXdr"].as_str() {
+            let result_xdr = gt["resultXdr"].as_str().map(|s| s.to_string());
+            if let Some(ref errx) = result_xdr {
                 println!("  resultXdr: {errx}");
             }
-            std::process::exit(if args.expect_blocked { 0 } else { 1 });
+            outcome = Some(RunOutcome::TransactionFailure {
+                hash: hash.clone(),
+                result_xdr,
+            });
+            break;
         }
     }
+    if let Some(outcome) = outcome {
+        return outcome;
+    }
     println!("RESULT: TIMEOUT tx={hash}");
-    std::process::exit(1);
+    RunOutcome::TransactionTimeout { hash }
 }
 
 // ── Guard Registry ────────────────────────────────────────────────────────
@@ -2338,9 +2385,58 @@ fn main() {
                 to: request.to.clone().expect("validated --to"),
                 amount: request.amount.expect("validated --amount"),
             };
-            run(&call, &request.args());
+            let args = request.args();
+            match run(&call, &args) {
+                RunOutcome::SimulationBlocked { error_code, error_message, events } => {
+                    std::process::exit(if args.expect_blocked { 0 } else { 1 });
+                }
+                RunOutcome::SimulationSuccessUnexpectedBlock => {
+                    std::process::exit(1);
+                }
+                RunOutcome::SendError(human) => {
+                    std::process::exit(1);
+                }
+                RunOutcome::EmptyHash(human) => {
+                    std::process::exit(1);
+                }
+                RunOutcome::TransactionSuccess { hash, status } => {
+                    std::process::exit(0);
+                }
+                RunOutcome::TransactionFailure { hash, result_xdr } => {
+                    std::process::exit(if args.expect_blocked { 0 } else { 1 });
+                }
+                RunOutcome::TransactionTimeout { hash } => {
+                    std::process::exit(1);
+                }
+            }
         }
-        "heartbeat" => run(&Call::Heartbeat, &request.args()),
+        "heartbeat" => {
+            let call = Call::Heartbeat;
+            let args = request.args();
+            match run(&call, &args) {
+                RunOutcome::SimulationBlocked { error_code, error_message, events } => {
+                    std::process::exit(if args.expect_blocked { 0 } else { 1 });
+                }
+                RunOutcome::SimulationSuccessUnexpectedBlock => {
+                    std::process::exit(1);
+                }
+                RunOutcome::SendError(human) => {
+                    std::process::exit(1);
+                }
+                RunOutcome::EmptyHash(human) => {
+                    std::process::exit(1);
+                }
+                RunOutcome::TransactionSuccess { hash, status } => {
+                    std::process::exit(0);
+                }
+                RunOutcome::TransactionFailure { hash, result_xdr } => {
+                    std::process::exit(if args.expect_blocked { 0 } else { 1 });
+                }
+                RunOutcome::TransactionTimeout { hash } => {
+                    std::process::exit(1);
+                }
+            }
+        }
         _ => unreachable!(),
     }
 }
