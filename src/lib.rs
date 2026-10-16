@@ -10,6 +10,9 @@
 //! verifies the Ed25519 signature presented over the transaction auth payload
 //! and then evaluates the policy (SPEC §4/§6/§7). No CAP-71 delegation in v1.
 
+// Test fixtures intentionally use unwrap/expect/panic; production source stays deny-listed.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 extern crate alloc;
 
 #[cfg(test)]
@@ -1070,6 +1073,7 @@ mod policy_engine_type {
                 now,
                 vec![&env, call],
             );
+            // Rationale: one submitted context must yield one verdict; fail closed on an engine invariant violation instead of unwrapping.
             let Some(verdict) = verdicts.first() else {
                 panic_with_error!(&env, Error::DecisionInvariantViolation);
             };
@@ -1204,6 +1208,7 @@ mod policy_engine_type {
             } else {
                 match first_error {
                     Some(error) => Err(error),
+                    // Rationale: every auth context must yield a verdict; an empty result is an engine invariant violation.
                     None => panic_with_error!(&env, Error::DecisionInvariantViolation),
                 }
             }

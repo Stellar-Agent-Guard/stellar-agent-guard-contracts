@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 //! Shared XDR vectors for `PolicyConfig` encoding parity with the TypeScript SDK.
 //!
 //! The fixture is canonical in the contracts repository; the SDK follow-up

@@ -55,3 +55,12 @@ debug-assertions = true
 [lints.clippy]
 all = "deny"
 pedantic = "deny"
+# Deny-list (CONTRIBUTING rule 1, issue #66): no new unguarded
+# `unwrap`/`expect`/bare `panic!` may enter non-test `src/`. Test code is
+# exempted crate-locally in `src/lib.rs` (`#![cfg_attr(test, allow(...))]`) and
+# per-target in `tests/` and `examples/`. `panic_with_error!` — the contract's
+# deliberate, checked abort path — is a distinct macro and is intentionally
+# NOT covered here.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

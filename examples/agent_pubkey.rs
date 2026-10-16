@@ -85,6 +85,7 @@
 //!
 //! If you are auditing the trust chain, read those three together with this
 //! example: derivation here, key binding enforced there.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test/example code: panics and unwraps are assertions, not shipped behaviour
 
 use ed25519_dalek::SigningKey;
 use std::io::Read;

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 //! Denial-path gas benchmarks for `__check_auth`.
 //!
 //! Measures the CPU instruction cost of a blocked authorization at each

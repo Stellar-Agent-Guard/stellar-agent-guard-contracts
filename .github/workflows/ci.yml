@@ -42,6 +42,11 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+      # Enforces the CONTRIBUTING rule-1 deny-list (issue #66): the clippy
+      # `unwrap_used`/`expect_used`/`panic` lints are set to `deny` in
+      # Cargo.toml `[lints.clippy]`, so a new unguarded unwrap/expect/bare
+      # panic in `src/` fails this step. Test/example targets are exempted
+      # in-tree with `#[allow]`s.
       # Guard deployable enforcement code. Test-only modules intentionally use
       # unwraps for fixture assertions; integration_tests.rs is also test-only.
       - name: Guard enforcement code against unwrap and expect
@@ -53,7 +58,6 @@ jobs:
             echo 'Enforcement source must use checked handling, not unwrap()/expect().' >&2
             exit 1
           fi
-
       - name: Clippy (all + pedantic deny, all targets/features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
