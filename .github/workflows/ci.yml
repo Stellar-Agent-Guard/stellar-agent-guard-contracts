@@ -39,6 +39,12 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Dependency security and license policy
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.85.0"
+          arguments: --all-features
+
       - name: Format check
         run: cargo fmt --check
 

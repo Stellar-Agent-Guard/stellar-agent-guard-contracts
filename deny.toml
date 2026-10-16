@@ -1,0 +1,35 @@
+# cargo-deny policy for the full Cargo dependency graph.
+# New RustSec advisories are errors unless a maintainer explicitly accepts them.
+[advisories]
+version = 2
+yanked = "deny"
+# Keep exceptions temporary and narrow. Each entry needs a concrete reason and
+# review date; remove it when the dependency is fixed.
+ignore = [
+  { id = "RUSTSEC-2024-0436", reason = "Unmaintained-only advisory, not a known vulnerability; transitive through soroban-sdk 27.0.6 (ark-ff and soroban-wasmi), with no safe upgrade reported by cargo-deny. Reassess on the next Soroban SDK upgrade; review by 2026-12-01." },
+]
+
+[licenses]
+version = 2
+include-dev = true
+confidence-threshold = 0.8
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "ISC",
+  "Unicode-3.0",
+  "Apache-2.0 WITH LLVM-exception",
+]
+
+[bans]
+# Existing transitive duplicates are reported while new policy exceptions are reviewed.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
