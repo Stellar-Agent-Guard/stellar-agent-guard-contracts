@@ -287,12 +287,42 @@ fn prune_entries(
     if window_secs == 0 {
         return;
     }
-    while let Some(front) = entries.first() {
-        if front.ts.saturating_add(window_secs) <= now {
+    let n = entries.len() as usize;
+    if n == 0 {
+        return;
+    }
+
+    // Entries are ordered by timestamp, so find the expired prefix in
+    // logarithmic time before removing it. This matters when a quiet period
+    // lets many entries expire before the next policy evaluation.
+    let mut low = 0usize;
+    let mut high = n;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let Ok(index) = u32::try_from(mid) else {
+            return;
+        };
+        if let Some(entry) = entries.get(index) {
+            if entry.ts.saturating_add(window_secs) <= now {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+    }
+
+    if low == n {
+        *total = 0;
+        while !entries.is_empty() {
+            entries.pop_front();
+        }
+        return;
+    }
+
+    for _ in 0..low {
+        if let Some(front) = entries.first() {
             *total = total.saturating_sub(front.amount);
             entries.pop_front();
-        } else {
-            break;
         }
     }
 }
