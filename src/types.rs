@@ -23,6 +23,10 @@ pub enum DmsHealthStatus {
 /// oldest entries forward (conservative over-count) — see SPEC §3.1.
 pub const MAX_WINDOW_ENTRIES: usize = 8192;
 
+/// Hard bound on auth contexts evaluated in one authorization (SPEC §4/§6).
+/// Sixty-four admits large DEX batches while bounding worst-case decision work.
+pub const MAX_AUTH_CONTEXTS: usize = 64;
+
 /// Maximum number of asset contracts in a policy (SPEC §8).
 pub const MAX_POLICY_ASSETS: usize = 256;
 
@@ -396,6 +400,7 @@ impl Error {
             Self::CreateContractNotAllowed,
             Self::ProtocolCallRateExceeded,
             Self::DecisionInvariantViolation,
+            Self::TooManyAuthContexts,
         ];
         all_errors
             .into_iter()
@@ -511,6 +516,8 @@ pub enum Error {
     ProtocolCallRateExceeded = 30,
     /// An internal decision-engine invariant failed.
     DecisionInvariantViolation = 31,
+    /// One authorization contains more contexts than the engine evaluates.
+    TooManyAuthContexts = 33,
 }
 
 impl Error {
@@ -542,6 +549,7 @@ impl Error {
             Self::CreateContractNotAllowed => "create_contract_not_allowed",
             Self::ProtocolCallRateExceeded => "protocol_call_rate_exceeded",
             Self::DecisionInvariantViolation => "decision_invariant_violation",
+            Self::TooManyAuthContexts => "too_many_auth_contexts",
         }
     }
 }
@@ -593,6 +601,7 @@ mod tests {
             Error::RecipientBlocked,
             Error::ProtocolCallRateExceeded,
             Error::DecisionInvariantViolation,
+            Error::TooManyAuthContexts,
         ];
 
         // An exhaustive match asserting each variant's exact discriminant against SPEC §7.
@@ -624,6 +633,7 @@ mod tests {
                 Error::ProtocolCallRateExceeded => (30, "protocol_call_rate_exceeded"),
                 Error::DecisionInvariantViolation => (31, "decision_invariant_violation"),
                 Error::AssetFnNotAllowed => (32, "asset_fn_not_allowed"),
+                Error::TooManyAuthContexts => (33, "too_many_auth_contexts"),
             };
 
             assert_eq!(
@@ -672,6 +682,7 @@ mod tests {
             Error::RecipientBlocked,
             Error::ProtocolCallRateExceeded,
             Error::DecisionInvariantViolation,
+            Error::TooManyAuthContexts,
         ] {
             let code = err as u32;
             assert!(
