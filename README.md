@@ -157,7 +157,7 @@ Tooling can validate this CLI JSON shape against the checked-in
 | `per_tx_cap` | `i128` | per asset-transfer call cap; `0` = disabled |
 | `asset_caps` | `Vec<AssetCap>` | optional per-asset `per_tx_cap` overrides (asset + cap); unlisted assets fall back to the global `per_tx_cap` |
 | `window_secs` | `u64` | rolling window width in seconds (default 86_400) |
-| `window_cap` | `i128` | rolling cap within `window_secs`; `0` = disabled |
+| `window_cap` | `i128` | rolling cap within `window_secs` (shared across all assets in `assets`); `0` = disabled |
 | `assets` | `Vec<Address>` | SAC token contracts whose transfers get parsed and enforced |
 | `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`) |
 | `recipients` | `Vec<Address>` | allowed SAC transfer destinations |
@@ -650,8 +650,12 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    `MAX_AUTH_CONTEXTS` (64) contexts as one aggregate block before account gates or parsing.
 4. **Account-level gates** (in this order): admin freeze, dead-man switch (grace elapsed
    since last heartbeat), pause, active window. Any one firing rejects the transaction
-   regardless of what the call is.
-5. **Per-context classification.** `parse_call` turns each `Context` into a typed call:
+   regardless of what the call is. Every context in the transaction is evaluated against
+   the pre-transaction snapshot, so the dead-man gate evaluates the pre-transaction
+   heartbeat for every context in the transaction, including the heartbeat self-call — a
+   bundle of `[heartbeat, transfer]` against an expired account is judged against the
+   expired state and blocked, never updating `LastHeartbeat`.
+4. **Per-context classification.** `parse_call` turns each `Context` into a typed call:
    `SelfCall` (only `heartbeat` is allowed), `CreateContract` (denied in v1),
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).

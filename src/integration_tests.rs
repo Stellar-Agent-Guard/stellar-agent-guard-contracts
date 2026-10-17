@@ -1421,6 +1421,76 @@ fn dead_man_switch_freeze_and_admin_reversal() {
     s.heartbeat().at(1_000_100).expect_transfer(&recv, 5); // revived
 }
 
+/// Issue #318: A transaction bundling `[heartbeat, transfer]` against an expired
+/// account is evaluated against the pre-transaction `LastHeartbeat`.
+///
+/// Every auth context in one `__check_auth` call shares a single state snapshot
+/// loaded from storage before any context is executed. Even though the bundle contains
+/// a heartbeat intended to revive the account, the dead-man gate (rule #2) evaluates
+/// every context in the transaction against the existing pre-transaction storage snapshot.
+/// Because the account is expired, `__check_auth` blocks the bundle with
+/// `HeartbeatExpired`, the transaction is rejected, and `LastHeartbeat` in storage
+/// is not updated.
+#[test]
+fn bundled_heartbeat_with_spend_blocked_when_heartbeat_expired() {
+    let h = Harness::new();
+    h.set_time(1_000_000);
+
+    let mut p = h.base_policy();
+    p.dms_grace_secs = 60;
+    h.install_policy(&p);
+
+    // Initial state: LastHeartbeat set to install time (1_000_000).
+    assert_eq!(h.status().last_heartbeat, 1_000_000);
+    assert!(!h.status().heartbeat_expired);
+
+    // Advance time past the 60s DMS grace period (100 seconds elapsed).
+    h.set_time(1_000_100);
+    assert!(h.status().heartbeat_expired);
+
+    // Construct a bundle containing [heartbeat, transfer].
+    let ctx_heartbeat = Context::Contract(ContractContext {
+        contract: h.guard.clone(),
+        fn_name: Symbol::new(&h.env, "heartbeat"),
+        args: soroban_sdk::Vec::new(&h.env),
+    });
+
+    let mut transfer_args: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(&h.env);
+    transfer_args.push_back(h.guard.clone().into_val(&h.env));
+    transfer_args.push_back(h.recv.clone().into_val(&h.env));
+    transfer_args.push_back(10i128.into_val(&h.env));
+    let ctx_transfer = Context::Contract(ContractContext {
+        contract: h.asset.clone(),
+        fn_name: Symbol::new(&h.env, "transfer"),
+        args: transfer_args,
+    });
+
+    let contexts = soroban_sdk::vec![&h.env, ctx_heartbeat, ctx_transfer];
+
+    // Sign the auth payload with the registered agent key.
+    let payload_bytes = [77u8; 32];
+    let sig = h.agent.sign(&payload_bytes).to_bytes();
+
+    // Verify __check_auth returns Err(Ok(GuardError::HeartbeatExpired)).
+    let outcome = h.invoke_check_auth_raw(&h.guard, &payload_bytes, &sig, &contexts);
+    assert_eq!(outcome, Err(Ok(GuardError::HeartbeatExpired)));
+
+    // Crucially assert that the blocked bundle does NOT update LastHeartbeat.
+    let status = h.status();
+    assert_eq!(status.last_heartbeat, 1_000_000);
+    assert!(status.heartbeat_expired);
+
+    // Verify direct storage read confirms LastHeartbeat remains unchanged.
+    let stored_heartbeat = h.env.as_contract(&h.guard, || {
+        h.env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::LastHeartbeat)
+            .unwrap()
+    });
+    assert_eq!(stored_heartbeat, 1_000_000);
+}
+
 /// Reads the most recent `event_unfrozen` data map and asserts the value of
 /// its `rearmed_dms` field (SPEC §5 / §9).
 fn assert_unfrozen_event_rearmed(env: &Env, expected: bool) {

@@ -475,6 +475,8 @@ pub fn decide(
                 } else {
                     // Window accounting: global cap plus an optional
                     // per-recipient override keyed by the destination.
+                    // The rolling window aggregates every asset listed in
+                    // `cfg.assets` into a single shared total (`ledger.total`).
                     // Projections are computed first; staging happens only
                     // when this context clears both caps.
                     let recip_cap = recipient_override_cap(cfg, &to);
@@ -1680,6 +1682,28 @@ mod tests {
                 .unwrap(),
             Decision::Allowed
         ));
+    }
+
+    #[test]
+    fn bundled_heartbeat_with_spend_evaluated_against_pre_transaction_heartbeat() {
+        // Issue #318: A bundle of [heartbeat, transfer] is evaluated against
+        // the pre-transaction heartbeat. If the account is expired, both contexts
+        // are blocked by rule #2 with HeartbeatExpired.
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let bundle = vec![&env, heartbeat_ctx(&env, &sa), transfer_ctx(&env, 1, 2, 5)];
+        let mut p = base_policy(&env);
+        p.dms_grace_secs = 100;
+        let expired = AccountState {
+            admin_frozen: false,
+            last_heartbeat: 500,
+        };
+        let mut l = Ledger::empty(&env);
+        let verdicts = decide(&env, &sa, Some(&p), &expired, &mut l, 700, bundle);
+        assert_eq!(verdicts.len(), 2);
+        for v in verdicts {
+            assert!(matches!(v, Decision::Blocked(Error::HeartbeatExpired)));
+        }
     }
 
     #[test]

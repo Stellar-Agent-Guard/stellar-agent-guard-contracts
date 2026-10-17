@@ -235,16 +235,6 @@ Implementation (exact, lazy, bounded):
   policy would reject. The exact guarantee ("window_cap is a hard ceiling over any
   `window_secs` span") is preserved in all cases; in the pathological region of ≥8192 distinct
   spend seconds within one window the engine is conservative until density drops. This is
-  documented here and in the README, not hidden.
-**Per-asset caps (v1 decision).** Per-asset overrides change the *per-transaction cap*
-compared against, not the window ledger. There remains exactly one global rolling ledger
-(`WindowState.total` / `entries`); a transfer's effective per-tx cap is resolved from
-`asset_caps` (matching the transfer's asset) with fallback to the global `per_tx_cap`. The
-rolling `window_cap` stays global. Full per-asset rolling ledgers (independent windows per
-asset) are explicitly out of scope for v1. This keeps the window invariant (§3.1) unchanged:
-the global `total` is still the sum of all admitted asset spends in the window, and admission
-requires `total + amount <= window_cap`.
-
 - **Merge telemetry:** each successful admission that triggers this backstop emits one
   `event_window_merged` event. Topic 1 identifies `global_spend`, `recipient_spend`, or
   `protocol_calls`; data is the compact tuple `(merged_ts, merged_value)`, where `merged_ts`
@@ -260,6 +250,28 @@ requires `total + amount <= window_cap`.
   also interacts with storage rent/TTL because each persisted window entry is a ledger item that
   must remain live; see [issue #85](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/85)
   for the long-lived-account rent/TTL model.
+
+**Per-asset caps and shared rolling total (v1 decision).** The rolling window total is
+shared across all assets listed in `policy.assets`. `window_cap` is enforced against
+`ledger.total` (`WindowState.total`), which sums `SpendEntry` amounts across all assets
+listed in `policy.assets` (src/engine.rs). The rolling window does not segregate budget
+by asset: with two listed tokens, 100 spent on one consumes the exact same rolling
+budget as 100 on the other (the total is an aggregated, unit-less amount).
+
+Per-asset overrides (`asset_caps`) change only the *per-transaction cap* compared
+against, not the window ledger. There remains exactly one global rolling ledger
+(`WindowState.total` / `entries`); a transfer's effective per-tx cap is resolved from
+`asset_caps` (matching the transfer's asset) with fallback to the global `per_tx_cap`.
+The rolling `window_cap` stays global and shared across all assets.
+
+**Worked two-asset example:**
+Suppose a policy lists two SAC assets `[AssetA, AssetB]` with `window_cap = 100`, `window_secs = 3600`, and `per_tx_cap = 100`:
+1. Spend 60 on `AssetA`: the running rolling window total increases from `0` to `60` (`<= 100`), so the transfer is admitted.
+2. Spend 60 on `AssetB`: even though zero `AssetB` has been transferred so far, the shared window total is already `60`. The projected aggregate total is `60 + 60 = 120 > 100`, so the second transfer is blocked with `WindowCapExceeded`.
+
+**V2 direction:** Full per-asset rolling ledgers (independent window caps and running totals per asset) are the v2 direction and are tracked in [issue #56](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/56). Until then, this cross-asset aggregation is the actual semantics: operators who require isolated rolling budgets across different tokens should deploy separate guard accounts with single-asset policies.
+
+This keeps the window invariant (§3.1) unchanged: the global `total` is still the sum of all admitted asset spends in the window across all listed assets, and admission requires `total + amount <= window_cap`.
 
 **Invariant (window):** for every authorization decision, the global `total` after any admission equals the
 sum of `entries[i].amount` over global entries with `ts + window_secs > now`, and a new asset transfer
@@ -431,7 +443,7 @@ prose is a semantics call for a maintainer, not a doc-generation side effect.
 
 Note the dead-man auto-freeze (`#2`) applies even to `heartbeat` from the registered key: a
 heartbeat arriving after the grace window expired cannot revive the account — revival is the
-admin's `unfreeze` (§7). This is the precise freeze/reversal boundary.
+admin's `unfreeze` (§7). This is the precise freeze/reversal boundary. The dead-man gate is evaluated against the pre-transaction heartbeat for every context in the transaction, including the heartbeat self-call.
 
 ### 4.1 Gate cost order (measured)
 
