@@ -51,6 +51,17 @@ contract. Heartbeat testing uses the guard contract's own address, so the CLI
 cannot submit a heartbeat; use `agent-tx` for this path. See the
 [`agent-tx` usage guide](tools/agent-tx/README.md) for commands and options.
 
+## PolicyConfig deserialization fuzzing
+
+The bounded CI smoke run seeds valid empty and non-empty policies and fuzzes the ScVal XDR decoder plus the production §8 validation path for 60 seconds. It rejects malformed XDR, maps malformed policy values to the stable InvalidConfig error, and treats any panic as a fuzz finding.
+
+Install cargo-fuzz with cargo install cargo-fuzz --locked, then run locally:
+
+    cargo run --manifest-path fuzz/Cargo.toml --bin seed-policy-config
+    cargo +nightly fuzz run policy_config_deserialization -- -max_total_time=600 -max_len=4096
+
+The corpus is stored under fuzz/corpus/policy_config_deserialization; minimized failures are written under fuzz/artifacts/policy_config_deserialization.
+
 ## Clean Build Artifacts
 
 ```bash
