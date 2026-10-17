@@ -1132,7 +1132,7 @@ The executable TTL regression test shortens the test ledger's persistent TTL, ad
 sequence past expiry, and verifies that archived `Policy`, `Window`, `LastHeartbeat`, and
 `AdminFrozen` entries restore with their original values. It also checks that a pre-expiry spend
 still counts against `window_cap` after restoration and that an expired dead-man clock remains
-expired. See [issue #43](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/43)
+expired. See [issue #43](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/43)
 and the operator [rent/TTL guide](docs/rent-and-ttl.md).
 
 ---

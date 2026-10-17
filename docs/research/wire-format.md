@@ -184,4 +184,4 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
   --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX --amount 50
 ```
 
-Cross-reference: [README.md live outputs](../README.md) and [tests/fixtures/README.md](../tests/fixtures/README.md).
+Cross-reference: [README.md live outputs](../../README.md) and [tests/fixtures/README.md](../../tests/fixtures/README.md).

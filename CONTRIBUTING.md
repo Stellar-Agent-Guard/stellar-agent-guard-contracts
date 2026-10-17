@@ -10,7 +10,7 @@ We welcome contributions! Here's how to get started.
 
 ```bash
 # Clone the repo
-git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
+git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
 # The toolchain is pinned in rust-toolchain.toml (channel + wasm32v1-none target
@@ -166,7 +166,7 @@ SPEC.md              # Architecture specification (mechanism is settled)
 ## Issue backlog
 
 Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the
-[issue tracker](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues);
+[issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues);
 each carries one `complexity: trivial|small|medium|large` label. Good first
 tasks for the Drips Stellar Wave contributor sprints.
 

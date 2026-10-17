@@ -8,7 +8,7 @@ We welcome contributions. Here's how to get started.
 
 ```bash
 # Clone the repo
-git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
+git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
 # Run tests (33 unit + integration tests, no network needed)
@@ -78,4 +78,4 @@ SPEC.md                # Architecture specification (mechanism is settled)
 
 ## Issue backlog
 
-Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the [issue tracker](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues); each carries one `complexity: trivial|small|medium|large` label.
+Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the [issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues); each carries one `complexity: trivial|small|medium|large` label.

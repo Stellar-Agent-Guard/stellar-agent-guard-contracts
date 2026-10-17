@@ -16,7 +16,7 @@ contract; assume the worst about the current code.
 advisory from this repository's **Security → Advisories → Report a
 vulnerability** (private: visible only to you and the maintainers):
 
-<https://github.com/aigbagbobila/stellar-agent-guard-contracts/security/advisories/new>
+<https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/security/advisories/new>
 
 This is the preferred path: it is private, creates a trackable `GHSA` advisory,
 and keeps the whole discussion and fix in one auditable place. It requires the
