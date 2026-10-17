@@ -844,14 +844,18 @@ the `ci` check must be green and a review approved for changes to merge.
 
 ## Community
 
+Start at **[SUPPORT.md](SUPPORT.md)** — it says which channel is for what and
+what response time to expect on each.
+
 - [Telegram](https://t.me/+EzSusj-2vVhhNmI0) — Stellar Agent Guard community group
 - [Discord](https://discord.gg/Z766vsgjg) — Stellar Agent Guard community server
+- [GitHub issues](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues) — bugs and feature requests
 
 ## Maintainers
 
 | Name | GitHub | Telegram |
 |---|---|---|
-| Hybrid | [@aigbagbobila](https://github.com/aigbagbobila) | [@aigbagbobila](https://t.me/+EzSusj-2vVhhNmI0) |
+| Hybrid | [@aigbagbobila](https://github.com/aigbagbobila) | [community group invite](https://t.me/+EzSusj-2vVhhNmI0) — an invite link, not a personal handle |
 
 ## Socials
 
@@ -879,7 +883,11 @@ Stellar Agent Guard spans three repositories. Use this table to file issues in t
 
 - GitHub issues: <https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues>
 - Maintainer (GitHub): [@aigbagbobila](https://github.com/aigbagbobila)
-- Security disclosures: see [SECURITY.md](SECURITY.md) (Telegram, the Stellar ecosystem norm)
+- Which channel for which question, and expected response times:
+  [SUPPORT.md](SUPPORT.md)
+- Security disclosures: [SECURITY.md](SECURITY.md), through **GitHub private
+  vulnerability reporting** (or its email fallback) — not Telegram, not Discord,
+  not a public issue
 
 ## License
 
