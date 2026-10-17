@@ -614,10 +614,10 @@ its own commit so the hash change is reviewable on its own.
                                                              └──────────┬───────────┘
                                                                         ▼
 ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
-│ Load PolicyConfig,   │◀─────│ Account-level gates  │◀─────│ Load instance +      │
-│ AdminFrozen,         │      │ (order: admin frozen │      │ persistent state     │
-│ LastHeartbeat, now   │      │ → DMS → paused →     │      │ (agent key, policy,  │
-└──────────┬───────────┘      │ active window)       │      │ window, heartbeat)   │
+│ Load PolicyConfig,   │◀─────│ Contexts >64 block   │◀─────│ Load instance +      │
+│ AdminFrozen,         │      │ before gates; else   │      │ persistent state     │
+│ LastHeartbeat, now   │      │ admin → DMS → pause  │      │ (agent key, policy,  │
+└──────────┬───────────┘      │ → active window      │      │ window, heartbeat)   │
            │                  └──────────────────────┘      └──────────────────────┘
            ▼
 ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
@@ -646,7 +646,9 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    policy logic, so a compromised-but-unregistered key never reaches the decision table.
 2. **Policy snapshot.** The current `PolicyConfig`, `AdminFrozen`, `LastHeartbeat`, and
    ledger time are loaded. No policy stored ⇒ `NoPolicy` — the account is default-deny.
-3. **Account-level gates** (in this order): admin freeze, dead-man switch (grace elapsed
+3. **Context-count bound.** After loading the snapshot, `decide` rejects more than
+   `MAX_AUTH_CONTEXTS` (64) contexts as one aggregate block before account gates or parsing.
+4. **Account-level gates** (in this order): admin freeze, dead-man switch (grace elapsed
    since last heartbeat), pause, active window. Any one firing rejects the transaction
    regardless of what the call is. Every context in the transaction is evaluated against
    the pre-transaction snapshot, so the dead-man gate evaluates the pre-transaction
@@ -657,15 +659,15 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    `SelfCall` (only `heartbeat` is allowed), `CreateContract` (denied in v1),
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).
-5. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
+6. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
    denylist (checked before the allowlist and before `allow_any_recipient`), recipient
    allowlist, per-tx cap, and the rolling-window projection (existing total + amounts
    staged earlier in the same request). Protocol calls get contract + per-function
    allowlisting. Everything else is denied by default.
-6. **All-or-nothing commit.** Window admissions are staged and only committed to storage
+7. **All-or-nothing commit.** Window admissions are staged and only committed to storage
    if *every* context passes — a partially-validating batch can never spend. `Ok(())`
    approves; `Err(reason)` rejects the entire transaction, and the `auth_checked` event
-   records the outcome either way — with the same observability caveat as step 5 above:
+  records the outcome either way — with the same observability caveat as step 6 above:
    an allowed decision's event is committed, a blocked one exists only in diagnostics
    (the transaction it rolled back with carried it away). See [SPEC §9](SPEC.md#9-events-and-telemetry).
 
