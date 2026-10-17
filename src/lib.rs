@@ -1136,7 +1136,9 @@ mod policy_engine_type {
 
             // 2. Verify the agent's Ed25519 signature over the auth payload. The
             //    host crypto function traps the frame on a bad signature, so a
-            //    wrong key can never reach policy evaluation.
+            //    wrong key can never reach policy evaluation. This ordering is a
+            //    stated guarantee with named enforcing tests and a refactor
+            //    warning in SPEC §10.2 — do not move a read above this call.
             let message: Bytes = signature_payload.into();
             env.crypto().ed25519_verify(&agent, &message, &signatures);
 
