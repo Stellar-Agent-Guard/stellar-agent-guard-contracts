@@ -3617,8 +3617,12 @@ fn policy_config_debug_snapshot() {
 
     let mut last_pos = 0;
     for field in fields {
+        if field == "paused" {
+            continue;
+        }
+        let needle = format!("{field}:");
         let pos = debug_output
-            .find(field)
+            .find(&needle)
             .unwrap_or_else(|| panic!("field {field} not found in debug output"));
         assert!(
             pos >= last_pos,
@@ -3626,6 +3630,20 @@ fn policy_config_debug_snapshot() {
         );
         last_pos = pos;
     }
+
+    let paused_pos = debug_output
+        .rfind("paused:")
+        .unwrap_or_else(|| panic!("field paused not found in debug output"));
+    let active_until_pos = debug_output
+        .find("active_until:")
+        .unwrap_or_else(|| panic!("field active_until not found in debug output"));
+    let dms_pos = debug_output
+        .find("dms_grace_secs:")
+        .unwrap_or_else(|| panic!("field dms_grace_secs not found in debug output"));
+    assert!(
+        paused_pos > active_until_pos && paused_pos < dms_pos,
+        "top-level paused field must sit between active_until and dms_grace_secs"
+    );
 }
 
 #[test]

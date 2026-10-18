@@ -2,6 +2,7 @@
   "active_from": 0,
   "active_until": 0,
   "allow_any_recipient": false,
+  "asset_caps": [],
   "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
   "blocked_recipients": [],
   "dms_grace_secs": 60,

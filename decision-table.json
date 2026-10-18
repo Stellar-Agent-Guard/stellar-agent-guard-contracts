@@ -140,6 +140,11 @@
       ],
       "reasons": [
         {
+          "error": "AssetNotAllowed",
+          "tests": [],
+          "note": "A paused asset cap short-circuits the per-asset decision before allowlist or cap checks, so the targeted pause is reported as an asset denial rather than a generic protocol or recipient outcome."
+        },
+        {
           "error": "InvalidAmount",
           "tests": [
             "invalid_amount_rejections_do_not_mutate_window"

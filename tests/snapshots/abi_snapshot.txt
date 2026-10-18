@@ -98,6 +98,7 @@ struct RecipientCap
 struct AssetCap
   asset: Address
   per_tx_cap: i128
+  paused: bool
 struct PolicyConfig
   per_tx_cap: i128
   window_secs: u64
@@ -117,6 +118,7 @@ struct PolicyConfig
 struct ProtocolRule
   contract: Address
   fns: Option<Vec<Symbol>>
+  paused: bool
 struct Status
   has_policy: bool
   policy_revision: u64
