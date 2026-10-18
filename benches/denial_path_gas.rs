@@ -309,8 +309,8 @@ fn main() {
         ProtocolRule {
             contract: addr(&env, 3),
             fns: Some(vec![&env, Symbol::new(&env, "swap")]),
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     let mut ledger7f = Ledger::empty(&env);

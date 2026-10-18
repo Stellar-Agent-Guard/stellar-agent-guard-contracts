@@ -1178,8 +1178,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1238,8 +1238,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1284,8 +1284,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1316,8 +1316,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1348,8 +1348,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1382,8 +1382,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1965,8 +1965,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         p.protocol_calls_per_window = 0; // disabled
@@ -1997,8 +1997,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         p.protocol_calls_per_window = 3;
@@ -2052,8 +2052,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         p.protocol_calls_per_window = 2;
@@ -2121,8 +2121,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         p.protocol_calls_per_window = 2;
@@ -2157,8 +2157,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
-            
-            paused: false,
+
+                paused: false,
             },
         ];
         p.protocol_calls_per_window = 2;

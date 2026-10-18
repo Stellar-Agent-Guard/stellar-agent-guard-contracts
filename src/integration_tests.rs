@@ -3146,8 +3146,8 @@ fn self_address_rejected_in_every_list() {
     let rule = ProtocolRule {
         contract: h.guard.clone(),
         fns: None,
-    
-    paused: false,
+
+        paused: false,
     };
     p.protocols = soroban_sdk::vec![&h.env, rule];
     expect_invalid(&p, "protocols");
@@ -3560,14 +3560,14 @@ fn policy_config_debug_snapshot() {
             ProtocolRule {
                 contract: proto_a,
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
-            
-            paused: false,
+
+                paused: false,
             },
             ProtocolRule {
                 contract: proto_b,
                 fns: None,
-            
-            paused: false,
+
+                paused: false,
             },
         ],
         recipients: vec![&env, recip_a.clone(), recip_b],
@@ -3583,8 +3583,8 @@ fn policy_config_debug_snapshot() {
             AssetCap {
                 asset: asset_a.clone(),
                 per_tx_cap: 500,
-            
-            paused: false,
+
+                paused: false,
             },
         ],
         blocked_recipients: vec![&env],
@@ -4041,8 +4041,8 @@ fn per_asset_cap_override_wins_over_global() {
         AssetCap {
             asset: h.asset.clone(),
             per_tx_cap: 10,
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     h.install_policy(&p);
@@ -4080,8 +4080,8 @@ fn per_asset_cap_zero_override_disables_cap_for_that_asset() {
         AssetCap {
             asset: h.asset.clone(),
             per_tx_cap: 0,
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     h.install_policy(&p);
@@ -4105,8 +4105,8 @@ fn per_asset_cap_window_still_uses_global_window() {
         AssetCap {
             asset: h.asset.clone(),
             per_tx_cap: 50,
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     h.install_policy(&p);
@@ -4127,8 +4127,8 @@ fn invalid_negative_per_asset_cap_rejected() {
         AssetCap {
             asset: h.asset.clone(),
             per_tx_cap: -1,
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     h.env.mock_all_auths();
@@ -4149,8 +4149,8 @@ fn invalid_unknown_asset_override_rejected() {
         AssetCap {
             asset: h.other.clone(),
             per_tx_cap: 10,
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     h.env.mock_all_auths();
@@ -4172,14 +4172,14 @@ fn invalid_duplicate_per_asset_cap_rejected() {
         AssetCap {
             asset: h.asset.clone(),
             per_tx_cap: 10,
-        
-        paused: false,
+
+            paused: false,
         },
         AssetCap {
             asset: h.asset.clone(),
             per_tx_cap: 20,
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     h.env.mock_all_auths();
@@ -4200,8 +4200,8 @@ fn detailed_check_reports_effective_per_asset_cap() {
         AssetCap {
             asset: h.asset.clone(),
             per_tx_cap: 25,
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     h.install_policy(&p);
@@ -4752,8 +4752,8 @@ fn validate_policy_reports_self_address_in_list() {
         ProtocolRule {
             contract: h.guard.clone(),
             fns: None,
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     assert_eq!(
@@ -4878,8 +4878,8 @@ fn policy_asset_protocol_and_recipient_limits_are_inclusive_and_fail_closed() {
         protocols.push_back(ProtocolRule {
             contract: Address::generate(&h.env),
             fns: None,
-        
-        paused: false,
+
+            paused: false,
         });
     }
     let mut at_limit = baseline.clone();
@@ -4890,8 +4890,8 @@ fn policy_asset_protocol_and_recipient_limits_are_inclusive_and_fail_closed() {
     protocols.push_back(ProtocolRule {
         contract: Address::generate(&h.env),
         fns: None,
-    
-    paused: false,
+
+        paused: false,
     });
     let mut over_limit = at_limit.clone();
     over_limit.protocols = protocols;
@@ -4975,8 +4975,8 @@ fn validate_policy_reports_protocol_contract_duplicate() {
     let rule = ProtocolRule {
         contract: h.asset.clone(),
         fns: None,
-    
-    paused: false,
+
+        paused: false,
     };
     p.protocols = soroban_sdk::vec![&h.env, rule.clone(), rule];
     assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolContractDuplicate);
@@ -4993,8 +4993,8 @@ fn validate_policy_reports_protocol_fn_list_invalid() {
         ProtocolRule {
             contract: h.asset.clone(),
             fns: Some(soroban_sdk::Vec::new(&h.env)),
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolFnListInvalid);
@@ -5011,8 +5011,8 @@ fn validate_policy_reports_protocol_fn_list_invalid() {
         ProtocolRule {
             contract: h.asset.clone(),
             fns: Some(fns),
-        
-        paused: false,
+
+            paused: false,
         },
     ];
     assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolFnListInvalid);
