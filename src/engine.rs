@@ -373,8 +373,9 @@ fn parse_call_inner(
 // ── Decision ─────────────────────────────────────────────────────────────
 
 /// Evaluates the SPEC §4 decision table over every auth context, returning one
-/// [`Decision`] per context. Window admissions are staged and committed to
-/// `ledger` only when every context is allowed.
+/// [`Decision`] per context. Oversized batches return one aggregate blocking
+/// decision before any context is evaluated. Window admissions are staged and
+/// committed to `ledger` only when every context is allowed.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)] // by-value host Vec avoids slice/coercion limits
 pub fn decide(
     env: &Env,
@@ -386,6 +387,11 @@ pub fn decide(
     contexts: soroban_sdk::Vec<Context>,
 ) -> alloc::vec::Vec<Decision> {
     let mut verdicts = alloc::vec::Vec::new();
+
+    if contexts.len() as usize > crate::types::MAX_AUTH_CONTEXTS {
+        verdicts.push(Decision::Blocked(Error::TooManyAuthContexts));
+        return verdicts;
+    }
 
     if state.admin_frozen {
         for _ in 0..contexts.len() {
@@ -597,7 +603,7 @@ pub fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ProtocolRule, RecipientCap, MAX_WINDOW_ENTRIES};
+    use crate::types::{ProtocolRule, RecipientCap, MAX_AUTH_CONTEXTS, MAX_WINDOW_ENTRIES};
     use soroban_sdk::{auth::ContractContext, vec, Address, Env, IntoVal, Symbol, Val, Vec};
 
     fn addr(env: &Env, n: u8) -> Address {
@@ -631,6 +637,103 @@ mod tests {
             admin_frozen: false,
             last_heartbeat: 0,
         }
+    }
+
+    #[test]
+    fn auth_context_batch_at_limit_is_evaluated_and_policy_still_applies() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut contexts = Vec::new(&env);
+        for _ in 0..MAX_AUTH_CONTEXTS {
+            contexts.push_back(transfer_ctx(&env, 1, 2, 1));
+        }
+
+        let mut p = base_policy(&env);
+        p.window_cap = MAX_AUTH_CONTEXTS as i128;
+        let mut ledger = Ledger::empty(&env);
+        let verdicts = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut ledger,
+            1_000,
+            contexts.clone(),
+        );
+        assert_eq!(verdicts.len(), MAX_AUTH_CONTEXTS);
+        assert!(verdicts
+            .iter()
+            .all(|decision| matches!(decision, Decision::Allowed)));
+        assert_eq!(ledger.total, MAX_AUTH_CONTEXTS as i128);
+
+        p.window_cap = MAX_AUTH_CONTEXTS as i128 - 1;
+        let mut limited_ledger = Ledger::empty(&env);
+        let limited = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut limited_ledger,
+            1_000,
+            contexts,
+        );
+        assert_eq!(limited.len(), MAX_AUTH_CONTEXTS);
+        assert!(matches!(
+            limited.last().unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
+        assert_eq!(limited_ledger.total, 0);
+
+        let mut deny_policy = base_policy(&env);
+        deny_policy.allow_any_recipient = true;
+        deny_policy.blocked_recipients = vec![&env, addr(&env, 3)];
+        let mut deny_contexts = Vec::new(&env);
+        for _ in 1..MAX_AUTH_CONTEXTS {
+            deny_contexts.push_back(transfer_ctx(&env, 1, 2, 1));
+        }
+        deny_contexts.push_back(transfer_ctx(&env, 1, 3, 1));
+        let mut deny_ledger = Ledger::empty(&env);
+        let denied = decide(
+            &env,
+            &sa,
+            Some(&deny_policy),
+            &alive(),
+            &mut deny_ledger,
+            1_000,
+            deny_contexts,
+        );
+        assert_eq!(denied.len(), MAX_AUTH_CONTEXTS);
+        assert!(matches!(
+            denied.last().unwrap(),
+            Decision::Blocked(Error::RecipientBlocked)
+        ));
+    }
+
+    #[test]
+    fn auth_context_batch_over_limit_fails_before_staging_admissions() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.allow_any_recipient = true;
+        p.window_cap = 1_000;
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit(1_000, 7);
+        let before_total = ledger.total;
+        let before_len = ledger.len();
+        let mut contexts = Vec::new(&env);
+        for _ in 0..=MAX_AUTH_CONTEXTS {
+            contexts.push_back(transfer_ctx(&env, 1, 2, 1));
+        }
+
+        let verdicts = decide(&env, &sa, Some(&p), &alive(), &mut ledger, 1_000, contexts);
+
+        assert_eq!(verdicts.len(), 1);
+        assert!(matches!(
+            verdicts.first().unwrap(),
+            Decision::Blocked(Error::TooManyAuthContexts)
+        ));
+        assert_eq!(ledger.total, before_total);
+        assert_eq!(ledger.len(), before_len);
     }
 
     fn transfer_ctx(env: &Env, asset: u8, to: u8, amount: i128) -> Context {

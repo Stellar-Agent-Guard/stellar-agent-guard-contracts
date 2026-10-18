@@ -602,6 +602,30 @@
         ]
       },
       "spec_ref": "§6.3"
+    },
+    {
+      "code": 33,
+      "error_variant": "TooManyAuthContexts",
+      "symbol": "too_many_auth_contexts",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "too_many_auth_contexts"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§4, §6, §7.1"
     }
   ]
 }

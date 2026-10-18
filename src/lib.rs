@@ -37,6 +37,7 @@ use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, TryFromVal, Val,
 };
+pub use types::MAX_AUTH_CONTEXTS;
 pub use types::NO_POLICY_DIGEST;
 pub use types::{
     AssetCap, CheckDetail, Error, PolicyConfig, ProtocolRule, RecipientCap, RecipientWindowState,
@@ -1231,8 +1232,8 @@ pub mod testutils {
     pub use crate::types::policy_canonical_encoding;
     pub use crate::types::{
         CheckResult, DataKey, Error, PolicyConfig, PolicyRuleId, ProtocolRule, RecipientCap,
-        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_DMS_GRACE_SECS,
-        MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
+        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_AUTH_CONTEXTS,
+        MAX_DMS_GRACE_SECS, MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
     };
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};
