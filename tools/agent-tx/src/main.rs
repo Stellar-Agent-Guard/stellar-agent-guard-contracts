@@ -284,7 +284,7 @@ fn scval_str(v: &ScVal) -> String {
         },
         ScVal::Bytes(b) => hex::encode(b.0.as_slice()),
         ScVal::Vec(Some(items)) => {
-            let inner: Vec<String> = items.iter().map(|x| scval_str(x)).collect();
+            let inner: Vec<String> = items.iter().map(scval_str).collect();
             format!("[{}]", inner.join(", "))
         }
         ScVal::Vec(None) => "[]".into(),
@@ -358,7 +358,7 @@ fn merge_guard_footprint(mut fp: LedgerFootprint, guard: &ScAddress) -> LedgerFo
     ];
     let mut rw: Vec<LedgerKey> = fp.read_write.iter().cloned().collect();
     for k in extra {
-        if !rw.iter().any(|e| *e == k) {
+        if !rw.contains(&k) {
             rw.push(k);
         }
     }
@@ -1101,13 +1101,10 @@ mod tests {
     #[test]
     fn extract_dms_grace_secs_from_policy_map() {
         // Test that we can extract dms_grace_secs from a PolicyConfig map
-        let mut policy_map_entries = vec![];
-
-        // Add dms_grace_secs (u64) field
-        policy_map_entries.push(ScMapEntry {
+        let policy_map_entries = vec![ScMapEntry {
             key: ScVal::Symbol(ScSymbol("dms_grace_secs".try_into().unwrap())),
             val: ScVal::U64(3600), // 1 hour grace period
-        });
+        }];
 
         let policy_map = ScMap(stellar_xdr::VecM::try_from(policy_map_entries).unwrap());
 
@@ -1177,7 +1174,7 @@ mod tests {
 
     #[test]
     fn policy_read_returns_null_when_no_policy() {
-        let rpc = MockPreflightRpc {
+        let _rpc = MockPreflightRpc {
             response: serde_json::json!({
                 "entries": [
                     {
@@ -1188,7 +1185,7 @@ mod tests {
             ..Default::default()
         };
 
-        let guard: ScAddress = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
+        let _guard: ScAddress = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
             .parse()
             .unwrap();
         // The test verifies that cmd_policy can be called without panicking
@@ -1197,20 +1194,20 @@ mod tests {
 
     #[test]
     fn check_read_simulates_transfer_decision() {
-        let rpc = MockPreflightRpc {
+        let _rpc = MockPreflightRpc {
             response: serde_json::json!({
                 "minResourceFee": "100"
             }),
             ..Default::default()
         };
 
-        let guard: ScAddress = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
+        let _guard: ScAddress = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
             .parse()
             .unwrap();
-        let asset: ScAddress = "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"
+        let _asset: ScAddress = "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"
             .parse()
             .unwrap();
-        let to: ScAddress = "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"
+        let _to: ScAddress = "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"
             .parse()
             .unwrap();
         // The test verifies that cmd_check can be called without panicking
@@ -2039,8 +2036,8 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
     let heartbeat_key = guard_data_key(guard, "LastHeartbeat");
     let frozen_key = guard_data_key(guard, "AdminFrozen");
 
-    let keys = vec![instance_key, policy_key, heartbeat_key, frozen_key];
-    let keys_xdr: Vec<String> = keys.iter().map(|k| b64_encode_xdr(k)).collect();
+    let keys = [instance_key, policy_key, heartbeat_key, frozen_key];
+    let keys_xdr: Vec<String> = keys.iter().map(b64_encode_xdr).collect();
 
     let res = rpc.post("getLedgerEntries", serde_json::json!({ "keys": keys_xdr }));
 
@@ -2058,9 +2055,9 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
         let entry_xdr = entry["xdr"].as_str().ok_or("missing xdr")?;
         let le: LedgerEntryData = xdr(entry_xdr);
 
-        match le {
-            LedgerEntryData::ContractData(cdata) => match &cdata.key {
-                ScVal::Symbol(sym) => match sym.0.as_slice() {
+        if let LedgerEntryData::ContractData(cdata) = le {
+            if let ScVal::Symbol(sym) = &cdata.key {
+                match sym.0.as_slice() {
                     b"Policy" => {
                         has_policy = !matches!(cdata.val, ScVal::Void);
                     }
@@ -2075,10 +2072,8 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
                         }
                     }
                     _ => {}
-                },
-                _ => {}
-            },
-            _ => {}
+                }
+            }
         }
     }
 

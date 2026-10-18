@@ -104,6 +104,13 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
 7. **Denial-reason messages:** `docs/reason-glossary.md` is the canonical
    message-content source for SDK/UI work — map new user-facing denial text to
    its agent/operator/auditor columns instead of inventing new phrasing.
+8. **Host-routed integration tests:** When testing policy enforcement, write
+   tests that exercise the real Soroban host authorization pipeline in
+   `src/integration_tests.rs` rather than testing under blanket mock auth.
+   Tests asserting enforcement must use `Harness::enforce()` or `GuardScenario`
+   (`set_auths`) so `__check_auth` is genuinely exercised. See the full
+   walkthrough in [`docs/contributing.md`](docs/contributing.md#writing-host-routed-integration-tests)
+   and the module header of [`src/integration_tests.rs`](src/integration_tests.rs).
 
 ## Commit Discipline (strict)
 
