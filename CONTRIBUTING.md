@@ -112,6 +112,64 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    walkthrough in [`docs/contributing.md`](docs/contributing.md#writing-host-routed-integration-tests)
    and the module header of [`src/integration_tests.rs`](src/integration_tests.rs).
 
+## How to read this codebase
+
+Start with the policy model, then follow an authorization from its decision
+logic through the ledger to the contract boundary:
+
+1. [`src/types.rs`](src/types.rs) — Shared policy and ledger types, parsed
+   calls, storage keys, bounds, and stable error codes. `PolicyConfig`'s
+   canonical policy hash uses ScVal XDR with sorted symbol keys, so changing a
+   policy field changes its hash; keep numeric `Error` discriminants stable as
+   well. See [`tests/policy_hash_encoding.rs`](tests/policy_hash_encoding.rs)
+   and the `error_code_discriminant_stability_spec_7` test in this module.
+2. [`src/engine.rs`](src/engine.rs) — Pure evaluation of the host's auth
+   contexts against policy and account state. It classifies calls and applies
+   fail-closed gates, allowlists, caps, and staged window/rate-limit checks;
+   `SPEC.md` §§4 and 6 describe the decision rules.
+3. [`src/window.rs`](src/window.rs) — In-memory rolling spend and protocol-call
+   ledgers: pruning, admission, bounded entry merging, and state conversion.
+   Its rolling-boundary behavior is covered by
+   `ledger_second_changes_window_membership_at_boundary` in this module.
+4. [`src/lib.rs`](src/lib.rs) — The Soroban contract shell: lifecycle and
+   storage, loading the authorization snapshot, calling the engine, and
+   persisting successful ledger changes. Keep policy decisions in the engine
+   and ledger mechanics in the window module; this boundary also implements
+   the host-facing custom-account interface.
+
+Two invariants deserve particular care. Authorization is fail-closed: a
+missing policy blocks, and the host-facing signature verification precedes
+policy evaluation; see `no_policy_is_default_deny_on_chain` and
+`auth_verification_order_initialized_account_valid_signature_no_policy_yields_no_policy`
+in [`src/integration_tests.rs`](src/integration_tests.rs). Window admissions
+are staged and committed only if every context passes, so a rejected batch
+cannot consume spend budget; see
+`failed_multi_context_batch_never_commits_staged_window_admissions` in
+[`src/engine.rs`](src/engine.rs) and
+[`src/integration_tests.rs`](src/integration_tests.rs).
+
+`__check_auth` is not a project-designed endpoint: the Soroban host calls the
+`CustomAccountInterface` method with its required shape. Here,
+`Self::Signature = BytesN<64>` and `Self::Error = Error`; the method is:
+
+```rust
+fn __check_auth(
+   env: Env,
+   signature_payload: soroban_sdk::crypto::Hash<32>,
+   signatures: Self::Signature,
+   auth_contexts: soroban_sdk::Vec<Context>,
+) -> Result<(), Error>
+```
+
+The `Context` enum is also defined by the SDK and includes contract calls and
+host-function contract-creation contexts. Do not casually change this ABI or
+assume the project can redefine the SDK's context types. See the exact
+implementation in [`src/lib.rs`](src/lib.rs) and the SDK contract recorded in
+[SPEC §1.1](SPEC.md#11-sdk-and-host-surface-this-is-built-on-soroban-sdk-27).
+Host exposure of both contract-creation context variants is exercised by
+`contract_creation_denied_through_real_host_path` in
+[`src/integration_tests.rs`](src/integration_tests.rs).
+
 ## Commit Discipline (strict)
 
 `PolicyConfig` changes must update `policy.schema.json` and its conformance test in the same
