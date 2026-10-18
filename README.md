@@ -96,7 +96,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 213 tests, isolated (no network)
+cargo test                                      # 215 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only)
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -618,10 +618,10 @@ its own commit so the hash change is reviewable on its own.
                                                              └──────────┬───────────┘
                                                                         ▼
 ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
-│ Load PolicyConfig,   │◀─────│ Account-level gates  │◀─────│ Load instance +      │
-│ AdminFrozen,         │      │ (order: admin frozen │      │ persistent state     │
-│ LastHeartbeat, now   │      │ → DMS → paused →     │      │ (agent key, policy,  │
-└──────────┬───────────┘      │ active window)       │      │ window, heartbeat)   │
+│ Load PolicyConfig,   │◀─────│ Contexts >64 block   │◀─────│ Load instance +      │
+│ AdminFrozen,         │      │ before gates; else   │      │ persistent state     │
+│ LastHeartbeat, now   │      │ admin → DMS → pause  │      │ (agent key, policy,  │
+└──────────┬───────────┘      │ → active window      │      │ window, heartbeat)   │
            │                  └──────────────────────┘      └──────────────────────┘
            ▼
 ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
@@ -650,7 +650,9 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    policy logic, so a compromised-but-unregistered key never reaches the decision table.
 2. **Policy snapshot.** The current `PolicyConfig`, `AdminFrozen`, `LastHeartbeat`, and
    ledger time are loaded. No policy stored ⇒ `NoPolicy` — the account is default-deny.
-3. **Account-level gates** (in this order): admin freeze, dead-man switch (grace elapsed
+3. **Context-count bound.** After loading the snapshot, `decide` rejects more than
+   `MAX_AUTH_CONTEXTS` (64) contexts as one aggregate block before account gates or parsing.
+4. **Account-level gates** (in this order): admin freeze, dead-man switch (grace elapsed
    since last heartbeat), pause, active window. Any one firing rejects the transaction
    regardless of what the call is. Every context in the transaction is evaluated against
    the pre-transaction snapshot, so the dead-man gate evaluates the pre-transaction
@@ -661,15 +663,15 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    `SelfCall` (only `heartbeat` is allowed), `CreateContract` (denied in v1),
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).
-5. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
+6. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
    denylist (checked before the allowlist and before `allow_any_recipient`), recipient
    allowlist, per-tx cap, and the rolling-window projection (existing total + amounts
    staged earlier in the same request). Protocol calls get contract + per-function
    allowlisting. Everything else is denied by default.
-6. **All-or-nothing commit.** Window admissions are staged and only committed to storage
+7. **All-or-nothing commit.** Window admissions are staged and only committed to storage
    if *every* context passes — a partially-validating batch can never spend. `Ok(())`
    approves; `Err(reason)` rejects the entire transaction, and the `auth_checked` event
-   records the outcome either way — with the same observability caveat as step 5 above:
+  records the outcome either way — with the same observability caveat as step 6 above:
    an allowed decision's event is committed, a blocked one exists only in diagnostics
    (the transaction it rolled back with carried it away). See [SPEC §9](SPEC.md#9-events-and-telemetry).
 
@@ -822,11 +824,11 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-213 tests (unit + integration) cover the policy decision engine — including the regression
+215 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `213 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green this session: `215 passed; 0 failed`.
 
 ```bash
 cargo test

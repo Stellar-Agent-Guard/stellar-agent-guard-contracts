@@ -226,6 +226,7 @@ fn error_by_name(name: &str) -> Option<Error> {
         "RecipientBlocked" => Error::RecipientBlocked,
         "ProtocolCallRateExceeded" => Error::ProtocolCallRateExceeded,
         "DecisionInvariantViolation" => Error::DecisionInvariantViolation,
+        "TooManyAuthContexts" => Error::TooManyAuthContexts,
         _ => return None,
     };
     Some(err)
