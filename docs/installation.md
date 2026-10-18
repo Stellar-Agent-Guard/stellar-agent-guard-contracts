@@ -20,7 +20,7 @@ rustup target add wasm32v1-none
 ## Build from source
 
 ```bash
-git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
+git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
 # Contract WASM (the artifact to deploy)

@@ -16,7 +16,7 @@ contract; assume the worst about the current code.
 advisory from this repository's **Security → Advisories → Report a
 vulnerability** (private: visible only to you and the maintainers):
 
-<https://github.com/aigbagbobila/stellar-agent-guard-contracts/security/advisories/new>
+<https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/security/advisories/new>
 
 This is the preferred path: it is private, creates a trackable `GHSA` advisory,
 and keeps the whole discussion and fix in one auditable place. It requires the
@@ -31,12 +31,62 @@ your first message; we will provide one before you send details.
 **Community — Telegram, for non-sensitive questions only.** The
 [Telegram group](https://t.me/+EzSusj-2vVhhNmI0) remains the community channel,
 but it is **not** a private or trackable disclosure path. Do not post
-vulnerability details there.
+vulnerability details there. If you only have a Telegram contact for the
+maintainers, send a one-line request for the private route (advisory link or
+PGP) and put the report itself in the private channel — the template below
+applies whichever channel you end up using. See
+[SUPPORT.md](SUPPORT.md) for which channel is meant for what.
 
-**Response window.** We acknowledge receipt within **48 hours** and aim to give a
-remediation plan or a status update within **7 days**. Please do not disclose
-publicly until a fix is released, or 90 days from your report — whichever comes
-first.
+### What to include in a report
+
+Five short fields are enough for triage to start without a round of follow-up
+questions. Copy the block below and fill it in; write "unknown" rather than
+guessing, and skip `Suggested fix` entirely if you do not have one.
+
+```text
+Affected version / commit:
+  <release tag (e.g. v0.1.x), commit SHA, or "main at <date>">
+Description:
+  <what the flaw is, in a few sentences>
+Impact:
+  <what an attacker gains>
+  Funds at risk: yes / no / unclear — <one line on why>
+Reproduction:
+  <the smallest reliable way to trigger it: inputs, policy configuration,
+   ledger/time conditions, and the failing test or transaction if you have one>
+Suggested fix:
+  <optional — even a direction is useful>
+```
+
+`Impact` is the field that sets triage order, so please be explicit about
+whether funds can actually move: a `__check_auth` bypass, a cap that can be
+exceeded, or an allowlist that can be walked through is a funds-at-risk report,
+while a panicking read path or a misleading `check` pre-flight result usually is
+not. Also tell us if your report touches a *deployed instance's configuration*
+rather than this repository's code — see [Scope](#scope) — because that goes to
+the operator, not to us.
+
+### What you'll get back
+
+- **Acknowledgement within 48 hours** of the report landing in the private
+  channel, confirming a maintainer has it and who is looking at it.
+- **Assessment and remediation plan (or a status update) within 7 days**: whether
+  we reproduce it, whether we agree it is a vulnerability in this repository's
+  scope, and what the fix path looks like.
+- **Whether an advisory or a CVE is expected.** If we confirm the flaw and it
+  affects released artifacts, we publish a `GHSA` security advisory for the
+  affected versions and request a CVE through the GitHub advisory flow; the
+  advisory — not a chat message — is the announced channel. If we decline the
+  report (out of scope, operator misconfiguration, or a v1 design boundary
+  already documented in SPEC §2/§10), we say so and give the reason, so the
+  decision is auditable rather than silent.
+- **Coordination.** Please do not disclose publicly until a fix is released, or
+  90 days from your report — whichever comes first. We will tell you which of the
+  two we are aiming for, and we ask for a heads-up before any earlier
+  publication on your side.
+- **Credit.** Named credit in the advisory is on request; anonymous reports are
+  fine and are handled the same way. There is
+  [no bug bounty at this time](#bug-bounty).
 
 ## Scope
 
