@@ -10,7 +10,7 @@ We welcome contributions! Here's how to get started.
 
 ```bash
 # Clone the repo
-git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
+git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
 # The toolchain is pinned in rust-toolchain.toml (channel + wasm32v1-none target
@@ -104,6 +104,13 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
 7. **Denial-reason messages:** `docs/reason-glossary.md` is the canonical
    message-content source for SDK/UI work — map new user-facing denial text to
    its agent/operator/auditor columns instead of inventing new phrasing.
+8. **Host-routed integration tests:** When testing policy enforcement, write
+   tests that exercise the real Soroban host authorization pipeline in
+   `src/integration_tests.rs` rather than testing under blanket mock auth.
+   Tests asserting enforcement must use `Harness::enforce()` or `GuardScenario`
+   (`set_auths`) so `__check_auth` is genuinely exercised. See the full
+   walkthrough in [`docs/contributing.md`](docs/contributing.md#writing-host-routed-integration-tests)
+   and the module header of [`src/integration_tests.rs`](src/integration_tests.rs).
 
 ## Commit Discipline (strict)
 
@@ -166,7 +173,7 @@ SPEC.md              # Architecture specification (mechanism is settled)
 ## Issue backlog
 
 Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the
-[issue tracker](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues);
+[issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues);
 each carries one `complexity: trivial|small|medium|large` label. Good first
 tasks for the Drips Stellar Wave contributor sprints.
 

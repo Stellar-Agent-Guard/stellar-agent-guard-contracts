@@ -138,7 +138,7 @@ with a pointer into the [gap list](#4-known-coverage-gaps). Keys resolve in
 | **4.** `Paused` | — gap **G7** | `E-9` | — gap **G7** | — gap **G7** | — gap **G7** | — gap **G7** |
 | **5.** `OutsideActiveWindow` | — gap **G1** | — gap **G1** | — gap **G1** | — gap **G1** | — gap **G1** | — gap **G1** |
 | **6.** self-call admission | `E-10` `E-11` | `n/a` | `n/a` | `n/a` | `n/a` | `n/a` |
-| **7.** classification | `E-10` `E-11` | `E-2` `E-3` `E-4` `E-5` `E-6` `E-7` `E-8` `I-8` `I-9` `I-10` `I-11` `I-4` | — gap **G8** | `E-8` | — gap **G9** | `E-5` `E-8` |
+| **7.** classification | `E-10` `E-11` | `E-2` `E-3` `E-4` `E-5` `E-6` `E-7` `E-8` `I-8` `I-9` `I-10` `I-11` `I-4` | — gap **G8** | `E-8` | `I-20` | `E-5` `E-8` |
 
 ### 3.1 Coverage by call kind (rows = call kinds, columns = gates)
 
@@ -151,7 +151,7 @@ untested *for the thing I am touching*".
 | **K2** asset transfer | `E-9` `I-13` | `E-9` `I-12` | `E-1` `I-7` `I-18` | `E-9` | — | `n/a` | `E-2`…`E-8`, `I-4`, `I-8`…`I-11` | 6 / 7 |
 | **K3** asset other-fn | — | — | — | — | — | `n/a` | — | **0 / 7** |
 | **K4** protocol | — | — | — | — | — | `n/a` | `E-8` | 1 / 7 |
-| **K5** create-contract | — | — | — | — | — | `n/a` | — | **0 / 7** |
+| **K5** create-contract | — | — | — | — | — | `n/a` | `I-20` | 1 / 7 |
 | **K6** unknown | — | — | — | — | — | `n/a` | `E-5` `E-8` | 1 / 7 |
 
 K2 is the well-covered kind, which is the correct shape for v1: SAC transfers are the
@@ -267,14 +267,12 @@ transfer, which is a fund-safety-relevant boundary.
 > `FunctionNotAllowed`. Note the helper `transfer_ctx` in `E`'s module makes this a
 > one-line addition; the assertion must target the asset address, not a protocol address.
 
-### G9 — rule 7 × K5 (`CreateContract` → `create_contract_not_allowed`)
+### G9 — rule 7 × K5 (`CreateContract` → `create_contract_not_allowed`) [RESOLVED]
 
-No test constructs a `Context::CreateContractHostFn` or `Context::CreateContractWithCtorHostFn`
-(the `benches` and unit tests only ever build `Context::Contract`). The v1 "the account may
-not create contracts" rule is therefore implemented but unproven.
-
-> **Suggested test:** construct both host-fn context variants and assert
-> `CreateContractNotAllowed` from `decide()`. This is the cheapest gap in the list to close.
+Closed by `I-20` (`contract_creation_denied_through_real_host_path` in `src/integration_tests.rs`). Exercises
+both `Context::CreateContractHostFn` and `Context::CreateContractWithCtorHostFn` through real host
+invocation routing (`MockDeployer`), proving the host surfaces both contexts to `__check_auth` and
+that the policy engine rejects both with `CreateContractNotAllowed` (code 28, `create_contract_not_allowed`).
 
 ### G10 — rule 7 × K2, sub-rule `invalid_amount`
 
@@ -331,6 +329,7 @@ Ed25519 signatures through the Soroban host auth flow). `W` = `src/window.rs` (l
 | `I-13` | `admin_freeze_blocks_immediately_and_unfreeze_restores` | [`src/integration_tests.rs:590`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs#L590) | on-chain |
 | `I-18` | `revoke_policy_is_instant_default_deny` | [`src/integration_tests.rs:757`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs#L757) | on-chain |
 | `I-19` | `error_and_block_reason_round_trip` | [`src/integration_tests.rs:771`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs#L771) | on-chain |
+| `I-20` | `contract_creation_denied_through_real_host_path` | [`src/integration_tests.rs`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs) | on-chain |
 | `W-1` | `window_is_genuinely_rolling` | [`src/window.rs:158`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/window.rs#L158) | unit |
 | `W-4` | `exact_boundary_semantics` | [`src/window.rs:170`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/window.rs#L170) | unit |
 

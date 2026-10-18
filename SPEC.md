@@ -109,6 +109,13 @@ OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer con
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
 and `docs/enforcement-scope.md` quote this section briefly and link here as canonical.
 
+**Contract creation contexts:** Host-function contract creation contexts (`CreateContractHostFn`
+and `CreateContractWithCtorHostFn`) are surfaced by the host to `__check_auth` when contract deployment
+is authorized by the guarded custom account (e.g. via `deployer().with_address(...)`). The
+policy engine evaluates these contexts under default-deny and denies all contract creation
+attempts fail-closed with `CreateContractNotAllowed` (code 28), verified end-to-end through
+the real host authorization path (`contract_creation_denied_through_real_host_path`).
+
 **Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol-specific parsers, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Count-based protocol call rate limiting (v1) is now implemented; opt-in protocol parsers remain a secondary track.
 
 ---
@@ -237,16 +244,6 @@ Implementation (exact, lazy, bounded):
   policy would reject. The exact guarantee ("window_cap is a hard ceiling over any
   `window_secs` span") is preserved in all cases; in the pathological region of ≥8192 distinct
   spend seconds within one window the engine is conservative until density drops. This is
-  documented here and in the README, not hidden.
-**Per-asset caps (v1 decision).** Per-asset overrides change the *per-transaction cap*
-compared against, not the window ledger. There remains exactly one global rolling ledger
-(`WindowState.total` / `entries`); a transfer's effective per-tx cap is resolved from
-`asset_caps` (matching the transfer's asset) with fallback to the global `per_tx_cap`. The
-rolling `window_cap` stays global. Full per-asset rolling ledgers (independent windows per
-asset) are explicitly out of scope for v1. This keeps the window invariant (§3.1) unchanged:
-the global `total` is still the sum of all admitted asset spends in the window, and admission
-requires `total + amount <= window_cap`.
-
 - **Merge telemetry:** each successful admission that triggers this backstop emits one
   `event_window_merged` event. Topic 1 identifies `global_spend`, `recipient_spend`, or
   `protocol_calls`; data is the compact tuple `(merged_ts, merged_value)`, where `merged_ts`
@@ -262,6 +259,28 @@ requires `total + amount <= window_cap`.
   also interacts with storage rent/TTL because each persisted window entry is a ledger item that
   must remain live; see [issue #85](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/85)
   for the long-lived-account rent/TTL model.
+
+**Per-asset caps and shared rolling total (v1 decision).** The rolling window total is
+shared across all assets listed in `policy.assets`. `window_cap` is enforced against
+`ledger.total` (`WindowState.total`), which sums `SpendEntry` amounts across all assets
+listed in `policy.assets` (src/engine.rs). The rolling window does not segregate budget
+by asset: with two listed tokens, 100 spent on one consumes the exact same rolling
+budget as 100 on the other (the total is an aggregated, unit-less amount).
+
+Per-asset overrides (`asset_caps`) change only the *per-transaction cap* compared
+against, not the window ledger. There remains exactly one global rolling ledger
+(`WindowState.total` / `entries`); a transfer's effective per-tx cap is resolved from
+`asset_caps` (matching the transfer's asset) with fallback to the global `per_tx_cap`.
+The rolling `window_cap` stays global and shared across all assets.
+
+**Worked two-asset example:**
+Suppose a policy lists two SAC assets `[AssetA, AssetB]` with `window_cap = 100`, `window_secs = 3600`, and `per_tx_cap = 100`:
+1. Spend 60 on `AssetA`: the running rolling window total increases from `0` to `60` (`<= 100`), so the transfer is admitted.
+2. Spend 60 on `AssetB`: even though zero `AssetB` has been transferred so far, the shared window total is already `60`. The projected aggregate total is `60 + 60 = 120 > 100`, so the second transfer is blocked with `WindowCapExceeded`.
+
+**V2 direction:** Full per-asset rolling ledgers (independent window caps and running totals per asset) are the v2 direction and are tracked in [issue #56](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/56). Until then, this cross-asset aggregation is the actual semantics: operators who require isolated rolling budgets across different tokens should deploy separate guard accounts with single-asset policies.
+
+This keeps the window invariant (§3.1) unchanged: the global `total` is still the sum of all admitted asset spends in the window across all listed assets, and admission requires `total + amount <= window_cap`.
 
 **Invariant (window):** for every authorization decision, the global `total` after any admission equals the
 sum of `entries[i].amount` over global entries with `ts + window_secs > now`, and a new asset transfer
@@ -399,6 +418,10 @@ Before any policy gate or classification rule is evaluated, `__check_auth` execu
 2. **Ed25519 signature verification:** `env.crypto().ed25519_verify(&agent, &signature_payload, &signatures)`. If verification fails (wrong signer key or corrupted signature bytes), the host crypto function traps the execution frame (`InvokeError::Abort`). Crucially, this host trap occurs before policy snapshot loading, so an unauthorized or wrong-key signature aborts the frame immediately and never proceeds to return `Error::NoPolicy` or leak whether a policy is installed.
 3. **Policy snapshot loading:** `AuthSnapshot::load(&env)`. If `DataKey::Policy` is missing (never set or revoked), `__check_auth` returns contract error `Error::NoPolicy` (code #12).
 
+This 1→2→3 ordering is a stated security guarantee, not an implementation detail: see
+§10.2 for the guarantee, the named tests that pin it, and the refactor warning that goes with
+it.
+
 Once authentication succeeds and the policy snapshot is loaded, the decision table below is evaluated over every auth context:
 
 Evaluation order inside `__check_auth` (first match wins; all states below are evaluated against
@@ -427,7 +450,7 @@ prose is a semantics call for a maintainer, not a doc-generation side effect.
 
 Note the dead-man auto-freeze (`#2`) applies even to `heartbeat` from the registered key: a
 heartbeat arriving after the grace window expired cannot revive the account — revival is the
-admin's `unfreeze` (§7). This is the precise freeze/reversal boundary.
+admin's `unfreeze` (§7). This is the precise freeze/reversal boundary. The dead-man gate is evaluated against the pre-transaction heartbeat for every context in the transaction, including the heartbeat self-call.
 
 ### 4.1 Gate cost order (measured)
 
@@ -521,6 +544,27 @@ For comparison, an **allowed** transfer with window pruning costs ~14,800 instru
   account it holds no attestation for, and the advisory view is where the missing attestation is
   surfaced. Measured: see `dms_timeline_edge_matrix` (scenario B).
 
+### 5.1 Reversal boundaries — which gate is cleared by what
+
+The guard enforces several account-level and per-context gates (§4). When an account becomes blocked, the reversal path depends strictly on which gate fired:
+
+| Gate / Reason | Cleared by `unfreeze`? | Cleared by `set_policy`? | Cleared by time / neither? |
+|---|---|---|---|
+| **Admin freeze** (`AdminFrozen`, rule #1) | **Yes** (`AdminFrozen = false`) | **No** (leaves `AdminFrozen` unchanged) | No |
+| **Dead-man switch** (`HeartbeatExpired`, rule #2) | **Yes** (stamps `LastHeartbeat = now`) | **Yes** (stamps `LastHeartbeat = now` and starts fresh grace) | No (time progression can never unfreeze silence) |
+| **No policy** (`NoPolicy`, rule #3) | **No** | **Yes** (installs a valid policy) | No |
+| **Paused** (`Paused`, rule #4) | **No** | **Yes** (installs a policy with `paused: false`) | No |
+| **Outside active window** (`OutsideActiveWindow`, rule #5) | **No** | **Yes** (installs a policy with renewed `active_until` or `0`) | Before `active_from`: cleared naturally when ledger time advances into `[active_from, active_until]`. After `active_until`: **neither** time nor `unfreeze` can clear it; only `set_policy` revives the account. |
+| **Window cap exceeded** (`WindowCapExceeded`, rule #7d) | **No** | **Yes** (resets window ledger to empty) | **Yes** (rolling window entries expire naturally as time advances past `window_secs`) |
+| **Context classification rules** (unlisted asset/recipient, per-tx cap, protocol/function) | **No** | **Yes** (if policy configuration updates allowlists or caps) | No |
+
+**Key asymmetry — dead-man switch vs. active window:**
+An operator who observes an account blocked after inactivity might expect `unfreeze` to restore operation in all cases. The two freeze mechanisms look symmetric from the outside and are not:
+- `unfreeze()` performs only two state transitions: it sets `AdminFrozen = false` and `LastHeartbeat = now`. It never mutates `PolicyConfig`.
+- When an account passes `active_until`, it is blocked at gate #5 (`OutsideActiveWindow`). Because gate #5 is an account-level check evaluated before per-context classification, it blocks **all** contexts — including the `heartbeat` self-call.
+- Calling `unfreeze()` does not advance `active_until`. The account remains blocked (`outside_active_window`), and even the agent's heartbeat cannot be executed.
+- Only an administrator calling `set_policy` with a renewed active window (`active_until >= now` or `active_until = 0`) can revive an account whose active window has expired.
+
 ---
 
 ## 6. Per-context classification and rule application
@@ -613,14 +657,16 @@ not in a rule's `fns` allowlist (when present) are blocked `FunctionNotAllowed`.
 ### 6.4 Anything else — blocked
 
 A context whose contract is not the account itself, not in `assets`, and not in `protocols`
-is blocked (`UnknownContract`). The account is **default-deny**: adding a protocol is an
-explicit policy act, and the roll-out of fine-grained enforcement for such calls (v2) never has
-to weaken an allowlist that already exists.
+is blocked (`UnknownContract`). Host-function contract creation contexts (`CreateContractHostFn`
+and `CreateContractWithCtorHostFn`) are mapped by `parse_call` to `ParsedCall::CreateContract`
+and blocked with `CreateContractNotAllowed` (code 28). The account is **default-deny**: adding
+a protocol is an explicit policy act, and contract creation by the agent is disallowed.
 
 **Boundary stated exactly:** pause (#4), active-window (#5), and dead-man/admin freeze (#1–#2)
 are *transaction-level* gates applied before classification, so they bind every call the
 account makes, SAC or protocol. Spend caps and rolling-window accounting bind SAC asset
-transfers only. Recipient allowlists bind SAC asset transfers only.
+transfers only. Recipient allowlists bind SAC asset transfers only. Contract creation is
+denied unconditionally.
 
 ---
 
@@ -663,6 +709,10 @@ named by the change.** Admin (classic or contract address) governs policy and fr
 registered agent key (verified through the account's own `__check_auth`) may only heartbeat and
 transact within policy. No function moves funds; funds move only through the agent's own
 authorized transactions.
+
+`__check_auth` itself enforces the ordering stated in §10.2: the agent's signature is verified
+before any policy state is read, so an unverifiable signature never reaches the decision table
+below.
 
 ```rust
 // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -1122,7 +1172,7 @@ The executable TTL regression test shortens the test ledger's persistent TTL, ad
 sequence past expiry, and verifies that archived `Policy`, `Window`, `LastHeartbeat`, and
 `AdminFrozen` entries restore with their original values. It also checks that a pre-expiry spend
 still counts against `window_cap` after restoration and that an expired dead-man clock remains
-expired. See [issue #43](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/43)
+expired. See [issue #43](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/43)
 and the operator [rent/TTL guide](docs/rent-and-ttl.md).
 
 ---
@@ -1149,7 +1199,7 @@ Not guarded by v1 (documented, not hidden):
 
 ### 10.1 Signature binding
 
-**What the payload covers.** `__check_auth` step 1 is
+**What the payload covers.** `__check_auth` step 2 is
 `ed25519_verify(AgentPubkey, signature_payload, sig)` — a pure signature check over a
 digest the **host** computes, never this contract:
 `sha256(HashIdPreimage::SorobanAuthorization { network_id, nonce,
@@ -1178,7 +1228,7 @@ transaction will execute under this account. What the binding therefore covers:
   `signature_expiration_ledger` regardless. Division of labor, stated plainly: nonce
   and expiry replay defense is **host** construction — this contract only ever checks
   the signature over the digest the host hands it.
-- *Agent signature ≠ admin authority.* An agent signature clears step 1 only for auth
+- *Agent signature ≠ admin authority.* An agent signature clears verification only for auth
   entries whose credentials address is **this account**. The admin write path
   (`set_policy`, `revoke_policy`, `freeze`, `unfreeze`, `rotate_agent_key`) runs under
   `require_auth(Admin)` — a different address, a different auth entry, a different
@@ -1196,6 +1246,60 @@ replayed transaction; the nonce is consumed on first use; and
 `signature_expiration_ledger` bounds how long the leak stays usable. A leaked pair
 cannot authorize a policy change, a different recipient, or a larger amount — those
 are different digests, and the admin path never consults the agent's signature at all.
+
+### 10.2 Verification ordering guarantee
+
+**The guarantee.** `__check_auth` verifies the agent's Ed25519 signature over the host's auth
+payload **before** any policy state is read and **before** any decision-table gate is evaluated.
+Consequently an unverifiable signature — wrong signer key, corrupted signature bytes, or a
+payload belonging to a different transaction (§10.1) — never reaches the decision table: there
+is no path on which an unverified signature consults `PolicyConfig`, `AdminFrozen`,
+`LastHeartbeat`, the rolling window, or any allowlist, and therefore no path on which it causes
+a storage write. `env.crypto().ed25519_verify` traps the execution frame (`InvokeError::Abort`)
+at the point of failure, so the transaction reverts with a host abort rather than a guard
+verdict. This is what makes "a compromised-but-unregistered key cannot do anything" a property
+of the code rather than a likelihood.
+
+Two corollaries worth stating because they are the ones a reviewer can check:
+
+- A wrong-key caller cannot learn whether a policy is installed. The abort precedes
+  `AuthSnapshot::load`, so an account with a policy and an account without one are
+  indistinguishable to that caller — both abort.
+- A wrong-key caller cannot obtain a `Blocked` reason symbol. Reason symbols come from the
+  decision table; reaching them requires a valid signature from the registered key.
+
+**Enforcing tests** (all `src/integration_tests.rs`; the suite is what a refactor of the
+ordering is measured against):
+
+| Test | What it pins |
+|---|---|
+| `wrong_signature_is_rejected_by_host_crypto` | On an initialized account **with** policy installed, an entry signed by a different key aborts the call; the registered agent still authorizes afterwards |
+| `auth_verification_order_initialized_account_wrong_signature_traps_as_host_abort` | The ordering case that matters: wrong key **and** corrupted bytes both trap with `InvokeError::Abort` on an account with **no policy installed**, i.e. verification precedes policy load rather than merely preceding the gates. If the snapshot were read first, these would return `NoPolicy` |
+| `auth_verification_ordering_matrix_pins_exact_observables` | The full observable matrix: uninitialized + any signature → `NotInitialized`; initialized (no policy) + wrong signature → `InvokeError::Abort`; initialized (no policy) + valid signature → `NoPolicy`; initialized + policy + valid signature → `Ok(())` |
+| `captured_signature_cannot_authorize_different_tx`, `check_auth_binds_signature_to_the_exact_payload` | The payload-binding side of the same property (§10.1): a signature verified only over the exact digest it was made for |
+
+**Interaction with the not-initialized and no-policy paths.** Two early contract-error returns sit
+either side of verification, and their relative order is a **separate documented concern** from
+this guarantee — it is specified in §4.0 and pinned by its own tests:
+
+- The registration check (`DataKey::AgentPubkey`) runs **before** verification
+  (`auth_verification_order_uninitialized_account_rejects_with_not_initialized`). An
+  uninitialized account returns `NotInitialized` even for arbitrary or invalid signature bytes,
+  instead of an opaque host abort. That does not weaken this guarantee: with no key registered
+  there is no signature that *can* verify, and the account is default-deny either way. It is a
+  diagnosability choice, not an authorization one.
+- Policy snapshot loading runs **after** verification
+  (`auth_verification_order_initialized_account_valid_signature_no_policy_yields_no_policy`).
+  `NoPolicy` is therefore reachable only by a caller holding the registered agent key, which is
+  what keeps the first corollary above true.
+
+**Refactor warning.** Do not move any policy or state read ahead of `ed25519_verify`, including
+for gas: reading the policy first to "warm" the snapshot makes a wrong-key caller's `NoPolicy`
+outcome reachable again and re-opens the information leak in the first corollary. §4.1 shows the
+cost ordering is already aligned with the semantic ordering, so there is nothing to win. If the
+sequence is reordered for any other reason, the matrix test above is the check that must fail —
+a green suite after reordering means the tests were changed to match the code, which is the
+outcome this section exists to prevent.
 
 ---
 
