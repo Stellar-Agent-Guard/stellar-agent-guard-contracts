@@ -62,7 +62,8 @@
           "error": "HeartbeatExpired",
           "tests": [
             "account_gates_order_beats_calls",
-            "heartbeat_allowed_but_expired_blocked_even_for_heartbeat"
+            "heartbeat_allowed_but_expired_blocked_even_for_heartbeat",
+            "heartbeat_expiry_and_active_window_both_firing_reports_heartbeat_expired"
           ]
         }
       ],
@@ -114,7 +115,8 @@
         {
           "error": "OutsideActiveWindow",
           "tests": [
-            "outside_active_window_blocks_before_classification"
+            "outside_active_window_blocks_before_classification",
+            "heartbeat_expiry_and_active_window_both_firing_reports_heartbeat_expired"
           ]
         }
       ]
@@ -177,13 +179,15 @@
         {
           "error": "RecipientNotAllowed",
           "tests": [
-            "recipient_allowlist_enforced_and_escaped"
+            "recipient_allowlist_enforced_and_escaped",
+            "mixed_multi_context_batch_reports_the_first_failing_context"
           ]
         },
         {
           "error": "PerTxCapExceeded",
           "tests": [
-            "per_tx_cap_enforced"
+            "per_tx_cap_enforced",
+            "mixed_multi_context_batch_reports_the_first_failing_context"
           ]
         },
         {

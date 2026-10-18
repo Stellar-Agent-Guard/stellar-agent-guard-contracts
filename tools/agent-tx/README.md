@@ -96,7 +96,8 @@ agent-tx check --guard C... --asset C... --to G... --amount 1100
 
 Output shows:
 - `result`: `allowed` or `blocked`
-- If blocked: `reason` (the policy rejection reason, e.g., `per_tx_cap_exceeded`)
+- If blocked: `reason` (the RPC's error code), plus `diagnostic_reason` decoded
+  from the diagnostic events when they are present
 - If allowed: `estimated_fee_stroops` (RPC's `minResourceFee`)
 
 Example (blocked by per-tx cap):
@@ -104,6 +105,19 @@ Example (blocked by per-tx cap):
 result: blocked
 reason: per_tx_cap_exceeded
 ```
+
+**`check` is not a policy verdict.** It simulates the SAC transfer with **no
+authorization entry** (`src/main.rs`, `cmd_check`: `invoke_op(&invocation,
+VecM::default())`), so the host never calls the guard's `__check_auth` and the
+policy engine never runs. Recorded against the live testnet deployment, the
+same 1100-unit transfer printed `result: allowed` here while
+`preflight --secret` blocked it with `heartbeat_expired`. What `check` reports
+is whether the *unsigned* simulation succeeds — i.e. the operation shape,
+footprint and fee — so treat `allowed` from `check` as "the call is well-formed
+and costed", never as "the policy admits it". For an enforced answer use
+`preflight --secret` (below) or the on-chain `check` / `check_detailed`
+read-only contract views (SPEC section 7), which run the same decision path
+without needing auth.
 
 These reads use `getLedgerEntries` and `simulateTransaction` — no auth, no submission, no sequence advancement.
 
@@ -127,6 +141,26 @@ BLOCKED (pre-broadcast, enforced simulation):
   event [C...] topics=(event_auth_checked, blocked, per_tx_cap_exceeded) data=...
   broadcast: no
 ```
+
+Read the reason from the `auth_checked` event's third topic. `preflight` is the
+only local path that is guaranteed to see it, because it is the only one that
+signs: the simulation failure comes back as `result.error` plus base64
+diagnostic events in `result.events`, and a submitted transaction that fails
+carries no readable reason field at all. The full observable-error → policy-reason
+mapping, with a verbatim live capture, is
+[`docs/functions/check-auth.md`](../../docs/functions/check-auth.md#what-an-operator-sees-when-this-rejects-issue-425)
+and the reason vocabulary is
+[`docs/reason-glossary.md`](../../docs/reason-glossary.md).
+
+> Known reporting gap, verified live (documented in the check-auth section above,
+> not fixed here): the block report parses the JSON-RPC *error-object* shape
+> (`error.code` / `error.message` / `error.data.events`) while soroban-rpc returns
+> a simulation failure as `result.error` (a string) with diagnostics in
+> `result.events`. Against the current deployment the header and
+> `broadcast: no` print but the `message:` / `diagnostic events:` lines above do
+> not. The exit code is unaffected, so `1` still means "the enforced simulation
+> blocked this call" — decode the reason from your own `simulateTransaction`
+> response if you need the symbol from a script.
 
 An admitted signed simulation prints `RESULT: ALLOWED (preflight only)`, the
 estimated fee in stroops, and `broadcast: no`. The fee estimate is the RPC's

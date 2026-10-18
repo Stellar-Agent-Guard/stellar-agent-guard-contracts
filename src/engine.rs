@@ -1580,6 +1580,74 @@ mod tests {
         assert_eq!(l.total, 0, "a blocked window must not admit spend");
     }
 
+    /// SPEC §5.2: the dead-man gate (row 2) and the active-window gate (row 5)
+    /// can bind the same account at the same instant, and only one reason
+    /// surfaces. The reported reason is the dead-man one because `decide()`
+    /// tests the account-state gates in a single `if / else if` chain; applying
+    /// only the `unfreeze` half (`LastHeartbeat = now`, never `PolicyConfig`)
+    /// then reveals `outside_active_window` on the very next attempt.
+    #[test]
+    fn heartbeat_expiry_and_active_window_both_firing_reports_heartbeat_expired() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.dms_grace_secs = 100;
+        p.active_from = 5_000;
+        p.active_until = 6_000;
+        p.window_cap = 100;
+        let mut l = Ledger::empty(&env);
+
+        // A spend the classification rules would admit, plus the heartbeat that
+        // would be the agent's own escape route. Neither may slip past the gates.
+        let ctx = vec![&env, transfer_ctx(&env, 1, 2, 5), heartbeat_ctx(&env, &sa)];
+
+        // Both gates true at `now = 1_000`: silent for 500s (> grace 100) and
+        // before `active_from`. The dead-man leg is the only reason reported.
+        let stale = AccountState {
+            admin_frozen: false,
+            last_heartbeat: 500,
+        };
+        let both = decide(&env, &sa, Some(&p), &stale, &mut l, 1_000, ctx.clone());
+        assert_eq!(both.len(), 2, "one verdict per context");
+        for verdict in &both {
+            assert!(
+                matches!(verdict, Decision::Blocked(Error::HeartbeatExpired)),
+                "dead-man must outrank the active window, got {verdict:?}"
+            );
+        }
+        assert_eq!(l.total, 0, "a denied batch must not admit spend");
+
+        // The `unfreeze` half only. Same policy, same ledger time: the account is
+        // still blocked, and now the operator sees the other gate for the first
+        // time. This is the reversal trap §5.2 exists to name.
+        let re_armed = AccountState {
+            admin_frozen: false,
+            last_heartbeat: 1_000,
+        };
+        let after_unfreeze = decide(&env, &sa, Some(&p), &re_armed, &mut l, 1_000, ctx.clone());
+        for verdict in &after_unfreeze {
+            assert!(
+                matches!(verdict, Decision::Blocked(Error::OutsideActiveWindow)),
+                "unfreeze must not clear the window leg, got {verdict:?}"
+            );
+        }
+        assert_eq!(l.total, 0, "still denied, so still no spend");
+
+        // The `set_policy` half: a policy whose bounds admit `now`, installed at
+        // `now` (which is what stamps `LastHeartbeat = now`). Both legs clear.
+        let mut renewed = p.clone();
+        renewed.active_from = 0;
+        renewed.active_until = 0;
+        let revived = decide(&env, &sa, Some(&renewed), &re_armed, &mut l, 1_000, ctx);
+        for verdict in &revived {
+            assert!(
+                matches!(verdict, Decision::Allowed),
+                "renewed window plus a re-armed clock must admit, got {verdict:?}"
+            );
+        }
+        assert_eq!(l.total, 5, "the admitted transfer is the first spend");
+    }
+
     #[test]
     fn active_window_boundaries_are_inclusive() {
         // SPEC §4 row 5: block when `now < active_from` or `now > active_until`,
@@ -2409,6 +2477,123 @@ mod tests {
         assert!(matches!(d2.first().unwrap(), Decision::Allowed));
         assert_eq!(l.total, 70);
         assert_eq!(l.len(), 1);
+    }
+
+    /// The reason `__check_auth` reports for a set of verdicts: the **first**
+    /// blocked context in iteration order, mirroring the `first_error` fold in
+    /// `src/lib.rs`. `decide()` itself returns one verdict per context and never
+    /// short-circuits, so which code surfaces is a property of this fold, not of
+    /// the engine loop — hence a documented claim needs its own helper.
+    fn reported_reason(verdicts: &[Decision]) -> Option<Error> {
+        verdicts.iter().find_map(|v| match v {
+            Decision::Blocked(e) => Some(*e),
+            Decision::Allowed => None,
+        })
+    }
+
+    /// SPEC §6.0 worked example: a mixed batch authorizes nothing, commits no
+    /// window admission, and reports the first failing context — which is
+    /// order-dependent, so the order is pinned in both directions.
+    #[test]
+    fn mixed_multi_context_batch_reports_the_first_failing_context() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.per_tx_cap = 80;
+        p.window_cap = 100;
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 3),
+                fns: None,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+
+        // [allowlisted protocol call, admissible transfer, over-cap transfer].
+        let batch = vec![
+            &env,
+            proto_ctx(&env, 3, "deposit"),
+            transfer_ctx(&env, 1, 2, 40),
+            transfer_ctx(&env, 1, 2, 90),
+        ];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, batch);
+        assert_eq!(d.len(), 3, "one verdict per context");
+        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert!(matches!(d.get(1).unwrap(), Decision::Allowed));
+        assert!(matches!(
+            d.get(2).unwrap(),
+            Decision::Blocked(Error::PerTxCapExceeded)
+        ));
+        assert_eq!(
+            reported_reason(&d),
+            Some(Error::PerTxCapExceeded),
+            "the one failing context is the reported reason"
+        );
+        // The admissible 40 was staged and dropped with the batch: no global
+        // entry, no total. `Window` is never written for a denied batch.
+        assert_eq!(l.total, 0);
+        assert_eq!(l.len(), 0);
+
+        // The drop was real: 70 fits the untouched 100-unit budget. Had the
+        // staged 40 committed, 40 + 70 = 110 would have been `window_cap_exceeded`.
+        let after = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1_000,
+            vec![&env, transfer_ctx(&env, 1, 2, 70)],
+        );
+        assert!(matches!(after.first().unwrap(), Decision::Allowed));
+        assert_eq!(l.total, 70);
+
+        // Two failing contexts at once: the reported reason is whichever comes
+        // first in iteration order, and that order is the caller's transaction.
+        let mut l2 = Ledger::empty(&env);
+        let recipient_first = vec![
+            &env,
+            // addr(4) is in no allowlist, so this is a recipient denial.
+            transfer_ctx(&env, 1, 4, 5),
+            transfer_ctx(&env, 1, 2, 90),
+        ];
+        let d_recipient = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l2,
+            1_000,
+            recipient_first,
+        );
+        assert_eq!(
+            reported_reason(&d_recipient),
+            Some(Error::RecipientNotAllowed),
+            "the first blocked context wins, and the second is still evaluated"
+        );
+        assert!(matches!(
+            d_recipient.get(1).unwrap(),
+            Decision::Blocked(Error::PerTxCapExceeded)
+        ));
+
+        // Same two denials, opposite order: same verdicts, different report.
+        let cap_first = vec![
+            &env,
+            transfer_ctx(&env, 1, 2, 90),
+            transfer_ctx(&env, 1, 4, 5),
+        ];
+        let d_cap = decide(&env, &sa, Some(&p), &alive(), &mut l2, 1_000, cap_first);
+        assert_eq!(
+            reported_reason(&d_cap),
+            Some(Error::PerTxCapExceeded),
+            "reordering the contexts reorders the reported reason"
+        );
+        assert!(matches!(
+            d_cap.get(1).unwrap(),
+            Decision::Blocked(Error::RecipientNotAllowed)
+        ));
+        assert_eq!(l2.total, 0, "neither denied batch admitted any spend");
     }
 
     /// Per-instruction CPU budget the decision path is asserted against

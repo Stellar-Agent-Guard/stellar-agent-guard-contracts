@@ -67,11 +67,14 @@ runs once rules 1–6 have passed. The one class of `n/a` that *is* a gap is an 
    not merely fail to apply — it is *not reached* for the classification logic. A call
    blocked at rule 1 is never parsed, never matched against an allowlist, and never touches
    the rolling window.
-3. **Rule 3 (`NoPolicy`) is evaluated before rule 1 (`AdminFrozen`) in code.** `decide()`
-   destructures `policy: Option<&PolicyConfig>` first and returns `NoPolicy` before it reads
-   `state.admin_frozen`. SPEC §4 numbers `AdminFrozen` as rule 1, so for the
-   *no-policy + frozen* combination the spec implies `admin_frozen` and the code returns
-   `no_policy`. See [finding F-1](#f-1-rule-order-no_policy-precedes-adminfrozen-in-code).
+3. **Rule 1 (`AdminFrozen`) is evaluated before rule 3 (`NoPolicy`) in code, which matches
+   SPEC §4's numbering.** `decide()` reads `state.admin_frozen` and returns for every context
+   before it destructures the `Option<&PolicyConfig>` (`src/engine.rs`, after the §4 row 0
+   `MAX_AUTH_CONTEXTS` bound and before every policy gate), so an account that is both frozen and
+   policy-less reports `admin_frozen`.
+   What is *not* pinned is that combination: no test in this map's index freezes an account and
+   then revokes or withholds the policy, so the ordering is engine behavior with no assertion
+   behind it. See [finding F-1](#f-1-rule-order-adminfrozen-precedes-no_policy-and-is-unpinned).
 4. **Rule 6 admits `heartbeat` only, not `check`.** SPEC §4 rule 6 lists "(heartbeat, check)";
    `decide()` permits only `heartbeat`, everything else on the account's own address
    returns `SelfFunctionNotAllowed`. `check`/`check_detailed` are views that do not
@@ -133,12 +136,12 @@ with a pointer into the [gap list](#4-known-coverage-gaps). Keys resolve in
 | SPEC §4 rule | K1 self | K2 asset transfer | K3 asset other-fn | K4 protocol | K5 create-contract | K6 unknown |
 |---|---|---|---|---|---|---|
 | **1.** `AdminFrozen` | — gap **G5** | `E-9` `I-13` | — gap **G3** | — gap **G3** | — gap **G3** | — gap **G3** |
-| **2.** `HeartbeatExpired` | `E-10` `I-12` | `E-9` `I-12` | — gap **G4** | — gap **G4** | — gap **G4** | — gap **G4** |
+| **2.** `HeartbeatExpired` | `E-10` `E-12` `I-12` | `E-9` `E-12` `I-12` | — gap **G4** | — gap **G4** | — gap **G4** | — gap **G4** |
 | **3.** `NoPolicy` | — gap **G6** | `E-1` `I-7` `I-18` | — gap **G6** | — gap **G6** | — gap **G6** | — gap **G6** |
 | **4.** `Paused` | — gap **G7** | `E-9` | — gap **G7** | — gap **G7** | — gap **G7** | — gap **G7** |
-| **5.** `OutsideActiveWindow` | — gap **G1** | — gap **G1** | — gap **G1** | — gap **G1** | — gap **G1** | — gap **G1** |
+| **5.** `OutsideActiveWindow` | `E-12` `I-21` | `E-12` `I-21` | — gap **G1** | — gap **G1** | — gap **G1** | — gap **G1** |
 | **6.** self-call admission | `E-10` `E-11` | `n/a` | `n/a` | `n/a` | `n/a` | `n/a` |
-| **7.** classification | `E-10` `E-11` | `E-2` `E-3` `E-4` `E-5` `E-6` `E-7` `E-8` `I-8` `I-9` `I-10` `I-11` `I-4` | — gap **G8** | `E-8` | `I-20` | `E-5` `E-8` |
+| **7.** classification | `E-10` `E-11` | `E-2` `E-3` `E-4` `E-5` `E-6` `E-7` `E-8` `E-13` `I-8` `I-9` `I-10` `I-11` `I-4` | — gap **G8** | `E-8` | `I-20` | `E-5` `E-8` |
 
 ### 3.1 Coverage by call kind (rows = call kinds, columns = gates)
 
@@ -147,16 +150,17 @@ untested *for the thing I am touching*".
 
 | kind | frozen | dead-man | no-policy | paused | active-window | self-fn | classification | pinned cells |
 |---|---|---|---|---|---|---|---|---|
-| **K1** self | — | `E-10` `I-12` | — | — | — | `E-10` `E-11` | `E-10` `E-11` | 4 / 7 |
-| **K2** asset transfer | `E-9` `I-13` | `E-9` `I-12` | `E-1` `I-7` `I-18` | `E-9` | — | `n/a` | `E-2`…`E-8`, `I-4`, `I-8`…`I-11` | 6 / 7 |
+| **K1** self | — | `E-10` `E-12` `I-12` | — | — | `E-12` `I-21` | `E-10` `E-11` | `E-10` `E-11` | 5 / 7 |
+| **K2** asset transfer | `E-9` `I-13` | `E-9` `E-12` `I-12` | `E-1` `I-7` `I-18` | `E-9` | `E-12` `I-21` | `n/a` | `E-2`…`E-8`, `E-13`, `I-4`, `I-8`…`I-11` | 7 / 7 |
 | **K3** asset other-fn | — | — | — | — | — | `n/a` | — | **0 / 7** |
 | **K4** protocol | — | — | — | — | — | `n/a` | `E-8` | 1 / 7 |
 | **K5** create-contract | — | — | — | — | — | `n/a` | `I-20` | 1 / 7 |
 | **K6** unknown | — | — | — | — | — | `n/a` | `E-5` `E-8` | 1 / 7 |
 
-K2 is the well-covered kind, which is the correct shape for v1: SAC transfers are the
-calls whose arguments are interpretable, so they are the ones with the most enforcement
-attached. The thin rows are where the roadmap is.
+K2 is now the fully covered kind — every gate that can bind a SAC transfer is pinned at both
+layers — which is the correct shape for v1: SAC transfers are the calls whose arguments are
+interpretable, so they are the ones with the most enforcement attached. The thin rows are where
+the roadmap is.
 
 ### 3.2 Rule 7 sub-rules for K2, in engine check order
 
@@ -166,10 +170,10 @@ broken out here so a contributor changing one knows exactly which test protects 
 | K2 sub-rule (SPEC §6.2) | reason | pinning test |
 |---|---|---|
 | `amount > 0` | `invalid_amount` | — gap **G10** |
-| `allow_any_recipient` or `recipient ∈ recipients` | `recipient_not_allowed` | `E-4` `I-10` `I-11` |
-| `amount <= per_tx_cap` (when `per_tx_cap != 0`) | `per_tx_cap_exceeded` | `E-3` `I-8` |
+| `allow_any_recipient` or `recipient ∈ recipients` | `recipient_not_allowed` | `E-4` `E-13` `I-10` `I-11` |
+| `amount <= per_tx_cap` (when `per_tx_cap != 0`) | `per_tx_cap_exceeded` | `E-3` `E-13` `I-8` |
 | `prune(window_secs)`, then `total + pending + amount <= window_cap` | `window_cap_exceeded` | `E-6` `E-7` `W-1` `W-2` `I-9` |
-| blocked ⇒ ledger unchanged (no partial commit) | — | `E-7` `I-8` `I-19` |
+| blocked ⇒ ledger unchanged (no partial commit) | — | `E-7` `E-13` `I-8` `I-19` |
 | all four cleared | **pass** | `E-2` `I-4` |
 
 ---
@@ -180,24 +184,26 @@ Every gap below is a cell in Table 2 with no pinning test. They are enumerated, 
 hidden — the point of this document is that the roadmap is legible. Each is written as a
 suggested test, sized for a contributor picking up a first issue.
 
-### G1 — rule 5 `OutsideActiveWindow`: no test at all, for any kind
+### G1 — rule 5 `OutsideActiveWindow`: pinned for K1 and K2 only
 
-**Severity: highest.** `outside_active_window` is the only account-level gate with **zero**
-decision tests. No test in `src/engine.rs` or `src/integration_tests.rs` ever sets a
-non-zero `active_from` or `active_until` and calls `decide()`; the only places the symbol
-appears are `error_and_block_reason_round_trip` (`I-19`, a symbol round-trip that never
-constructs a decision) and the `benches/denial_path_gas.rs` cost measurement, which
-**prints** its numbers and asserts nothing.
+`outside_active_window` used to be the only account-level gate with **zero** decision tests.
+That is no longer true: the gate is now pinned for a self-call (`heartbeat`) and for an asset
+transfer, at both layers — `E-12` (unit, the dead-man + active-window combination walking SPEC
+§5.2's first table row) and `I-21` (on-chain, `unfreeze` alone not reviving an expired window).
+The boundary semantics themselves are pinned by the pre-existing active-window tests in both
+files (`outside_active_window_blocks_before_classification` and `active_window_boundaries_are_inclusive`
+in `src/engine.rs`, `expired_at_install_policy_results_in_outside_active_window`,
+`status_outside_active_window_tracks_bounds` and `active_window_boundaries_are_inclusive` in
+`src/integration_tests.rs`); they predate this map's key allocation and are cited by name.
 
-That means the `now < active_from` / `now > active_until` boundary condition — including
-the off-by-one at each edge — is currently unpinned behavior on a gate that blocks real
-spends.
+**What is still missing is kind-uniformity, exactly as in G3 and G4**: rules 1–5 are supposed to
+bind *every* call kind, and nothing asserts that a protocol, asset-other-fn, create-contract or
+unknown context blocked outside the window reports `outside_active_window` rather than
+falling through to rule 7.
 
-> **Suggested test:** an engine unit test that walks a fixed `now` across a policy with
-> `active_from = t0`, `active_until = t1`, asserting `pass` at `t0` and `t1` and
-> `OutsideActiveWindow` at `t0 - 1` and `t1 + 1`; plus an on-chain test that a spend
-> outside the window is blocked *without* touching the window ledger. `src/window.rs`
-> already has `exact_boundary_semantics` (`W-4`) for the analogous window edge — mirror it.
+> **Suggested test:** one `decide()` call per remaining kind with `active_from` in the future,
+> asserting `OutsideActiveWindow` uniformly — the same iteration shape G3 and G4 ask for, so the
+> three can land as one "transaction-level gates bind every kind" module.
 
 ### G2 — rule 4 `Paused` is pinned only for K2, and only at the unit layer
 
@@ -319,6 +325,8 @@ Ed25519 signatures through the Soroban host auth flow). `W` = `src/window.rs` (l
 | `E-9` | `account_gates_order_beats_calls` | [`src/engine.rs:523`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L523) | unit |
 | `E-10` | `heartbeat_allowed_but_expired_blocked_even_for_heartbeat` | [`src/engine.rs:575`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L575) | unit |
 | `E-11` | `other_self_function_rejected` | [`src/engine.rs:601`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L601) | unit |
+| `E-12` | `heartbeat_expiry_and_active_window_both_firing_reports_heartbeat_expired` | [`src/engine.rs:1463`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L1463) | unit |
+| `E-13` | `mixed_multi_context_batch_reports_the_first_failing_context` | [`src/engine.rs:2363`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L2363) | unit |
 | `I-4` | `allowed_transaction_succeeds` | [`src/integration_tests.rs:396`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs#L396) | on-chain |
 | `I-7` | `no_policy_is_default_deny_on_chain` | [`src/integration_tests.rs:495`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs#L495) | on-chain |
 | `I-8` | `per_tx_cap_violation_blocked_without_window_effect` | [`src/integration_tests.rs:504`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs#L504) | on-chain |
@@ -330,13 +338,22 @@ Ed25519 signatures through the Soroban host auth flow). `W` = `src/window.rs` (l
 | `I-18` | `revoke_policy_is_instant_default_deny` | [`src/integration_tests.rs:757`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs#L757) | on-chain |
 | `I-19` | `error_and_block_reason_round_trip` | [`src/integration_tests.rs:771`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs#L771) | on-chain |
 | `I-20` | `contract_creation_denied_through_real_host_path` | [`src/integration_tests.rs`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs) | on-chain |
+| `I-21` | `unfreeze_does_not_clear_outside_active_window_until_set_policy` | [`src/integration_tests.rs:5407`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/integration_tests.rs#L5407) | on-chain |
 | `W-1` | `window_is_genuinely_rolling` | [`src/window.rs:158`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/window.rs#L158) | unit |
 | `W-4` | `exact_boundary_semantics` | [`src/window.rs:170`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/window.rs#L170) | unit |
 
-`E-*` numbering follows the order the tests appear in `src/engine.rs`; `I-*` numbering
-follows `src/integration_tests.rs`. Gaps in the `I-*` sequence (no `I-1`…`I-3`, `I-5`…`I-6`,
-`I-14`…`I-17`) are tests that exist but pin no matrix cell — they cover lifecycle, key
-rotation, heartbeat gas, the event audit, and the agent-loop simulation.
+`E-*` and `I-*` keys are allocated in the order tests were added to this map, and they are
+**append-only**: a new pin takes the next free number rather than re-sorting the coverage cells
+that already cite the old ones, so `E-12`/`E-13` continue the sequence even though both files
+hold many unindexed tests between the numbered ones. Gaps in the `I-*` sequence (no `I-1`…`I-3`,
+`I-5`…`I-6`, `I-14`…`I-17`) are tests that exist but
+pin no matrix cell — they cover lifecycle, key rotation, heartbeat gas, the event audit, and the
+agent-loop simulation.
+
+The `file:line` column is a point-in-time snapshot and drifts as both files grow; older rows have
+not been re-pointed every time a test landed above them. **The test name is the authoritative
+locator** — `grep -n "fn <name>" src/engine.rs` is always right, the line number is usually
+right, and neither can ever contradict what [Table 2](#3-table-2--coverage-map) claims.
 
 ### 5.1 Keeping this document honest
 
@@ -350,23 +367,30 @@ move the item out of the [gap list](#4-known-coverage-gaps) rather than leaving 
 
 ## 6. Findings for maintainers
 
-Writing the matrix surfaced four places where **SPEC text and `src/engine.rs` disagree**.
-None are fixed here — this PR is documentation-only and each needs a maintainer decision
-on which side is correct. They are listed in the order a reviewer should look at them.
+Writing the matrix surfaced four places where **SPEC text, `src/engine.rs`, and the test suite
+do not all line up**. None are fixed here — this map is documentation and each needs a
+maintainer decision on which side is correct. They are listed in the order a reviewer should
+look at them.
 
-<a id="f-1-rule-order-no_policy-precedes-adminfrozen-in-code"></a>
-### F-1 — rule order: `NoPolicy` precedes `AdminFrozen` in code
+<a id="f-1-rule-order-adminfrozen-precedes-no_policy-and-is-unpinned"></a>
+### F-1 — rule order: `AdminFrozen` precedes `NoPolicy`, and nothing pins it
 
-SPEC §4 numbers `AdminFrozen` as rule 1 and `NoPolicy` as rule 3, and says "first match
-wins". `decide()` returns `NoPolicy` first, because the `Option<&PolicyConfig>` is
-destructured before `state.admin_frozen` is read. For the *no-policy + admin-frozen*
-combination the code returns `no_policy` where a literal reading of §4 returns
-`admin_frozen`. No test distinguishes them (`E-9`'s frozen case always has a policy).
+SPEC §4 numbers `AdminFrozen` as rule 1 and `NoPolicy` as rule 3 and says "first match wins".
+`decide()` agrees with that numbering: it reads `state.admin_frozen` and returns for every
+context before it destructures the `Option<&PolicyConfig>`, so a frozen *and* policy-less
+account reports `admin_frozen`. (This map's [§1.3 note 3](#13-precedence-notes-read-before-trusting-any-single-cell) recorded
+the opposite order; it is corrected here against the current `src/engine.rs`, and SPEC §5.2 now
+states the precedence as fact rather than as a disagreement.)
 
-Either §4's ordering note should state that rule 3 is evaluated first, or `decide()` should
-check `admin_frozen` before the policy load. Security-wise the difference is small — both
-are blocks — but the freeze/reversal boundary is exactly the kind of statement CONTRIBUTING
-says must be word-for-word consistent with the code, so it should not be left ambiguous.
+What remains is that no test distinguishes the combination: `E-9`'s frozen case always installs a
+policy first, and the on-chain freeze test (`I-13`) never revokes it. So the interaction of rule 1
+and rule 3 — which reason an operator sees when both a freeze and a revoked policy are in force —
+is engine behavior with no assertion behind it, and a refactor that swapped the two blocks would
+pass the whole suite while changing the reported reason.
+
+> **Suggested test:** `decide()` with `admin_frozen = true` and `policy = None`, asserting
+> `AdminFrozen` for every context. One assertion, and it converts this finding into a pinned
+> precedence that SPEC §5.2 can cite.
 
 <a id="f-2-asset_not_allowed-and-protocol_not_allowed-are-unreachable-in-decide"></a>
 ### F-2 — `asset_not_allowed` and `protocol_not_allowed` are unreachable in `decide()`
