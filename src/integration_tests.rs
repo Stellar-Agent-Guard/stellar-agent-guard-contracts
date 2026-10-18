@@ -293,6 +293,38 @@ impl CustomAccountInterface for MockAdmin {
     }
 }
 
+/// Test helper contract to initiate contract deployment on behalf of another
+/// address. This exercises the real Soroban host authorization path for contract
+/// creation from within a contract invocation frame.
+#[contract]
+pub struct MockDeployer;
+
+#[contractimpl]
+impl MockDeployer {
+    pub fn deploy_v2(
+        env: &Env,
+        deployer: &Address,
+        salt: &BytesN<32>,
+        wasm_hash: &BytesN<32>,
+    ) -> Address {
+        env.deployer()
+            .with_address(deployer.clone(), salt.clone())
+            .deploy_v2(wasm_hash.clone(), ())
+    }
+
+    pub fn deploy_with_ctor(
+        env: &Env,
+        deployer: &Address,
+        salt: &BytesN<32>,
+        wasm_hash: &BytesN<32>,
+        arg: i128,
+    ) -> Address {
+        env.deployer()
+            .with_address(deployer.clone(), salt.clone())
+            .deploy_v2(wasm_hash.clone(), (arg,))
+    }
+}
+
 // ── Harness ──────────────────────────────────────────────────────────────
 
 struct Harness {
@@ -446,6 +478,53 @@ impl Harness {
 
     fn confirm_admin_invocation(&self) -> SorobanAuthorizedInvocation {
         self.invocation(&self.guard, "confirm_admin_rotation", std::vec![])
+    }
+
+    fn create_contract_invocation(
+        &self,
+        salt: &BytesN<32>,
+        wasm_hash: &BytesN<32>,
+    ) -> SorobanAuthorizedInvocation {
+        SorobanAuthorizedInvocation {
+            function: SorobanAuthorizedFunction::CreateContractV2HostFn(
+                xdr::CreateContractArgsV2 {
+                    contract_id_preimage: xdr::ContractIdPreimage::Address(
+                        xdr::ContractIdPreimageFromAddress {
+                            address: xdr::ScAddress::from(&self.guard),
+                            salt: xdr::Uint256(salt.to_array()),
+                        },
+                    ),
+                    executable: xdr::ContractExecutable::Wasm(xdr::Hash(wasm_hash.to_array())),
+                    constructor_args: xdr::VecM::default(),
+                },
+            ),
+            sub_invocations: xdr::VecM::default(),
+        }
+    }
+
+    fn create_contract_with_ctor_invocation(
+        &self,
+        salt: &BytesN<32>,
+        wasm_hash: &BytesN<32>,
+        ctor_arg: i128,
+    ) -> SorobanAuthorizedInvocation {
+        let val: Val = ctor_arg.into_val(&self.env);
+        let sc_val = xdr::ScVal::from_val(&self.env, &val);
+        SorobanAuthorizedInvocation {
+            function: SorobanAuthorizedFunction::CreateContractV2HostFn(
+                xdr::CreateContractArgsV2 {
+                    contract_id_preimage: xdr::ContractIdPreimage::Address(
+                        xdr::ContractIdPreimageFromAddress {
+                            address: xdr::ScAddress::from(&self.guard),
+                            salt: xdr::Uint256(salt.to_array()),
+                        },
+                    ),
+                    executable: xdr::ContractExecutable::Wasm(xdr::Hash(wasm_hash.to_array())),
+                    constructor_args: xdr::VecM::try_from(std::vec![sc_val]).unwrap(),
+                },
+            ),
+            sub_invocations: xdr::VecM::default(),
+        }
     }
 
     fn signature_expiration_ledger(&self) -> u32 {
@@ -5074,5 +5153,92 @@ fn auth_verification_ordering_matrix_pins_exact_observables() {
         r4,
         Ok(()),
         "Row 4: registered signature with policy installed must approve"
+    );
+}
+
+/// Issue #358: Exercise contract creation denial through the real host path.
+///
+/// Verifies end-to-end that when contract creation is deployed on behalf of the guarded
+/// custom account address, the real Soroban host surfaces the creation context to
+/// `__check_auth` (both `Context::CreateContractHostFn` for zero constructor args and
+/// `Context::CreateContractWithCtorHostFn` for non-zero constructor args).
+///
+/// In both cases, the policy engine denies the authorization fail-closed with
+/// `Error::CreateContractNotAllowed` (code 28), emits the `auth_checked` event with
+/// `blocked` and `create_contract_not_allowed`, and causes the host transaction to fail
+/// with `Error(Contract, #28)`.
+#[test]
+fn contract_creation_denied_through_real_host_path() {
+    let mut h = Harness::new();
+    let p = h.base_policy();
+    h.install_policy(&p);
+
+    let wasm_hash = h
+        .env
+        .deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::new(&h.env));
+    let deployer_contract = h.env.register(MockDeployer, ());
+    let client = MockDeployerClient::new(&h.env, &deployer_contract);
+
+    // Case 1: Deploy with no constructor arguments.
+    // The host surfaces Context::CreateContractHostFn to __check_auth.
+    let salt1 = BytesN::from_array(&h.env, &[1u8; 32]);
+    let root1 = h.create_contract_invocation(&salt1, &wasm_hash);
+    let entry1 = h.guard_entry(&root1);
+    h.enforce(entry1);
+
+    let res1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.deploy_v2(&h.guard, &salt1, &wasm_hash);
+    }));
+    assert!(
+        res1.is_err(),
+        "contract creation without constructor args must be blocked"
+    );
+    let panic_msg1 = res1
+        .err()
+        .and_then(|payload| payload.downcast_ref::<std::string::String>().cloned())
+        .unwrap_or_default();
+    assert!(
+        panic_msg1.contains("Error(Contract, #28)"),
+        "expected panic log to contain Error(Contract, #28), got: {panic_msg1}"
+    );
+    assert!(
+        panic_msg1.contains("create_contract_not_allowed"),
+        "expected panic log to contain create_contract_not_allowed, got: {panic_msg1}"
+    );
+    assert!(
+        panic_msg1.contains("CreateContractHostFn"),
+        "expected host diagnostic log to show Context::CreateContractHostFn, got: {panic_msg1}"
+    );
+
+    // Case 2: Deploy with constructor arguments.
+    // The host surfaces Context::CreateContractWithCtorHostFn to __check_auth.
+    let salt2 = BytesN::from_array(&h.env, &[2u8; 32]);
+    let root2 = h.create_contract_with_ctor_invocation(&salt2, &wasm_hash, 99);
+    let entry2 = h.guard_entry(&root2);
+    h.enforce(entry2);
+
+    let res2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.deploy_with_ctor(&h.guard, &salt2, &wasm_hash, &99);
+    }));
+    assert!(
+        res2.is_err(),
+        "contract creation with constructor args must be blocked"
+    );
+    let panic_msg2 = res2
+        .err()
+        .and_then(|payload| payload.downcast_ref::<std::string::String>().cloned())
+        .unwrap_or_default();
+    assert!(
+        panic_msg2.contains("Error(Contract, #28)"),
+        "expected panic log to contain Error(Contract, #28), got: {panic_msg2}"
+    );
+    assert!(
+        panic_msg2.contains("create_contract_not_allowed"),
+        "expected panic log to contain create_contract_not_allowed, got: {panic_msg2}"
+    );
+    assert!(
+        panic_msg2.contains("CreateContractWithCtorHostFn"),
+        "expected host diagnostic log to show Context::CreateContractWithCtorHostFn, got: {panic_msg2}"
     );
 }

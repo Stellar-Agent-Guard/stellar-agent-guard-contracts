@@ -200,7 +200,7 @@
         {
           "error": "CreateContractNotAllowed",
           "tests": [],
-          "note": "Reachable only through a host-function create-contract context, which no test constructs; tracked as an orphan variant in docs/reason-glossary.md (issue #132)."
+          "note": "Reachable only through host-function create-contract contexts; integration-tested through the real host path in contract_creation_denied_through_real_host_path (src/integration_tests.rs)."
         },
         {
           "error": "ProtocolNotAllowed",

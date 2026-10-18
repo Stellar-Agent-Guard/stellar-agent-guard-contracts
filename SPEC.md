@@ -109,6 +109,13 @@ OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer con
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
 and `docs/enforcement-scope.md` quote this section briefly and link here as canonical.
 
+**Contract creation contexts:** Host-function contract creation contexts (`CreateContractHostFn`
+and `CreateContractWithCtorHostFn`) are surfaced by the host to `__check_auth` when contract deployment
+is authorized by the guarded custom account (e.g. via `deployer().with_address(...)`). The
+policy engine evaluates these contexts under default-deny and denies all contract creation
+attempts fail-closed with `CreateContractNotAllowed` (code 28), verified end-to-end through
+the real host authorization path (`contract_creation_denied_through_real_host_path`).
+
 **Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol-specific parsers, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Count-based protocol call rate limiting (v1) is now implemented; opt-in protocol parsers remain a secondary track.
 
 ---
@@ -623,14 +630,16 @@ not in a rule's `fns` allowlist (when present) are blocked `FunctionNotAllowed`.
 ### 6.4 Anything else — blocked
 
 A context whose contract is not the account itself, not in `assets`, and not in `protocols`
-is blocked (`UnknownContract`). The account is **default-deny**: adding a protocol is an
-explicit policy act, and the roll-out of fine-grained enforcement for such calls (v2) never has
-to weaken an allowlist that already exists.
+is blocked (`UnknownContract`). Host-function contract creation contexts (`CreateContractHostFn`
+and `CreateContractWithCtorHostFn`) are mapped by `parse_call` to `ParsedCall::CreateContract`
+and blocked with `CreateContractNotAllowed` (code 28). The account is **default-deny**: adding
+a protocol is an explicit policy act, and contract creation by the agent is disallowed.
 
 **Boundary stated exactly:** pause (#4), active-window (#5), and dead-man/admin freeze (#1–#2)
 are *transaction-level* gates applied before classification, so they bind every call the
 account makes, SAC or protocol. Spend caps and rolling-window accounting bind SAC asset
-transfers only. Recipient allowlists bind SAC asset transfers only.
+transfers only. Recipient allowlists bind SAC asset transfers only. Contract creation is
+denied unconditionally.
 
 ---
 
