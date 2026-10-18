@@ -9,13 +9,173 @@
 //! mode (`Env::set_auths`). A blocked policy decision therefore surfaces as a
 //! failed `require_auth`, exactly as it would on-chain.
 //!
-//! Two helper contracts:
+//! # Mechanics of Host-Routed Testing
+//!
+//! Writing a host-routed test requires understanding how Soroban routes and
+//! verifies authorization for custom accounts:
+//!
+//! 1. **The Preimage the Host Hashes**:
+//!    When a contract (or host function) invokes `from.require_auth()`, the
+//!    Soroban host constructs a `HashIdPreimage::SorobanAuthorization`
+//!    containing:
+//!    - `network_id`: SHA-256 hash of the Stellar network passphrase (e.g.
+//!      Testnet vs Mainnet), preventing cross-network signature replay.
+//!    - `nonce`: An `i64` sequence number tracked per address, preventing replay
+//!      of identical authorizations within the network.
+//!    - `signature_expiration_ledger`: A `u32` ledger sequence after which the
+//!      authorization entry expires. In the harness, this is set via
+//!      `ledger.sequence() + max_ttl`.
+//!    - `invocation`: A `SorobanAuthorizedInvocation` specifying the target
+//!      contract address, function name, arguments (`VecM<ScVal>`), and any
+//!      child `sub_invocations`.
+//!
+//! 2. **Why the Signature Covers the Preimage**:
+//!    The host writes the `HashIdPreimage` to XDR and computes its SHA-256
+//!    digest. It then calls the custom account's `__check_auth` method, passing
+//!    this 32-byte hash as `signature_payload`. The guard contract uses
+//!    `env.crypto().ed25519_verify()` to assert that the provided signature
+//!    was signed by the registered agent's Ed25519 public key over that exact
+//!    32-byte payload. Only after cryptographic verification passes does the
+//!    guard evaluate the policy rules against the invocation contexts.
+//!
+//! 3. **The Role of the Nonce**:
+//!    The nonce ensures replay protection. The host rejects stale, out-of-order,
+//!    or reused nonces. In `Harness`, `self.guard_nonce` and `self.admin_nonce`
+//!    are monotonically incremented each time an entry is generated via
+//!    `guard_entry()` or `admin_entry()`. Reusing an entry or failing to increment
+//!    the nonce triggers an immediate host rejection.
+//!
+//! 4. **Invocation Trees and Sub-invocations**:
+//!    `SorobanAuthorizedInvocation` captures the call tree. For direct calls
+//!    to the guard (e.g. `heartbeat`), the invocation targets the guard directly
+//!    with empty sub-invocations. For Stellar Asset Contract (SAC) transfers,
+//!    the invocation targets `MockAsset::transfer(guard, to, amount)`. When
+//!    the contract call triggers further contract calls that also require auth,
+//!    they must be included in `sub_invocations`. A mismatch between the
+//!    invocation tree in the auth entry and what the host observes causes the
+//!    host to fail authorization before `__check_auth` is reached.
+//!
+//! # Env Modes: `mock_all_auths()` vs `set_auths()`
+//!
+//! This is the single most common source of confusion in the test harness:
+//!
+//! - **`env.mock_all_auths()` (Blanket Mocking)**:
+//!   Bypasses all signature verification and completely skips calling
+//!   `__check_auth`. Every `require_auth()` unconditionally succeeds.
+//!   *When correct*: Test setup and administrative configuration
+//!   (`initialize`, `set_policy`, `revoke_policy`). `Harness::new()` enters
+//!   mock mode during setup so tests do not need to hand-craft signatures
+//!   just to initialize state.
+//!   *The trap*: Testing guarded operations under mock mode is a false positive!
+//!   Policy checks will never execute. Never assert that a transfer or policy
+//!   block works while `mock_all_auths()` is active.
+//!
+//! - **`env.set_auths(&[entries])` / `Harness::enforce(entry)` (Enforcing Mode)**:
+//!   Flips the `Env` from mocking mode into strict enforcing mode for the
+//!   specified authorization entries. The host will look up matching entries,
+//!   validate nonces and expiration, and invoke `PolicyEngine::__check_auth`.
+//!   *When correct*: All tests asserting that an operation is allowed or
+//!   blocked by policy or signature validation.
+//!   *The trap*: Once `set_auths` is called, subsequent calls without matching
+//!   auth entries will fail. If you need to perform admin ops after entering
+//!   enforcing mode, use `Harness::set_policy_enforcing()` (which provides an
+//!   admin entry) or call `h.env.mock_all_auths()` to explicitly re-enable mocking.
+//!
+//! # Available Harness Helpers to Reuse
+//!
+//! When writing new integration tests, reuse these existing building blocks:
+//!
+//! | Category | Helper | Purpose |
+//! |---|---|---|
+//! | **Setup** | `Harness::new()` | Initializes env, registers `MockAdmin`, `MockAsset`, `PolicyEngine`, generates agent keypair, runs `initialize()`. |
+//! | | `Harness::base_policy()` | Returns a standard baseline policy with `MockAsset` and allowed recipient `h.recv`. |
+//! | | `h.install_policy(&cfg)` | Installs policy in mock mode. |
+//! | | `h.set_policy_enforcing(&cfg)` | Updates policy when already in enforcing mode. |
+//! | **Invocations** | `h.transfer_invocation(from, to, amount)` | Constructs `SorobanAuthorizedInvocation` for `MockAsset::transfer`. |
+//! | | `h.heartbeat_invocation()` | Constructs invocation for `heartbeat()`. |
+//! | | `h.invocation(contract, fn, args)` | Low-level invocation builder for arbitrary contracts/methods. |
+//! | **Auth Entries** | `h.guard_entry(&root)` | Hashes preimage, signs with agent key, bumps nonce, returns `SorobanAuthorizationEntry`. |
+//! | | `h.guard_entry_with(key, &root)` | Signs with an arbitrary key (for testing wrong or rotated keys). |
+//! | | `h.admin_entry(&root)` | Builds auth entry for `MockAdmin` (void signature). |
+//! | **Execution** | `h.enforce(entry)` | Calls `env.set_auths(&[entry])`, activating enforcing mode. |
+//! | | `h.transfer(to, amount)` | High-level: builds entry, enforces, executes transfer, asserts success. |
+//! | | `h.transfer_expect_blocked(to, amount)` | High-level: builds entry, enforces, executes transfer, asserts panic. |
+//! | | `h.transfer_blocked_reason(to, amount)` | High-level: executes and returns panic string containing `Error::reason()`. |
+//! | | `h.heartbeat()` / `h.heartbeat_expect_blocked()` | High-level heartbeat runners in enforcing mode. |
+//! | | `h.unfreeze()` | Admin unfreeze in enforcing mode. |
+//!
+//! # Minimal Worked Example
+//!
+//! Adding a new host-routed test using `Harness`:
+//!
+//! ```rust,ignore
+//! #[test]
+//! fn test_transfer_above_per_tx_cap_blocked_host_routed() {
+//!     // 1. Initialize harness (starts in mock mode for setup)
+//!     let mut h = Harness::new();
+//!
+//!     // 2. Configure policy while still in mock mode
+//!     let mut policy = h.base_policy();
+//!     policy.per_tx_cap = 100; // max 100 stroops per tx
+//!     h.install_policy(&policy);
+//!
+//!     // 3. Construct the authorized invocation the host will route
+//!     let root = h.transfer_invocation(&h.guard, &h.recv, 150);
+//!
+//!     // 4. Build and sign the auth entry (increments nonce, computes preimage hash, signs with Ed25519)
+//!     let entry = h.guard_entry(&root);
+//!
+//!     // 5. Flip the environment from mocking to enforcing mode with the signed entry
+//!     h.enforce(entry);
+//!
+//!     // 6. Invoke the SAC transfer; host routes through __check_auth, which rejects the cap breach
+//!     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+//!         MockAssetClient::new(&h.env, &h.asset).transfer(&h.guard, &h.recv, &150);
+//!     }));
+//!     assert!(res.is_err(), "transfer exceeding per-tx cap must be blocked by host require_auth");
+//! }
+//! ```
+//!
+//! Or using the high-level helper `h.transfer_blocked_reason()`:
+//!
+//! ```rust,ignore
+//! #[test]
+//! fn test_transfer_above_cap_concise() {
+//!     let mut h = Harness::new();
+//!     let mut policy = h.base_policy();
+//!     policy.per_tx_cap = 100;
+//!     h.install_policy(&policy);
+//!
+//!     let log = h.transfer_blocked_reason(&h.recv, 150);
+//!     assert!(log.contains(GuardError::PerTxCapExceeded.reason()));
+//! }
+//! ```
+//!
+//! # Declarative Scenarios and the Shared Scenario Matrix
+//!
+//! For multi-step scenarios or tests mapped to the SPEC §4 decision table,
+//! use the `GuardScenario` builder (issue #63):
+//!
+//! ```rust,ignore
+//! GuardScenario::new()
+//!     .policy(|p| p.per_tx_cap = 100)
+//!     .expect_transfer(&recv, 50)
+//!     .expect_block(GuardError::PerTxCapExceeded, &recv, 150);
+//! ```
+//!
+//! Cross-reference `docs/scenario-matrix.md` (the canonical scenario matrix)
+//! and `decision-table.json` when adding tests to ensure every decision-table
+//! row and call kind is accounted for.
+//!
+//! # Helper Contracts
+//!
 //! - `MockAsset` plays a Stellar Asset Contract: `transfer(from, to, amount)`
 //!   does `from.require_auth()`, so authorizing a transfer from the guard
 //!   routes through the guard's `__check_auth` with the real context shape.
 //! - `MockAdmin` is a trivial custom account (`Signature = ()`, always
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
+//! - `MockDeployer` exercises host contract creation routing (`CreateContractV2HostFn`).
 //!
 //! Protocol allowlist coverage (SPEC §6.3): `ProtocolRule.fns` has three
 //! states — `None` (any fn on that contract), `Some(list)` with a match, and
