@@ -489,6 +489,25 @@ For comparison, an **allowed** transfer with window pruning costs ~14,800 instru
 
 **Observation:** The early gates (#1–#5) are consistently the cheapest (~8.7k instructions) because they only check simple boolean/int flags on the account state. The classification gates (#7a–#7g) are more expensive because they require parsing the auth context, looking up allowlists, and evaluating caps. The semantic ordering therefore *accidentally* aligns with cost ordering: the cheapest gates run first. Reordering for cost would not yield meaningful savings and would weaken the semantic clarity of the freeze/reversal boundary (admin freeze must remain first). The delta between semantic and cost-optimal ordering is immaterial (<2x on the fast path).
 
+### 4.2 Admin freeze and policy pause
+
+`AdminFrozen` and `PolicyConfig.paused` are independent controls stored separately; changing one
+does not change the other. When a policy is installed, both deny the account's `__check_auth`
+authorization contexts (including agent heartbeat authorization), but they have different
+activation, reversal, and state effects. Neither flag disables the admin-authorized management
+entry points.
+
+| Topic | `AdminFrozen` | `PolicyConfig.paused` |
+|---|---|---|
+| Activation | Admin calls `freeze()`, which sets the persistent `AdminFrozen` flag. | Admin calls `set_policy()` with the complete policy and `paused: true`. |
+| What it blocks | The first decision gate rejects each authorization context with `AdminFrozen`, including heartbeat authorization. | The policy gate rejects each authorization context with `Paused`, including heartbeat authorization. |
+| Reversal | Admin calls `unfreeze()`, which clears `AdminFrozen`. It also sets `LastHeartbeat = now`. | Admin calls `set_policy()` again with the complete policy and `paused: false`. |
+| Side effects | `freeze()` changes no persistent state besides `AdminFrozen` and emits `EventFrozen`. `unfreeze()` also resets `LastHeartbeat` to now and emits `EventUnfrozen`, re-arming the dead-man clock when its timestamp changes (see §5). | Every `set_policy()` replaces the policy, increments `PolicyRevision`, resets the rolling window to empty, sets `LastHeartbeat = now` (re-arming the dead-man clock), and emits `policy_set`. These effects also apply when only `paused` was intended to change. The reset behavior is tracked in [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289). |
+| Incident-response use | Use `freeze()` for an immediate administrative halt when the installed policy and spend window should remain unchanged. Plan for `unfreeze()` to re-arm the dead-man clock. | Use `set_policy()` when intentionally replacing policy as well as changing pause state; do not treat it as a pause-only operation. During an incident it can erase accumulated window spend and restart the dead-man grace period. Dedicated `pause()`/`resume()` functions are proposed in [issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/290), but are not current contract entry points. |
+
+The controls are not interchangeable: clearing one does not clear the other, and the remaining
+gate can continue to deny authorization.
+
 ---
 
 ## 5. Dead-man switch — precise definition

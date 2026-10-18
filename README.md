@@ -309,6 +309,17 @@ pub fn unfreeze(env: Env)    // admin only — clears AdminFrozen, LastHeartbeat
 Both are admin-only (`require_auth(Admin)`). Verified live (simulation): `freeze` emits
 `EventFrozen`, `unfreeze` emits `EventUnfrozen`.
 
+With a policy installed, `AdminFrozen` and the policy's `paused` field are separate gates on
+account authorization (both also block heartbeat authorization); changing one does not clear the
+other:
+
+| Control | How to set / clear | Operational effect |
+|---|---|---|
+| `AdminFrozen` | `freeze()` / `unfreeze()` | Immediate halt without changing the policy or rolling window. `unfreeze()` also sets `LastHeartbeat = now`, re-arming the dead-man clock when needed. |
+| `PolicyConfig.paused` | `set_policy()` with `paused: true` / `false` | Replaces the whole policy each time, resets the rolling window, and re-arms the dead-man clock. This is not a pause-only update; see [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289). Dedicated `pause()`/`resume()` functions are proposed in [issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/290), but are not available yet. |
+
+For gate ordering and full incident guidance, see [SPEC §4.2](SPEC.md#42-admin-freeze-and-policy-pause).
+
 > ⚠️ **`unfreeze` re-arms the dead-man switch.** One call does two jobs: it clears
 > `AdminFrozen` *and* sets `LastHeartbeat = now` on the admin's authority. If the DMS
 > grace had already elapsed when you unfreeze, you have just silently restarted the
