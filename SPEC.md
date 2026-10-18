@@ -416,6 +416,10 @@ Before any policy gate or classification rule is evaluated, `__check_auth` execu
 2. **Ed25519 signature verification:** `env.crypto().ed25519_verify(&agent, &signature_payload, &signatures)`. If verification fails (wrong signer key or corrupted signature bytes), the host crypto function traps the execution frame (`InvokeError::Abort`). Crucially, this host trap occurs before policy snapshot loading, so an unauthorized or wrong-key signature aborts the frame immediately and never proceeds to return `Error::NoPolicy` or leak whether a policy is installed.
 3. **Policy snapshot loading:** `AuthSnapshot::load(&env)`. If `DataKey::Policy` is missing (never set or revoked), `__check_auth` returns contract error `Error::NoPolicy` (code #12).
 
+This 1→2→3 ordering is a stated security guarantee, not an implementation detail: see
+§10.2 for the guarantee, the named tests that pin it, and the refactor warning that goes with
+it.
+
 Once authentication succeeds and the policy snapshot is loaded, the decision table below is evaluated over every auth context:
 
 Evaluation order inside `__check_auth` (first match wins; all states below are evaluated against
@@ -682,6 +686,10 @@ named by the change.** Admin (classic or contract address) governs policy and fr
 registered agent key (verified through the account's own `__check_auth`) may only heartbeat and
 transact within policy. No function moves funds; funds move only through the agent's own
 authorized transactions.
+
+`__check_auth` itself enforces the ordering stated in §10.2: the agent's signature is verified
+before any policy state is read, so an unverifiable signature never reaches the decision table
+below.
 
 ```rust
 // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -1141,7 +1149,7 @@ The executable TTL regression test shortens the test ledger's persistent TTL, ad
 sequence past expiry, and verifies that archived `Policy`, `Window`, `LastHeartbeat`, and
 `AdminFrozen` entries restore with their original values. It also checks that a pre-expiry spend
 still counts against `window_cap` after restoration and that an expired dead-man clock remains
-expired. See [issue #43](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/43)
+expired. See [issue #43](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/43)
 and the operator [rent/TTL guide](docs/rent-and-ttl.md).
 
 ---
@@ -1168,7 +1176,7 @@ Not guarded by v1 (documented, not hidden):
 
 ### 10.1 Signature binding
 
-**What the payload covers.** `__check_auth` step 1 is
+**What the payload covers.** `__check_auth` step 2 is
 `ed25519_verify(AgentPubkey, signature_payload, sig)` — a pure signature check over a
 digest the **host** computes, never this contract:
 `sha256(HashIdPreimage::SorobanAuthorization { network_id, nonce,
@@ -1197,7 +1205,7 @@ transaction will execute under this account. What the binding therefore covers:
   `signature_expiration_ledger` regardless. Division of labor, stated plainly: nonce
   and expiry replay defense is **host** construction — this contract only ever checks
   the signature over the digest the host hands it.
-- *Agent signature ≠ admin authority.* An agent signature clears step 1 only for auth
+- *Agent signature ≠ admin authority.* An agent signature clears verification only for auth
   entries whose credentials address is **this account**. The admin write path
   (`set_policy`, `revoke_policy`, `freeze`, `unfreeze`, `rotate_agent_key`) runs under
   `require_auth(Admin)` — a different address, a different auth entry, a different
@@ -1215,6 +1223,60 @@ replayed transaction; the nonce is consumed on first use; and
 `signature_expiration_ledger` bounds how long the leak stays usable. A leaked pair
 cannot authorize a policy change, a different recipient, or a larger amount — those
 are different digests, and the admin path never consults the agent's signature at all.
+
+### 10.2 Verification ordering guarantee
+
+**The guarantee.** `__check_auth` verifies the agent's Ed25519 signature over the host's auth
+payload **before** any policy state is read and **before** any decision-table gate is evaluated.
+Consequently an unverifiable signature — wrong signer key, corrupted signature bytes, or a
+payload belonging to a different transaction (§10.1) — never reaches the decision table: there
+is no path on which an unverified signature consults `PolicyConfig`, `AdminFrozen`,
+`LastHeartbeat`, the rolling window, or any allowlist, and therefore no path on which it causes
+a storage write. `env.crypto().ed25519_verify` traps the execution frame (`InvokeError::Abort`)
+at the point of failure, so the transaction reverts with a host abort rather than a guard
+verdict. This is what makes "a compromised-but-unregistered key cannot do anything" a property
+of the code rather than a likelihood.
+
+Two corollaries worth stating because they are the ones a reviewer can check:
+
+- A wrong-key caller cannot learn whether a policy is installed. The abort precedes
+  `AuthSnapshot::load`, so an account with a policy and an account without one are
+  indistinguishable to that caller — both abort.
+- A wrong-key caller cannot obtain a `Blocked` reason symbol. Reason symbols come from the
+  decision table; reaching them requires a valid signature from the registered key.
+
+**Enforcing tests** (all `src/integration_tests.rs`; the suite is what a refactor of the
+ordering is measured against):
+
+| Test | What it pins |
+|---|---|
+| `wrong_signature_is_rejected_by_host_crypto` | On an initialized account **with** policy installed, an entry signed by a different key aborts the call; the registered agent still authorizes afterwards |
+| `auth_verification_order_initialized_account_wrong_signature_traps_as_host_abort` | The ordering case that matters: wrong key **and** corrupted bytes both trap with `InvokeError::Abort` on an account with **no policy installed**, i.e. verification precedes policy load rather than merely preceding the gates. If the snapshot were read first, these would return `NoPolicy` |
+| `auth_verification_ordering_matrix_pins_exact_observables` | The full observable matrix: uninitialized + any signature → `NotInitialized`; initialized (no policy) + wrong signature → `InvokeError::Abort`; initialized (no policy) + valid signature → `NoPolicy`; initialized + policy + valid signature → `Ok(())` |
+| `captured_signature_cannot_authorize_different_tx`, `check_auth_binds_signature_to_the_exact_payload` | The payload-binding side of the same property (§10.1): a signature verified only over the exact digest it was made for |
+
+**Interaction with the not-initialized and no-policy paths.** Two early contract-error returns sit
+either side of verification, and their relative order is a **separate documented concern** from
+this guarantee — it is specified in §4.0 and pinned by its own tests:
+
+- The registration check (`DataKey::AgentPubkey`) runs **before** verification
+  (`auth_verification_order_uninitialized_account_rejects_with_not_initialized`). An
+  uninitialized account returns `NotInitialized` even for arbitrary or invalid signature bytes,
+  instead of an opaque host abort. That does not weaken this guarantee: with no key registered
+  there is no signature that *can* verify, and the account is default-deny either way. It is a
+  diagnosability choice, not an authorization one.
+- Policy snapshot loading runs **after** verification
+  (`auth_verification_order_initialized_account_valid_signature_no_policy_yields_no_policy`).
+  `NoPolicy` is therefore reachable only by a caller holding the registered agent key, which is
+  what keeps the first corollary above true.
+
+**Refactor warning.** Do not move any policy or state read ahead of `ed25519_verify`, including
+for gas: reading the policy first to "warm" the snapshot makes a wrong-key caller's `NoPolicy`
+outcome reachable again and re-opens the information leak in the first corollary. §4.1 shows the
+cost ordering is already aligned with the semantic ordering, so there is nothing to win. If the
+sequence is reordered for any other reason, the matrix test above is the check that must fail —
+a green suite after reordering means the tests were changed to match the code, which is the
+outcome this section exists to prevent.
 
 ---
 
