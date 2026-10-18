@@ -37,7 +37,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            tools/agent-tx/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'tools/agent-tx/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-cargo-
 
       - name: Format check
         run: cargo fmt --check
@@ -68,6 +72,18 @@ jobs:
 
       - name: Verify README claims
         run: scripts/verify-readme.sh
+
+      - name: Verify documentation reachability
+        run: scripts/verify-docs-reachability.sh
+
+      - name: Agent submission tool format check (tools/agent-tx)
+        run: cargo fmt --manifest-path tools/agent-tx/Cargo.toml --check
+
+      - name: Agent submission tool clippy (tools/agent-tx)
+        run: cargo clippy --manifest-path tools/agent-tx/Cargo.toml --all-targets -- -D warnings
+
+      - name: Agent submission tool tests (tools/agent-tx)
+        run: cargo test --manifest-path tools/agent-tx/Cargo.toml
 
       - name: Agent submission tool build (tools/agent-tx)
         run: cargo build --release --manifest-path tools/agent-tx/Cargo.toml
