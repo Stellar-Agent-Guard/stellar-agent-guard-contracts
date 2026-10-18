@@ -563,12 +563,171 @@ An operator who observes an account blocked after inactivity might expect `unfre
 - Calling `unfreeze()` does not advance `active_until`. The account remains blocked (`outside_active_window`), and even the agent's heartbeat cannot be executed.
 - Only an administrator calling `set_policy` with a renewed active window (`active_until >= now` or `active_until = 0`) can revive an account whose active window has expired.
 
+### 5.2 When two transaction-level gates fire at once (issue #426)
+
+§5 and §5.1 describe each gate's reversal path on its own. The **combinations are not derivable
+from either section**, and they are the case an operator actually meets: `HeartbeatExpired`
+(rule 2) and `OutsideActiveWindow` (rule 5) are independent conditions — an agent that went
+silent *and* an account whose declared activity window has closed are both true of the same
+account at the same instant — and `unfreeze` clears exactly one of them.
+
+**The order the engine reports reasons in.** Inside `decide()` (`src/engine.rs`),
+`state.admin_frozen` is checked first and returns for every context; the remaining three
+transaction-level gates are then tested in a single `if / else if / else if` chain —
+dead-man grace, then `paused`, then the active window — and the **first** gate that matches
+becomes the only reason returned, for every context in the transaction. So:
+
+- `admin_frozen` outranks everything else the engine evaluates;
+- `heartbeat_expired` outranks `paused` and `outside_active_window`;
+- `paused` outranks `outside_active_window`.
+
+This matches §4's row numbering for rules 2, 4 and 5. It says nothing about rule 3
+(`no_policy`): `decide()` reads the freeze flag before the policy load, so `admin_frozen`
+outranks a revoked policy, and [finding F-1](docs/scenario-matrix.md#f-1-rule-order-adminfrozen-precedes-no_policy-and-is-unpinned)
+tracks that the combination is still unasserted. It is out of scope here; on the
+`__check_auth` path a missing policy is rejected by the snapshot load (§4.0 step 3) before
+`decide()` runs at all.
+
+Because only one reason surfaces, the reason an operator sees is **not** a list of what is
+wrong with the account — it is the first of possibly several bindings. Reversal has to be read
+off the combination, not off the reason:
+
+| Gates true at once | Reason reported | `unfreeze` clears | `set_policy` clears | Trap when only one half is applied |
+|---|---|---|---|---|
+| dead-man + active window | `heartbeat_expired` | the dead-man leg only | both legs (renewed window **and** `LastHeartbeat = now`; §5.1) | `unfreeze` alone leaves the account blocked, now reporting `outside_active_window` |
+| admin freeze + dead-man | `admin_frozen` | both legs (`unfreeze` clears `AdminFrozen` **and** stamps `LastHeartbeat`) | the dead-man leg only | `set_policy` alone leaves it reporting `admin_frozen`; `unfreeze` is the call that ends this pair |
+| admin freeze + active window | `admin_frozen` | the freeze leg only | the window leg (and it re-arms the dead-man clock as a side effect) | `unfreeze` alone leaves it reporting `outside_active_window`; `set_policy` alone leaves `admin_frozen` |
+| `paused` + active window | `paused` | neither (`unfreeze` never mutates `PolicyConfig`) | both, in one call (`paused: false` + renewed window) | `unfreeze` changes nothing observable: the account still reports `paused` |
+| dead-man + `paused` | `heartbeat_expired` | the dead-man leg only | both (`set_policy` stamps `LastHeartbeat` and installs `paused: false`) | `unfreeze` alone leaves it reporting `paused` |
+
+Two structural facts produce every row above, and both are stated in §5.1 but worth restating
+in combination form because they are the trap:
+
+- `unfreeze()` performs exactly two state transitions — `AdminFrozen = false` and
+  `LastHeartbeat = now`. It cannot touch `paused`, `active_from`, or `active_until`, because
+  those live in `PolicyConfig` and it never writes one.
+- `set_policy()` writes the whole `PolicyConfig`, resets the window, **and** stamps
+  `LastHeartbeat = now` (`src/lib.rs`, `set_policy`). It is therefore the only single call that
+  revives an account bound by both the dead-man switch and the active window — and it re-arms
+  the dead-man clock while doing so, which is the same admin-attested re-arm §5 records for
+  `unfreeze`.
+
+Pinned by `heartbeat_expiry_and_active_window_both_firing_reports_heartbeat_expired`
+(`src/engine.rs`), which walks the first row in both directions: with a stale `LastHeartbeat`
+and `now < active_from`, a `[transfer, heartbeat]` batch reports `HeartbeatExpired` for **both**
+contexts (so the agent cannot even record a heartbeat to escape, §5); applying only the
+`unfreeze` half (`LastHeartbeat = now`) leaves the same batch blocked, now reporting
+`OutsideActiveWindow`; applying the `set_policy` half (window bounds opened) admits it. Both
+blocked rounds leave the window ledger untouched (§4 all-or-nothing); only the third round, where
+every context passes, spends the transfer's amount.
+
+The on-chain half is pinned by `unfreeze_does_not_clear_outside_active_window_until_set_policy`
+(`src/integration_tests.rs`): with `active_until` in the past, a transfer *and* a `heartbeat` are
+both refused, `unfreeze` leaves both refused, and only `set_policy` with a renewed `active_until`
+revives the account — rows two and three of the table above, run through the real host auth flow.
+
+**Operational reading.** Facing `outside_active_window` after a successful `unfreeze` is not a
+bug and not a second incident: it is the second gate becoming visible for the first time. The
+incident runbook is therefore two checks, not one — `status()` reports `paused`,
+`outside_active_window` and `window_remaining`, and `dms_health()` reports the heartbeat leg —
+and an account whose reversal needs both must be given both `set_policy` (window bounds) and,
+if the freeze flag was involved, `unfreeze`. Cross-reference the operator column of
+[`docs/reason-glossary.md`](docs/reason-glossary.md) for the per-reason remediation, the
+incident variant of [`docs/key-rotation.md`](docs/key-rotation.md#incident-variant-suspected-agent-key-leak)
+for the runbook that sequences those calls against a live incident, and
+[`docs/functions/freeze-unfreeze.md`](docs/functions/freeze-unfreeze.md) for the `rearmed_dms`
+telemetry that distinguishes the two halves of an `unfreeze`. What each rejection looks like on
+the operator's own interfaces — RPC diagnostics, Horizon, the CLI — is mapped in
+[docs/functions/check-auth.md](docs/functions/check-auth.md#what-an-operator-sees-when-this-rejects-issue-425).
+
 ---
 
 ## 6. Per-context classification and rule application
 
 Each `Context` in `auth_contexts` is classified independently; every context must pass or the
 whole authorization fails (`__check_auth` returns an error → transaction rejected).
+
+### 6.0 Worked example: a mixed multi-context batch (issue #423)
+
+A transaction can present several contexts at once — an allowlisted protocol call bundled with a
+capped transfer, or two transfers against different assets. Row-for-row the rule is stated in
+§6 and §4; what an auditor actually needs is the *partially-valid* case worked through, because
+that is the case where all-or-nothing is either real or a slogan. The batch below is the fixture
+of `mixed_multi_context_batch_reports_the_first_failing_context` (`src/engine.rs`): the numbers
+are the test's, so every claim in this section is checkable by running it.
+
+Policy (the test's `base_policy`, with the §4 transaction-level gates 1–5 all clear):
+
+| field | value |
+|---|---|
+| `assets` | `[addr(1)]` — one allowlisted SAC, called `A` below |
+| `recipients` | `[addr(2)]` — `R1`; `addr(4)` (`R2`) is deliberately **not** listed |
+| `protocols` | `[addr(3)]` with `fns = None` — `P`, any function |
+| `per_tx_cap` | 80 |
+| `window_secs` / `window_cap` | 86,400 / 100 |
+| `now` | 1,000 |
+
+Auth contexts, in the order the host supplies them:
+
+| index | context | gate it reaches | verdict |
+|---|---|---|---|
+| 0 | `P::deposit` | §6.3 protocol allowlist — contract listed, `fns = None` | **Allowed** |
+| 1 | `A.transfer(guard → R1, 40)` | §6.2 in order: recipient allowed, `40 ≤ 80` per-tx, `0 + 40 ≤ 100` window | **Allowed**, 40 staged |
+| 2 | `A.transfer(guard → R1, 90)` | §6.2 rule 3 — `90 > per_tx_cap 80` | **Blocked**, `per_tx_cap_exceeded` (22) |
+
+What each observer is left with:
+
+- **Authorization.** `decide()` returns exactly one verdict per context —
+  `[Allowed, Allowed, Blocked(PerTxCapExceeded)]` — and `__check_auth` returns
+  `Err(PerTxCapExceeded)`, code 22 (§7.1). One blocked context is enough; the two admissible
+  ones authorize nothing.
+- **The window records no admission at all.** Context 1 cleared its caps and staged its 40, but
+  the commit is guarded by `all_passed` in `decide()`, so the staged entry is dropped and
+  `Window` is never written. The same guard covers the per-recipient ledger and the
+  protocol-call counter, and it drops the up-front `ledger.prune(now, window_secs)` too: a
+  denied batch leaves no spend accounting, no merged entries, and no `event_window_merged`
+  records (§9). Even the read-side TTL refresh that `AuthSnapshot::load` performs rolls back
+  with the failed transaction (§9.5). The test closes the loop: a later
+  `A.transfer(guard → R1, 70)` is **Allowed** and takes the total to 70, whereas a committed 40
+  would have made `40 + 70 = 110 > 100` a `window_cap_exceeded`. The rejected batch spent
+  neither funds nor budget, so `status().window_remaining` is unchanged by an attack that only
+  generates denials (threat model §10).
+- **Events.** One `auth_checked` per context, including `allowed` for indices 0 and 1, each
+  stamped with its own `context_index` and the live `revision` (§9). The event stream is where
+  the *whole* batch is visible: it shows the two admissible contexts that storage did not
+  commit and the third that failed. Subject to the rollback caveat of §9 — the transaction
+  failed, so these events exist only in simulation diagnostics and dual-stream telemetry, never
+  as committed ledger events (see also [docs/functions/check-auth.md](docs/functions/check-auth.md)).
+
+**Which reason is reported when several contexts fail.** `__check_auth` reports the first
+blocked verdict **in auth-context iteration order** — the order the host handed over — not a
+"most severe" reason and not one chosen per call kind. Reordering the batch so that the
+recipient violation comes first (`[A.transfer(guard → R2, 5), A.transfer(guard → R1, 90)]`)
+reports `recipient_not_allowed` (21) even though `per_tx_cap_exceeded` is equally true of the
+other context; putting those two contexts back in the other order reports
+`per_tx_cap_exceeded` again. Both directions are asserted by the same test.
+
+That is acceptable, because the returned reason answers "why was this authorization refused"
+rather than "what is wrong with this transaction":
+
+- Any blocked context refuses the whole transaction, so whichever one is reported is a true and
+  sufficient cause. There is no partial approval that could be misattributed.
+- Nothing is lost. Every context is still evaluated (the loop does not short-circuit), so every
+  denial emits its own `auth_checked` event with its own `context_index`, and an operator
+  holding the diagnostics can enumerate *all* failing contexts instead of trusting one code.
+- It is deterministic. The order is part of the transaction before the call, and the whole
+  invocation is inside the signature digest (§10.1), so two observers of the same transaction
+  see the same reason.
+- Short-circuiting at the first failure was the rejected alternative: it would make the emitted
+  event stream depend on where the first failure happened to fall — weakening exactly the audit
+  trail above — while buying no cost, since the bounded worst case (§6.2's measured figure) is
+  charged for the full loop either way.
+
+Cross-reference: [`docs/scenario-matrix.md`](docs/scenario-matrix.md) tabulates the
+single-context cells (7 decision rows × 6 call kinds) that this example composes, and §6.4's
+boundary paragraph explains why contexts refused by the transaction-level gates never reach
+this per-context loop at all. When two of those transaction-level gates fire together the
+reported reason is decided by §5.2, not by this section.
 
 ### 6.1 Self-calls
 
@@ -1192,8 +1351,9 @@ Not guarded by v1 (documented, not hidden):
   fires on silence)
 - admin compromise (admin can freeze and rewrite policy/keys — that is its function; it still
   cannot move funds)
-- DoS on the *account* is not possible (anyone may call read functions); policy writes are
-  admin-only. The contract is unaudited; see `SECURITY.md`/README disclaimers.
+- **availability griefing by a holder of the agent key** — see §10.3
+- DoS on the account by someone **without** the agent key is not possible (anyone may call read
+  functions); policy writes are admin-only. The contract is unaudited; see `SECURITY.md`/README disclaimers.
 
 ### 10.1 Signature binding
 
@@ -1298,6 +1458,78 @@ cost ordering is already aligned with the semantic ordering, so there is nothing
 sequence is reordered for any other reason, the matrix test above is the check that must fail —
 a green suite after reordering means the tests were changed to match the code, which is the
 outcome this section exists to prevent.
+
+### 10.3 Availability: a compromised agent key can grief-block its own transactions (issue #424)
+
+**The property.** Default-deny enforcement means *any* authorization the guard evaluates is
+checked against the same policy that the agent itself must satisfy. Consequently, anyone holding
+the registered agent key can construct transactions that fail policy on demand — a transfer one
+unit over `per_tx_cap`, a recipient outside `recipients`, a call to an unlisted contract — and
+have them refused. That is not a bug in enforcement; it is the same mechanism that makes
+enforcement unbypassable, seen from the availability side. It is the fourth bullet of §10's
+list rather than an extension of the third: the pre-existing "DoS is not possible" claim is
+about *strangers*, who can neither move funds nor change policy, and it does not survive a key
+holder.
+
+**The bound — what the attacker does and does not get.**
+
+- **No funds move.** A blocked context means `__check_auth` returns `Err` before the SAC call is
+  authorized, so the token contract is never invoked (§6.2, §6.4). The attacker's power is the
+  power to fail, not to spend.
+- **No budget is consumed.** Denied batches never commit their staged window admissions
+  (§6.0), so repeated failures do not drain `window_cap`, do not fill the window ledger, and do
+  not lower `status().window_remaining`. Legitimate spend is unaffected by how many denials are
+  generated. The same is true of the per-recipient ledger and the protocol-call counter, which
+  share the `all_passed` guard.
+- **No state is written and no storage grows.** A rejected authorization rolls back its TTL
+  refreshes along with everything else (§9.5), so the attacker cannot inflate the account's
+  rent footprint by failing on purpose.
+- **Cost falls on the attacker, not the account.** A denial that is only *simulated* is free and
+  requires no transaction at all; a denial that is *submitted* is paid for by the transaction
+  source account, which must be a classic account the attacker funds — the guard's contract
+  address cannot be a fee source. The attacker cannot make the guarded account pay for its own
+  refusals.
+- **The admin ends it with one call.** `rotate_agent_key` re-binds `AgentPubkey` (§7); from that
+  transaction onward, the compromised key's signatures trap at `ed25519_verify` before any
+  policy evaluation (§10.2), so the griefing stream stops and cannot even reach a denial reason.
+  Rotation is the documented response in
+  [`docs/key-rotation.md`](docs/key-rotation.md) and
+  [`docs/functions/admin-rotation.md`](docs/functions/admin-rotation.md).
+
+**What is actually lost** is the operator's ability to tell "the agent is misbehaving" from
+"the agent's key is compromised and something is failing on purpose", plus the incident time
+spent finding out. The account remains functional for policy-respecting spend throughout.
+
+**Telemetry signature.** The denials are the only trace, and where they appear depends on how
+the operator is watching:
+
+- Each refusal is a `auth_checked` event with `result = blocked` and the specific reason symbol
+  (§9). Read the reason, not the volume: `per_tx_cap_exceeded`, `recipient_not_allowed`,
+  `recipient_blocked`, `unknown_contract`, `asset_fn_not_allowed` are per-call classification
+  denials that a heartbeat-driven agent would produce rarely and predictably, while a
+  `window_cap_exceeded` or `heartbeat_expired` stream points at liveness or budget, not at a
+  constructed attempt. The per-reason remediation is in
+  [`docs/reason-glossary.md`](docs/reason-glossary.md) — that table is the vocabulary this
+  paragraph assumes.
+- **Blocked decisions are not committed ledger events.** The transaction that carried them
+  failed and rolled them back, so they surface in simulation diagnostics and in the SDK's
+  dual-stream telemetry, never in a raw `getEvents` query over committed events (§9, README
+  step 5 caveat, and the operator-visible error shapes in
+  [docs/functions/check-auth.md](docs/functions/check-auth.md)). An operator whose pipeline
+  indexes only committed events will see *nothing* for these attempts — which is itself the
+  signature to look for: reports of a broken account, a stream of blocked decisions in the
+  diagnostics, and no corresponding committed transaction or SAC `transfer` event.
+- The positive control is the window: `status().window_remaining` unchanged across a burst of
+  denials distinguishes griefing from a real overspend attempt, which would move that number
+  when its transfers succeed.
+- A live attacker can additionally keep heartbeating, so `dms_health()` staying `ok` is not
+  evidence of an innocent agent — that is the pre-existing second bullet of this list, and it is
+  why the denial reasons, not the liveness signals, are the discriminating evidence.
+
+The asymmetry worth stating to a stakeholder: this is a *cheap* attack — no funds, no fees from
+the account, no state — and a *bounded* one — it cannot escalate into a spend, a policy change,
+or a locked budget. Its cost is measured in operator attention, and its remedy is one
+`rotate_agent_key`.
 
 ---
 
