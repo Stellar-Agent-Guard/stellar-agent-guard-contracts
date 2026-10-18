@@ -2506,6 +2506,7 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
