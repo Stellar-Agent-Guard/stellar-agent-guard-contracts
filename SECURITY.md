@@ -138,6 +138,43 @@ Not guarded by v1 (documented in SPEC §2 / §10, not hidden):
 - A live attacker who keeps the agent key heartbeating (caps still bind them)
 - Admin compromise (admin can rewrite policy/keys/freeze — by design; it still
   cannot move funds)
+- Availability griefing by a holder of the agent key: such a key can generate
+  policy-denied transactions on demand, at no cost to the guarded account, which
+  makes the account look broken. It cannot move funds, cannot consume the rolling
+  window (denied batches commit nothing — SPEC §6.0), and cannot write state; the
+  admin stops it with one `rotate_agent_key`. See SPEC §10.3 for the reasoning,
+  the bound, and the telemetry signature that distinguishes it.
+
+### When a rejection happens, what the operator can actually see
+
+A policy denial is not a revert string a caller can print — the guard returns the
+reason through the Soroban host, and it surfaces differently on each interface.
+Triaging an incident (or a bounty report claiming "the agent was blocked for no
+reason") requires knowing which surface produced which observation:
+
+- **Pre-broadcast simulation** (`soroban-rpc` `simulateTransaction`) is the only
+  surface that carries the reason legibly: it is the **third topic** of the
+  `auth_checked` diagnostic event (`topics: [event_auth_checked, blocked,
+  <reason_symbol>]`), and the same diagnostics nest the contract error code
+  (`Error(Contract, #N)`, SPEC §7.1) inside an outer `Error(Auth, InvalidAction)`
+  wrapper. Decode the topic, never the wrapper.
+- **A submitted transaction** fails as `txFAILED` ("one of the operations
+  failed, none were applied"), the fee is still charged, and the reason exists
+  only inside `result_xdr` / `diagnosticEventsXdr`. Nothing on Horizon's
+  transaction resource spells out a reason symbol.
+- **A bad signature never reaches the engine.** There is no `auth_checked`
+  event and no `fn_call … __check_auth` diagnostic line at all — the absence of
+  both is what distinguishes a signature failure from a policy denial.
+
+The full mapping — observable error → policy reason → reversal path, with a
+verbatim live capture and the rejection classes — is
+[`docs/functions/check-auth.md`](docs/functions/check-auth.md#what-an-operator-sees-when-this-rejects-issue-425).
+The reason-symbol vocabulary is [docs/reason-glossary.md](docs/reason-glossary.md);
+the reversal procedure for a frozen account — including the two-gate case where
+`unfreeze` alone is not enough — is SPEC §5.2 and the incident variant of
+[`docs/key-rotation.md`](docs/key-rotation.md#incident-variant-suspected-agent-key-leak).
+`tools/agent-tx preflight --secret …` is the enforced pre-broadcast path (exit
+`0` admitted, `1` blocked, `2` indeterminate) and it never submits.
 
 ## Supply chain — software bill of materials (SBOM)
 

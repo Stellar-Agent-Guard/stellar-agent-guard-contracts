@@ -392,6 +392,39 @@ and [dashboard #263](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-
 > touched), so there is no scraper to migrate yet; file the follow-up in that
 > repository if fixture evidence is ever wired into that gate.
 
+## What an operator sees for each recorded scenario
+
+The `→ BLOCKED (pre-broadcast, enforced simulation)` lines above are the CLI
+surface; the `topics: [event_auth_checked, blocked, <reason>]` lines are the
+on-chain surface, and they are the authoritative record of *why*. Both come from
+the same `simulateTransaction` response — the failure arrives as `result.error`
+(a string) with the base64 diagnostic events in `result.events`, not as a
+JSON-RPC `error` object — and the reason symbol is always the **third topic**.
+The complete mapping (including the post-broadcast and bad-signature surfaces)
+is
+[`docs/functions/check-auth.md`](../../docs/functions/check-auth.md#what-an-operator-sees-when-this-rejects-issue-425).
+
+| Scenario | Exit code from `agent-tx` | Reason an operator can decode | Reversal |
+|---|---|---|---|
+| 1 allowed | `0` | `topics: [event_auth_checked, allowed, ""]` — the reason topic is empty on an allow ([`auth-checked-vocabulary.json`](auth-checked-vocabulary.json)) | none needed |
+| 2 per-tx cap | `1` | `per_tx_cap_exceeded`, contract code 22 | lower the amount, or `set_policy` to raise `per_tx_cap` |
+| 3 rolling window | `1` | `window_cap_exceeded`, code 23 | wait for the oldest spend to age out of the window; `set_policy` resets the ledger |
+| 4 allowlist | `1` | `recipient_not_allowed`, code 21 | `set_policy` to add the recipient |
+| 5 dead-man | `1` | `heartbeat_expired`, code 11 — note the heartbeat self-call is **also** blocked, so only the admin can reverse it | admin `unfreeze` (scenario 5 above) |
+
+Two notes that matter when these rows are used to triage a live incident:
+
+- A block never changes state. Scenarios 2–4 consume nothing from the rolling
+  window (SPEC §4 commits admissions only when *every* context passes), so
+  replaying a blocked amount after a policy change behaves as if the failed
+  attempt never happened. Scenario 3's "50 + 110" arithmetic only holds because
+  scenario 1 was admitted.
+- These five scenarios each present a **single** auth context, so the reported
+  reason is that context's reason. A multi-context batch reports the first
+  failing context in iteration order while every context still gets its own
+  `auth_checked` event — worked through in SPEC §6.0 and pinned by
+  `mixed_multi_context_batch_reports_the_first_failing_context` (`src/engine.rs`).
+
 ## How to re-run
 
 1. `cargo build --release --target wasm32v1-none` (contract) and
