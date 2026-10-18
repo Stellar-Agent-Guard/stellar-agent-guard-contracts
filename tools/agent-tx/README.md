@@ -46,6 +46,104 @@ The leading character encodes the key *type*, never the network, so validation c
 (and does not claim to) catch a testnet contract ID used against mainnet — the
 `--network` preset and passphrase decide that.
 
+## Machine-readable output (`--json`)
+
+The human-readable prose used throughout this guide is the default, so nothing
+that reads `agent-tx` today changes. Add `--json` to a subcommand and stdout
+carries **exactly one JSON object** for that run instead; the identical
+human-readable report moves to stderr, so a driver parsing stdout never touches
+prose while a debugging operator still gets every diagnostic.
+
+```bash
+agent-tx check --guard C... --asset C... --to G... --amount 1100 --json
+agent-tx preflight --guard C... --asset C... --to G... --amount 1100 \
+    --agent-secret "$AGENT_SECRET" --json
+agent-tx transfer --guard C... --token C... --to G... --amount 110 \
+    --agent-secret "$AGENT_SECRET" --json
+```
+
+Three shapes cover every run. An admitted decision, with the ledger the run
+observed:
+
+```json
+{"outcome":"allowed","ledger":4566285,"network":"testnet"}
+```
+
+A transfer the policy rejected before broadcast, with the guard's own reason
+symbol:
+
+```json
+{"outcome":"blocked","reason":"per_tx_cap_exceeded","ledger":4566285,"network":"testnet"}
+```
+
+A submitted, confirmed transfer — fixture scenario 1 — carrying the hash to
+track:
+
+```json
+{"outcome":"allowed","tx_hash":"4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8","ledger":4566285,"network":"testnet"}
+```
+
+`ledger` is absent where the command never queries one (`check`), and `network`
+is absent where no preset named the endpoint (a custom `--rpc-url`); neither is
+guessed.
+
+### Fields
+
+Optional fields are omitted when they do not apply — never sent as `null`.
+
+| Field | Type | Present | Meaning |
+|---|---|---|---|
+| `outcome` | string | always | `allowed` — the call was admitted. `blocked` — the policy rejected it. `failed` — the run produced no admission verdict, or its submission failed. |
+| `reason` | string | when `outcome` is `blocked` or `failed` | The policy reason symbol of the block, or the stable symbol naming the failure. |
+| `tx_hash` | string | once a transaction was broadcast | The hash to track: present from submission onward, including when it later failed or timed out. |
+| `ledger` | number | when the run queried one | The latest ledger sequence observed before the verdict or submission. `check` never queries one, so it is absent there. |
+| `network` | string | when the endpoint is a named preset | `testnet`, `futurenet` or `mainnet`. Omitted — not guessed — for a custom `--rpc-url` that matches no preset. |
+
+The field names are a stable contract for the agent runtime and the sibling
+SDK: an existing field is never renamed or retyped, and new fields may only be
+added (the cost-estimate issue #435 is expected to append fee fields under this
+same rule rather than inventing parallel names).
+
+### `reason` values
+
+On a `blocked` run `agent-tx` reports the best reason available, in this order:
+
+1. the guard's own diagnostic event topic — `event_auth_checked, blocked,
+   <symbol>` (the vocabulary pinned by
+   [`tests/fixtures/auth-checked-vocabulary.json`](../../tests/fixtures/auth-checked-vocabulary.json)),
+   which is what the enforced `preflight` / `transfer` / `heartbeat` paths
+   return from `__check_auth`;
+2. the `auth_checked: <symbol>` tail of the simulation message;
+3. the RPC error code the failure arrived with (for example `simulation`);
+4. `unknown` — the response carried no symbol at all.
+
+On a `failed` run the symbol names the failure itself:
+
+| Symbol | Meaning |
+|---|---|
+| `unsigned_simulation` | No agent secret, so admission is inconclusive (exit code `2`). |
+| `expect_block_unmet` | `--expect-blocked` on a simulation the policy admitted. |
+| `submission_failed` | The RPC refused the transaction (see Troubleshooting in the repository README). |
+| `tx_failed` | The transaction was included and failed on-chain. |
+| `timeout` | No terminal status arrived within the polling window. |
+
+### Subcommands without a transfer verdict
+
+- `status` already prints a single documented JSON object (below); `--json` is
+  accepted there and does not change that output.
+- `policy` prints `null` or the rendered policy as prose by default, and a
+  single `{"policy": ...}` object under `--json` (the same rendering, as a JSON
+  string).
+- `guards` edits the local registry and rejects `--json`.
+- Usage errors — a malformed address, an unknown flag — stay human-readable on
+  stderr with exit code `1` in both modes: they are mistakes, not runs, and
+  never produce an object.
+
+For the subcommands that produce a verdict (`check`, `preflight`, `transfer`,
+`heartbeat`), exit codes are identical with and without `--json` — the
+`preflight` table below — so switching a fixture or a script to the structured
+output cannot change what either of them treats as success.
+
 ## Read-only diagnostics
 
 Read the guard's current state without simulation or submission.
