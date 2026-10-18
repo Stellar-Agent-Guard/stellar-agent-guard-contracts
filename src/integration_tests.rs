@@ -5402,3 +5402,52 @@ fn contract_creation_denied_through_real_host_path() {
         "expected host diagnostic log to show Context::CreateContractWithCtorHostFn, got: {panic_msg2}"
     );
 }
+
+#[test]
+fn unfreeze_does_not_clear_outside_active_window_until_set_policy() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.active_from = 100;
+    p.active_until = 500;
+    h.install_policy(&p);
+
+    // Ledger time moves past active_until (600 > 500).
+    h.set_time(600);
+
+    // outside_active_window is active.
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert!(h.status().outside_active_window);
+    assert_eq!(
+        client.check(&h.asset, &recv, &10),
+        CheckResult::Blocked(Symbol::new(&h.env, "outside_active_window"))
+    );
+
+    // Both spend and heartbeat are blocked at gate #5 (account_error).
+    h.transfer_expect_blocked(&recv, 10);
+    h.heartbeat_expect_blocked();
+
+    // Admin unfreezes the account. This clears AdminFrozen and sets LastHeartbeat = now,
+    // but does NOT touch policy configuration (cannot advance active_until).
+    h.unfreeze();
+
+    // The account remains outside the active window: unfreeze alone cannot revive it.
+    assert!(h.status().outside_active_window);
+    assert_eq!(
+        client.check(&h.asset, &recv, &10),
+        CheckResult::Blocked(Symbol::new(&h.env, "outside_active_window"))
+    );
+    h.transfer_expect_blocked(&recv, 10);
+    h.heartbeat_expect_blocked();
+
+    // Only set_policy with a renewed active window restores the account.
+    let mut renewed = p;
+    renewed.active_until = 1_000;
+    h.set_policy_enforcing(&renewed);
+
+    // The account is revived: outside_active_window is cleared, heartbeat and transfer succeed.
+    assert!(!h.status().outside_active_window);
+    assert_eq!(client.check(&h.asset, &recv, &10), CheckResult::Allowed);
+    h.heartbeat();
+    h.transfer(&recv, 10);
+}

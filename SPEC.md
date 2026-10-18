@@ -542,6 +542,27 @@ For comparison, an **allowed** transfer with window pruning costs ~14,800 instru
   account it holds no attestation for, and the advisory view is where the missing attestation is
   surfaced. Measured: see `dms_timeline_edge_matrix` (scenario B).
 
+### 5.1 Reversal boundaries — which gate is cleared by what
+
+The guard enforces several account-level and per-context gates (§4). When an account becomes blocked, the reversal path depends strictly on which gate fired:
+
+| Gate / Reason | Cleared by `unfreeze`? | Cleared by `set_policy`? | Cleared by time / neither? |
+|---|---|---|---|
+| **Admin freeze** (`AdminFrozen`, rule #1) | **Yes** (`AdminFrozen = false`) | **No** (leaves `AdminFrozen` unchanged) | No |
+| **Dead-man switch** (`HeartbeatExpired`, rule #2) | **Yes** (stamps `LastHeartbeat = now`) | **Yes** (stamps `LastHeartbeat = now` and starts fresh grace) | No (time progression can never unfreeze silence) |
+| **No policy** (`NoPolicy`, rule #3) | **No** | **Yes** (installs a valid policy) | No |
+| **Paused** (`Paused`, rule #4) | **No** | **Yes** (installs a policy with `paused: false`) | No |
+| **Outside active window** (`OutsideActiveWindow`, rule #5) | **No** | **Yes** (installs a policy with renewed `active_until` or `0`) | Before `active_from`: cleared naturally when ledger time advances into `[active_from, active_until]`. After `active_until`: **neither** time nor `unfreeze` can clear it; only `set_policy` revives the account. |
+| **Window cap exceeded** (`WindowCapExceeded`, rule #7d) | **No** | **Yes** (resets window ledger to empty) | **Yes** (rolling window entries expire naturally as time advances past `window_secs`) |
+| **Context classification rules** (unlisted asset/recipient, per-tx cap, protocol/function) | **No** | **Yes** (if policy configuration updates allowlists or caps) | No |
+
+**Key asymmetry — dead-man switch vs. active window:**
+An operator who observes an account blocked after inactivity might expect `unfreeze` to restore operation in all cases. The two freeze mechanisms look symmetric from the outside and are not:
+- `unfreeze()` performs only two state transitions: it sets `AdminFrozen = false` and `LastHeartbeat = now`. It never mutates `PolicyConfig`.
+- When an account passes `active_until`, it is blocked at gate #5 (`OutsideActiveWindow`). Because gate #5 is an account-level check evaluated before per-context classification, it blocks **all** contexts — including the `heartbeat` self-call.
+- Calling `unfreeze()` does not advance `active_until`. The account remains blocked (`outside_active_window`), and even the agent's heartbeat cannot be executed.
+- Only an administrator calling `set_policy` with a renewed active window (`active_until >= now` or `active_until = 0`) can revive an account whose active window has expired.
+
 ---
 
 ## 6. Per-context classification and rule application

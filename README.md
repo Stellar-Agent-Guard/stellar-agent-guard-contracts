@@ -96,7 +96,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 212 tests, isolated (no network)
+cargo test                                      # 213 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only)
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -251,7 +251,9 @@ nothing else**: `heartbeat` does `require_auth` on the contract itself, so it ro
 through `__check_auth`, which verifies the agent's Ed25519 signature over the auth
 payload. It records `LastHeartbeat = now` and emits `EventHeartbeat`. A heartbeat arriving
 after the grace window expired is rejected (`heartbeat_expired`) — silence cannot
-self-revive; only the admin's `unfreeze` restores the account.
+self-revive; only the admin's `unfreeze` restores the account. After `active_until`
+passes, even `heartbeat` is blocked (`outside_active_window`) and `unfreeze` cannot revive
+it — only an admin `set_policy` with a renewed window restores the account.
 
 The `stellar` CLI cannot invoke it, because it cannot sign Soroban auth entries whose
 address is a contract. Use the repo's submission helper instead:
@@ -364,9 +366,11 @@ the additive operational fields `paused` (the policy's kill switch; `false` with
 `window_remaining` (global `window_cap - spent` on the pruned ledger; `null` when the global
 cap is disabled — mirrors `check_detailed`'s `remaining_window` for recipients without an
 override), and `outside_active_window` (`now` outside the policy's `active_from`/`active_until`
-bounds, both inclusive; `false` with no policy or an unrestricted window). When
-submitted on-ledger, this read may extend persistent-entry TTLs and incur rent; simulation does
-not persist those extensions (SPEC §9.5).
+bounds, both inclusive; `false` with no policy or an unrestricted window). After
+`active_until` passes, even `heartbeat` is blocked (`outside_active_window`) and
+`unfreeze` cannot revive it — only an admin `set_policy` with a renewed window restores the
+account. When submitted on-ledger, this read may extend persistent-entry TTLs and incur rent;
+simulation does not persist those extensions (SPEC §9.5).
 Verified live:
 ```bash
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -818,11 +822,11 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-212 tests (unit + integration) cover the policy decision engine — including the regression
+213 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `212 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green this session: `213 passed; 0 failed`.
 
 ```bash
 cargo test
