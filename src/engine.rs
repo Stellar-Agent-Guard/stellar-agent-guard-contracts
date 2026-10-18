@@ -557,9 +557,7 @@ pub fn decide(
                         }
                     }
                 }
-                if !found {
-                    Decision::Blocked(Error::ProtocolNotAllowed)
-                } else if paused {
+                if !found || paused {
                     Decision::Blocked(Error::ProtocolNotAllowed)
                 } else if !fn_ok {
                     Decision::Blocked(Error::FunctionNotAllowed)
