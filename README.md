@@ -2,11 +2,11 @@
 <img src="assets/logo.jpeg" alt="Stellar Agent Guard" width="700"/>
 </p>
 <p align="center">
-<a href="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/ci.yml">
-<img src="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/ci.yml/badge.svg" alt="CI"/>
+<a href="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/ci.yml">
+<img src="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/ci.yml/badge.svg" alt="CI"/>
 </a>
-<a href="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/host-watch.yml">
-  <img src="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/host-watch.yml/badge.svg" alt="Futurenet host watch"/>
+<a href="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/host-watch.yml">
+  <img src="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/host-watch.yml/badge.svg" alt="Futurenet host watch"/>
 </a>
 <a href="LICENSE-MIT">
 <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"/>
@@ -93,7 +93,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 
 ```bash
 # Build the contract and run the test suite
-git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
+git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
 cargo test                                      # 213 tests, isolated (no network)
@@ -251,7 +251,9 @@ nothing else**: `heartbeat` does `require_auth` on the contract itself, so it ro
 through `__check_auth`, which verifies the agent's Ed25519 signature over the auth
 payload. It records `LastHeartbeat = now` and emits `EventHeartbeat`. A heartbeat arriving
 after the grace window expired is rejected (`heartbeat_expired`) — silence cannot
-self-revive; only the admin's `unfreeze` restores the account.
+self-revive; only the admin's `unfreeze` restores the account. After `active_until`
+passes, even `heartbeat` is blocked (`outside_active_window`) and `unfreeze` cannot revive
+it — only an admin `set_policy` with a renewed window restores the account.
 
 The `stellar` CLI cannot invoke it, because it cannot sign Soroban auth entries whose
 address is a contract. Use the repo's submission helper instead:
@@ -364,9 +366,11 @@ the additive operational fields `paused` (the policy's kill switch; `false` with
 `window_remaining` (global `window_cap - spent` on the pruned ledger; `null` when the global
 cap is disabled — mirrors `check_detailed`'s `remaining_window` for recipients without an
 override), and `outside_active_window` (`now` outside the policy's `active_from`/`active_until`
-bounds, both inclusive; `false` with no policy or an unrestricted window). When
-submitted on-ledger, this read may extend persistent-entry TTLs and incur rent; simulation does
-not persist those extensions (SPEC §9.5).
+bounds, both inclusive; `false` with no policy or an unrestricted window). After
+`active_until` passes, even `heartbeat` is blocked (`outside_active_window`) and
+`unfreeze` cannot revive it — only an admin `set_policy` with a renewed window restores the
+account. When submitted on-ledger, this read may extend persistent-entry TTLs and incur rent;
+simulation does not persist those extensions (SPEC §9.5).
 Verified live:
 ```bash
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
@@ -519,7 +523,7 @@ agent-tx preflight --guard C... --asset C... --to G... --amount 1100 --network t
 
 ### Build from source
 ```bash
-git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
+git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
 # contract wasm (the artifact to deploy)
@@ -549,7 +553,7 @@ CI blessed:
 
 ```bash
 VERSION=v0.1.0  # pick a release from the Releases page
-REPO=aigbagbobila/stellar-agent-guard-contracts
+REPO=Stellar-Agent-Guard/stellar-agent-guard-contracts
 curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm
 curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm.sha256
 sha256sum -c stellar_agent_guard_contracts.wasm.sha256
@@ -728,9 +732,9 @@ Stellar Agent Guard operates across three dedicated repositories:
 
 | Repository | Role | Documentation |
 |---|---|---|
-| [**stellar-agent-guard-contracts**](https://github.com/aigbagbobila/stellar-agent-guard-contracts) (this repo) | Soroban smart contracts implementing Custom Account Abstraction and spending policy firewall | [GitBook Docs](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/) |
-| [**stellar-agent-guard-sdk**](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | TypeScript SDK for pre-flight interception, simulation pricing, and AI agent framework integration | [GitHub](https://github.com/aigbagbobila/stellar-agent-guard-sdk) |
-| [**stellar-agent-guard-dashboard**](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) | Client-side operator dashboard for policy deployment, inspection, and emergency panic-button freeze | [GitHub](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) |
+| [**stellar-agent-guard-contracts**](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) (this repo) | Soroban smart contracts implementing Custom Account Abstraction and spending policy firewall | [GitBook Docs](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/) |
+| [**stellar-agent-guard-sdk**](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | TypeScript SDK for pre-flight interception, simulation pricing, and AI agent framework integration | [GitHub](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) |
+| [**stellar-agent-guard-dashboard**](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard) | Client-side operator dashboard for policy deployment, inspection, and emergency panic-button freeze | [GitHub](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard) |
 
 ## Repository layout
 
@@ -816,7 +820,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 | Dead-man switch (freeze on missed heartbeat) | ✅ |
 | Admin unfreeze | ✅ |
 | Verified against live testnet (cross-checked) | ✅ |
-| Fine-grained amount/recipient enforcement for non-SAC calls | 🔲 (v2, tracked as [issue #1](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/1)) |
+| Fine-grained amount/recipient enforcement for non-SAC calls | 🔲 (v2, tracked as [issue #1](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/1)) |
 
 ## Testing & CI
 
@@ -846,14 +850,18 @@ the `ci` check must be green and a review approved for changes to merge.
 
 ## Community
 
+Start at **[SUPPORT.md](SUPPORT.md)** — it says which channel is for what and
+what response time to expect on each.
+
 - [Telegram](https://t.me/+EzSusj-2vVhhNmI0) — Stellar Agent Guard community group
 - [Discord](https://discord.gg/Z766vsgjg) — Stellar Agent Guard community server
+- [GitHub issues](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues) — bugs and feature requests
 
 ## Maintainers
 
 | Name | GitHub | Telegram |
 |---|---|---|
-| Hybrid | [@aigbagbobila](https://github.com/aigbagbobila) | [@aigbagbobila](https://t.me/+EzSusj-2vVhhNmI0) |
+| Hybrid | [@aigbagbobila](https://github.com/aigbagbobila) | [community group invite](https://t.me/+EzSusj-2vVhhNmI0) — an invite link, not a personal handle |
 
 ## Socials
 
@@ -866,22 +874,26 @@ Stellar Agent Guard spans three repositories. Use this table to file issues in t
 
 | Symptom / Question | Repository | Issue Template |
 |---|---|---|
-| My transfer is blocked unexpectedly / spend caps not working | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
-| Middleware/SDK throws wrong error / pre-flight check mismatch | [stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
-| Panic button won't confirm / dashboard UI issue | [stellar-agent-guard-dashboard](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
-| Policy encode/decode mismatch between contract and SDK | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) + [stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | File in both (link each other) |
-| Dead-man switch / heartbeat not firing as expected | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
-| Agent transaction signing / auth entry construction failing | [stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
-| Contract deployment / initialization / admin functions | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
-| Dashboard not showing correct policy state / events | [stellar-agent-guard-dashboard](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
+| My transfer is blocked unexpectedly / spend caps not working | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
+| Middleware/SDK throws wrong error / pre-flight check mismatch | [stellar-agent-guard-sdk](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
+| Panic button won't confirm / dashboard UI issue | [stellar-agent-guard-dashboard](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
+| Policy encode/decode mismatch between contract and SDK | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) + [stellar-agent-guard-sdk](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | File in both (link each other) |
+| Dead-man switch / heartbeat not firing as expected | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
+| Agent transaction signing / auth entry construction failing | [stellar-agent-guard-sdk](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
+| Contract deployment / initialization / admin functions | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
+| Dashboard not showing correct policy state / events | [stellar-agent-guard-dashboard](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
 
 > **Note:** If unsure, file in **stellar-agent-guard-contracts** — maintainers will triage and redirect.
 
 ## Contact
 
-- GitHub issues: <https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues>
+- GitHub issues: <https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues>
 - Maintainer (GitHub): [@aigbagbobila](https://github.com/aigbagbobila)
-- Security disclosures: see [SECURITY.md](SECURITY.md) (Telegram, the Stellar ecosystem norm)
+- Which channel for which question, and expected response times:
+  [SUPPORT.md](SUPPORT.md)
+- Security disclosures: [SECURITY.md](SECURITY.md), through **GitHub private
+  vulnerability reporting** (or its email fallback) — not Telegram, not Discord,
+  not a public issue
 
 ## License
 
@@ -893,8 +905,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details on coding standards, PR proce
 project structure — including the strict one-commit-per-logical-unit rule.
 
 Looking for something to work on? The
-[issue backlog](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues)
+[issue backlog](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues)
 holds scoped issues with Summary / Acceptance Criteria / Tech Stack — good first tasks for
 the Drips Stellar Wave contributor sprints.
 
-![Contributors](https://contrib.rocks/image?repo=aigbagbobila/stellar-agent-guard-contracts)
+![Contributors](https://contrib.rocks/image?repo=Stellar-Agent-Guard/stellar-agent-guard-contracts)
