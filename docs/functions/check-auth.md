@@ -30,7 +30,9 @@ fn __check_auth(
 3. **Snapshot policy state.** Loads `PolicyConfig` (missing → `NoPolicy`), `AdminFrozen`, `LastHeartbeat`, and ledger time.
 
 4. **Run the decision table** (`decide` function):
-   - Account-level gates first: admin freeze → dead-man switch → pause → active window.
+   - Context-count bound first: more than `MAX_AUTH_CONTEXTS` (64) contexts returns one aggregate
+     `TooManyAuthContexts` verdict (§4 row 0) before any context is parsed.
+   - Account-level gates next: admin freeze → dead-man switch → pause → active window.
    - Per-context classification: each `Context` is parsed into a typed call (`SelfCall`, `AssetTransfer`, `AssetOther`, `Protocol`, `Unknown`, `CreateContract`).
    - Per-kind enforcement: asset transfers get recipient allowlist + per-tx cap + rolling window. Protocol calls get contract + function allowlist. Everything else is denied.
    - **All-or-nothing commit:** Window admissions are staged and only committed to storage if *every* context passes.
@@ -80,6 +82,7 @@ For other calls, the arguments are not interpretable — see [Enforcement Scope]
 | `RecipientBlocked` | 29 | Transfer to an explicitly blocked recipient |
 | `ProtocolCallRateExceeded` | 30 | Protocol call rate limit exceeded |
 | `DecisionInvariantViolation` | 31 | Internal enforcement verdict invariant failed |
+| `TooManyAuthContexts` | 33 | Batch exceeds `MAX_AUTH_CONTEXTS` (64) contexts (§4 row 0) |
 
 ## What an operator sees when this rejects (issue #425)
 
@@ -177,9 +180,10 @@ without `--secret` the verdict is `INDETERMINATE` and exits `2`. See
 | No agent key registered | step 1 only | no | `NotInitialized` (3) | `auth_verification_order_uninitialized_account_rejects_with_not_initialized` |
 | Bad signature / wrong key | no — `ed25519_verify` aborts the frame | **absent**, and no `fn_call … __check_auth` line either | none: `Unauthorized` (1) is ABI-only, the host traps instead (SPEC §7.1) | `wrong_signature_is_rejected_by_host_crypto` |
 | Account-level gate (freeze, dead-man, pause, active window) | yes, once per transaction | one per context, **all** `blocked` with the same reason | `AdminFrozen` 10 / `HeartbeatExpired` 11 / `Paused` 13 / `OutsideActiveWindow` 14; which one, per SPEC §5.2's precedence | the capture above (11), `account_gates_order_beats_calls` |
+| Batch over `MAX_AUTH_CONTEXTS` (64) | §4 row 0 only — no context is parsed | **one** event, `context_index = 0`, not one per context | `TooManyAuthContexts` (33) | `auth_context_batch_over_limit_fails_before_staging_admissions`, SPEC §6 |
 | Per-call denial (rule 7) | yes, per context | earlier contexts `allowed`, first failing one `blocked` | 20–31, reporting the **first** failing context in auth-context iteration order | SPEC §6.0, `mixed_multi_context_batch_reports_the_first_failing_context` |
 
-The symbol ↔ code ↔ reachability correspondence for all 24 variants is
+The symbol ↔ code ↔ reachability correspondence for all 25 variants is
 [SPEC §7.1](../../SPEC.md#71-error-code--checkresult-variant--reason-symbol-mapping), and what
 each symbol means to a human reader is [docs/reason-glossary.md](../reason-glossary.md). The
 canonical topic list for every outcome, including the empty reason topic on an allow, is

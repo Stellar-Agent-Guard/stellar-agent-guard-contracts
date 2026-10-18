@@ -422,11 +422,17 @@ it.
 
 Once authentication succeeds and the policy snapshot is loaded, the decision table below is evaluated over every auth context:
 
+Before any account gate or context classification, `decide` checks the authorization's context
+count. More than `MAX_AUTH_CONTEXTS = 64` returns one aggregate `TooManyAuthContexts` block;
+exactly 64 continues through the ordinary gates and per-context rules. The aggregate rejection does
+not prune or stage window admissions.
+
 Evaluation order inside `__check_auth` (first match wins; all states below are evaluated against
 ledger time, which Soroban code cannot forge):
 
 | # | Condition | Result |
 |---|---|---|
+| 0 | authorization contains more than `MAX_AUTH_CONTEXTS` contexts | **Block** (`Reason::TooManyAuthContexts`) before evaluating any context |
 | 1 | `AdminFrozen` is set | **Block** (`Reason::AdminFrozen`) |
 | 2 | dead-man switch enabled AND `LastHeartbeat != 0` AND `now - LastHeartbeat > dms_grace_secs` | **Block** (`Reason::HeartbeatExpired`) — automatic freeze, derived lazily, no background write |
 | 3 | no `Policy` stored (revoked or never set) | **Block** (`Reason::NoPolicy`) — default deny |
@@ -452,7 +458,14 @@ admin's `unfreeze` (§7). This is the precise freeze/reversal boundary. The dead
 
 ### 4.1 Gate cost order (measured)
 
-The decision table above is ordered **semantically first** (admin freeze → dead-man → policy gates → classification), not cost-optimized. Benchmarks on the Soroban test environment (see `benches/denial_path_gas.rs`) show the following CPU instruction costs for a blocked authorization at each gate:
+After the row 0 context bound, the decision table's policy gates remain ordered **semantically
+first** (admin freeze → dead-man → pause → active window → classification), not cost-optimized.
+Benchmarks on the Soroban test environment (see `benches/denial_path_gas.rs`) show the following
+CPU instruction costs for a blocked authorization at each gate:
+
+The fixed context-count check is a constant-time length comparison before the listed gates. On an
+oversized batch it returns one aggregate block, so result allocation and event emission do not
+scale with the oversized context count.
 
 | Gate | Condition | Approx. Instructions |
 |------|-----------|---------------------|
@@ -473,6 +486,25 @@ The decision table above is ordered **semantically first** (admin freeze → dea
 For comparison, an **allowed** transfer with window pruning costs ~14,800 instructions, while an allowed transfer without window costs ~17,800 instructions.
 
 **Observation:** The early gates (#1–#5) are consistently the cheapest (~8.7k instructions) because they only check simple boolean/int flags on the account state. The classification gates (#7a–#7g) are more expensive because they require parsing the auth context, looking up allowlists, and evaluating caps. The semantic ordering therefore *accidentally* aligns with cost ordering: the cheapest gates run first. Reordering for cost would not yield meaningful savings and would weaken the semantic clarity of the freeze/reversal boundary (admin freeze must remain first). The delta between semantic and cost-optimal ordering is immaterial (<2x on the fast path).
+
+### 4.2 Admin freeze and policy pause
+
+`AdminFrozen` and `PolicyConfig.paused` are independent controls stored separately; changing one
+does not change the other. When a policy is installed, both deny the account's `__check_auth`
+authorization contexts (including agent heartbeat authorization), but they have different
+activation, reversal, and state effects. Neither flag disables the admin-authorized management
+entry points.
+
+| Topic | `AdminFrozen` | `PolicyConfig.paused` |
+|---|---|---|
+| Activation | Admin calls `freeze()`, which sets the persistent `AdminFrozen` flag. | Admin calls `set_policy()` with the complete policy and `paused: true`. |
+| What it blocks | The first decision gate rejects each authorization context with `AdminFrozen`, including heartbeat authorization. | The policy gate rejects each authorization context with `Paused`, including heartbeat authorization. |
+| Reversal | Admin calls `unfreeze()`, which clears `AdminFrozen`. It also sets `LastHeartbeat = now`. | Admin calls `set_policy()` again with the complete policy and `paused: false`. |
+| Side effects | `freeze()` changes no persistent state besides `AdminFrozen` and emits `EventFrozen`. `unfreeze()` also resets `LastHeartbeat` to now and emits `EventUnfrozen`, re-arming the dead-man clock when its timestamp changes (see §5). | Every `set_policy()` replaces the policy, increments `PolicyRevision`, resets the rolling window to empty, sets `LastHeartbeat = now` (re-arming the dead-man clock), and emits `policy_set`. These effects also apply when only `paused` was intended to change. The reset behavior is tracked in [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289). |
+| Incident-response use | Use `freeze()` for an immediate administrative halt when the installed policy and spend window should remain unchanged. Plan for `unfreeze()` to re-arm the dead-man clock. | Use `set_policy()` when intentionally replacing policy as well as changing pause state; do not treat it as a pause-only operation. During an incident it can erase accumulated window spend and restart the dead-man grace period. Dedicated `pause()`/`resume()` functions are proposed in [issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/290), but are not current contract entry points. |
+
+The controls are not interchangeable: clearing one does not clear the other, and the remaining
+gate can continue to deny authorization.
 
 ---
 
@@ -571,8 +603,10 @@ from either section**, and they are the case an operator actually meets: `Heartb
 silent *and* an account whose declared activity window has closed are both true of the same
 account at the same instant — and `unfreeze` clears exactly one of them.
 
-**The order the engine reports reasons in.** Inside `decide()` (`src/engine.rs`),
-`state.admin_frozen` is checked first and returns for every context; the remaining three
+**The order the engine reports reasons in.** Inside `decide()` (`src/engine.rs`), the §4 row 0
+`MAX_AUTH_CONTEXTS` bound is tested first and returns a single aggregate verdict before anything
+else is evaluated, so it never appears as one of the combinations below. Among the account-state
+gates, `state.admin_frozen` is checked first and returns for every context; the remaining three
 transaction-level gates are then tested in a single `if / else if / else if` chain —
 dead-man grace, then `paused`, then the active window — and the **first** gate that matches
 becomes the only reason returned, for every context in the transaction. So:
@@ -647,6 +681,22 @@ the operator's own interfaces — RPC diagnostics, Horizon, the CLI — is mappe
 Each `Context` in `auth_contexts` is classified independently; every context must pass or the
 whole authorization fails (`__check_auth` returns an error → transaction rejected).
 
+Before classification, the engine enforces the fixed `MAX_AUTH_CONTEXTS = 64` bound. It is not
+operator-configurable: auth contexts are transaction input, not policy configuration, and adding a
+policy field would expand the policy wire/storage API. Exactly 64 contexts are evaluated normally;
+65 or more return the single aggregate reason `TooManyAuthContexts` without parsing any context,
+pruning the rolling window, or staging a `SpendEntry`. The aggregate `auth_checked` event uses
+`context_index = 0`. This is fail-closed and cannot commit a prefix of an oversized batch.
+
+The value targets router workloads rather than matching policy-list sizes. A single transfer or
+multihop swap commonly needs only a handful of SAC transfer contexts; 64 allows a large router batch
+of 64 transfers while bounding more adversarial batches. At the existing maximum recipient-list
+cardinalities, the measured worst-case decision path is 338,315 CPU instructions per context
+(§6.2); 64 such contexts project to 21,652,160 instructions, about 22% of the documented
+100,000,000 per-invocation CPU budget. At most 64 global `SpendEntry` admissions and 64 staged
+per-recipient entries can be held for one authorization. Existing per-policy list limits remain 256
+and bound each context's scans independently; they are not authorization-context limits.
+
 ### 6.0 Worked example: a mixed multi-context batch (issue #423)
 
 A transaction can present several contexts at once — an allowlisted protocol call bundled with a
@@ -712,7 +762,9 @@ rather than "what is wrong with this transaction":
 
 - Any blocked context refuses the whole transaction, so whichever one is reported is a true and
   sufficient cause. There is no partial approval that could be misattributed.
-- Nothing is lost. Every context is still evaluated (the loop does not short-circuit), so every
+- Nothing is lost. Every context is still evaluated (the loop does not short-circuit; the only
+  batch that is not walked at all is the oversized one, which §4 row 0 refuses as a single
+  aggregate verdict before parsing), so every
   denial emits its own `auth_checked` event with its own `context_index`, and an operator
   holding the diagnostics can enumerate *all* failing contexts instead of trusting one code.
 - It is deterministic. The order is part of the transaction before the call, and the whole
@@ -724,7 +776,8 @@ rather than "what is wrong with this transaction":
   charged for the full loop either way.
 
 Cross-reference: [`docs/scenario-matrix.md`](docs/scenario-matrix.md) tabulates the
-single-context cells (7 decision rows × 6 call kinds) that this example composes, and §6.4's
+single-context cells (the §4 rules 1–7 against the six call kinds) that this example composes,
+and §6.4's
 boundary paragraph explains why contexts refused by the transaction-level gates never reach
 this per-context loop at all. When two of those transaction-level gates fire together the
 reported reason is decided by §5.2, not by this section.
@@ -773,7 +826,7 @@ An asset contract listed in `assets` invoked with any other function (e.g. `mint
 (`AssetNotAllowed`) — an agent cannot silently move balances on an unregistered SAC. This keeps
 the "we know what we're enforcing" promise exact.
 
-**Measured worst case: evaluation ≈ 338,315 CPU instructions.** Rules 1 and 2 are the only
+**Measured worst case: evaluation ≈ 338,315 CPU instructions per context.** Rules 1 and 2 are the only
 steps whose cost depends on a policy list length, and §8 caps every recipient list at
 `MAX_RECIPIENT_ENTRIES = 256`, so the decision path is bounded by construction. Measured in the
 Soroban test environment with both `recipients` and `blocked_recipients` filled to exactly 256
@@ -907,6 +960,7 @@ To close the CheckResult/Error duality gap, every contract `Error` variant maps 
 | 29 | `RecipientBlocked` | `recipient_blocked` | Yes | Recipient is on the explicit denylist. |
 | 30 | `ProtocolCallRateExceeded` | `protocol_call_rate_exceeded` | No | Auth-path only: protocol-call rate limits apply to auth contexts. |
 | 31 | `DecisionInvariantViolation` | `decision_invariant_violation` | No | Internal invariant guard: the policy engine returned inconsistent verdict data. |
+| 33 | `TooManyAuthContexts` | `too_many_auth_contexts` | No | Auth-path only: more than `MAX_AUTH_CONTEXTS` (64) contexts; classified as one aggregate block before the context loop. |
 
 // ── Policy management (admin only) ────────────────────────────────────────
 pub fn set_policy(env: Env, config: PolicyConfig)
@@ -1051,6 +1105,7 @@ pub enum Error {            // values stable; see tests/fixtures
     RecipientBlocked = 29, ProtocolCallRateExceeded = 30,
     DecisionInvariantViolation = 31,
     AssetFnNotAllowed = 32,
+    TooManyAuthContexts = 33,
 }
 ```
 

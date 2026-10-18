@@ -3820,6 +3820,17 @@ fn failed_multi_context_batch_never_commits_staged_window_admissions() {
         })
     };
 
+    // All 65 transfers fit the configured 100-unit window, but the whole
+    // authorization must be rejected before any of them can be persisted.
+    let mut oversized = soroban_sdk::Vec::new(&h.env);
+    for _ in 0..=crate::types::MAX_AUTH_CONTEXTS {
+        oversized.push_back(transfer_ctx(&to, 1));
+    }
+    let oversized_result = check_batch(oversized, 2);
+    assert_eq!(oversized_result, Err(GuardError::TooManyAuthContexts));
+    assert_eq!(read_window_total(), 0i128);
+    assert_eq!(h.status().window_remaining, Some(100));
+
     // Two-context auth batch: ctx1 (40, valid), ctx2 (90, exceeds per_tx_cap 80).
     let contexts = soroban_sdk::vec![&h.env, transfer_ctx(&to, 40), transfer_ctx(&to, 90)];
     let res = check_batch(contexts, 0);

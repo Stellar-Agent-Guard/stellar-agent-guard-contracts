@@ -69,8 +69,9 @@ runs once rules 1–6 have passed. The one class of `n/a` that *is* a gap is an 
    the rolling window.
 3. **Rule 1 (`AdminFrozen`) is evaluated before rule 3 (`NoPolicy`) in code, which matches
    SPEC §4's numbering.** `decide()` reads `state.admin_frozen` and returns for every context
-   before it destructures the `Option<&PolicyConfig>` (`src/engine.rs`, the first two blocks of
-   the function), so an account that is both frozen and policy-less reports `admin_frozen`.
+   before it destructures the `Option<&PolicyConfig>` (`src/engine.rs`, after the §4 row 0
+   `MAX_AUTH_CONTEXTS` bound and before every policy gate), so an account that is both frozen and
+   policy-less reports `admin_frozen`.
    What is *not* pinned is that combination: no test in this map's index freezes an account and
    then revokes or withholds the policy, so the ordering is engine behavior with no assertion
    behind it. See [finding F-1](#f-1-rule-order-adminfrozen-precedes-no_policy-and-is-unpinned).
