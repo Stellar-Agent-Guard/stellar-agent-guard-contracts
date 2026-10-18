@@ -72,6 +72,7 @@ fn policy_from_json(env: &Env, value: &Value) -> PolicyConfig {
         protocols.push_back(ProtocolRule {
             contract: Address::from_str(env, text(protocol, "contract")),
             fns,
+            paused: false,
         });
     }
 

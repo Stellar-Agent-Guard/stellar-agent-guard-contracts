@@ -151,6 +151,7 @@ fn protocols(env: &Env, block: &JsonValue, index: usize) -> Vec<ProtocolRule> {
         out.push_back(ProtocolRule {
             contract: Address::from_str(env, contract),
             fns,
+            paused: false,
         });
     }
     out

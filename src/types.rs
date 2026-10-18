@@ -173,6 +173,8 @@ pub struct AssetCap {
     pub asset: Address,
     /// Per-tx cap for this asset; 0 = disabled / fall back to global.
     pub per_tx_cap: i128,
+    /// If true, the asset is blocked even when it is otherwise allowlisted.
+    pub paused: bool,
 }
 
 /// The policy an admin installs on the account. See SPEC §3/§4.
@@ -254,6 +256,8 @@ pub struct ProtocolRule {
     pub contract: Address,
     /// `None` = any function; `Some` = per-function allowlist.
     pub fns: Option<Vec<Symbol>>,
+    /// If true, the contract is blocked even when it is otherwise allowlisted.
+    pub paused: bool,
 }
 
 /// A single call the account must authorize, parsed into a form the pure

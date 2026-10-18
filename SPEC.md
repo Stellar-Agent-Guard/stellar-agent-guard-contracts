@@ -152,14 +152,16 @@ pub struct PolicyConfig {
 
 #[contracttype]
 pub struct ProtocolRule {
-    pub contract: Address,
+    pub contract: Address,                // contract permitted for non-SAC calls
     pub fns: Option<Vec<Symbol>>,         // None = any function; Some = function allowlist
+    pub paused: bool,                     // if true, the protocol entry is blocked even if allowlisted
 }
 
 #[contracttype]
 pub struct AssetCap {
     pub asset: Address,                   // must be a member of `assets`; unknown-asset overrides rejected
     pub per_tx_cap: i128,                 // per-asset per-tx cap; 0 = fall back to global per_tx_cap
+    pub paused: bool,                     // if true, the asset is blocked even if allowlisted
 }
 
 #[contracttype]

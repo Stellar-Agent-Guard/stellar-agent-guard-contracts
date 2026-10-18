@@ -456,9 +456,19 @@ pub fn decide(
             }
             ParsedCall::CreateContract => Decision::Blocked(Error::CreateContractNotAllowed),
             ParsedCall::Unknown { .. } => Decision::Blocked(Error::UnknownContract),
-            ParsedCall::AssetOther { .. } => Decision::Blocked(Error::AssetFnNotAllowed),
+            ParsedCall::AssetOther { asset, .. } => {
+                if matches!(cfg.asset_caps.iter().find(|cap| cap.asset == asset), Some(cap) if cap.paused)
+                {
+                    Decision::Blocked(Error::AssetNotAllowed)
+                } else {
+                    Decision::Blocked(Error::AssetFnNotAllowed)
+                }
+            }
             ParsedCall::AssetTransfer { asset, to, amount } => {
-                if amount <= 0 {
+                if matches!(cfg.asset_caps.iter().find(|cap| cap.asset == asset), Some(cap) if cap.paused)
+                {
+                    Decision::Blocked(Error::AssetNotAllowed)
+                } else if amount <= 0 {
                     Decision::Blocked(Error::InvalidAmount)
                 } else if contains_addr(&cfg.blocked_recipients, &to) {
                     Decision::Blocked(Error::RecipientBlocked)
@@ -530,11 +540,13 @@ pub fn decide(
             }
             ParsedCall::Protocol { contract, fname } => {
                 let mut found = false;
+                let mut paused = false;
                 let mut fn_ok = true;
                 for i in 0..cfg.protocols.len() {
                     if let Some(rule) = cfg.protocols.get(i) {
                         if rule.contract == contract {
                             found = true;
+                            paused = rule.paused;
                             fn_ok = match &rule.fns {
                                 None => true,
                                 Some(fns) => contains_sym(fns, &fname),
@@ -544,6 +556,8 @@ pub fn decide(
                     }
                 }
                 if !found {
+                    Decision::Blocked(Error::ProtocolNotAllowed)
+                } else if paused {
                     Decision::Blocked(Error::ProtocolNotAllowed)
                 } else if !fn_ok {
                     Decision::Blocked(Error::FunctionNotAllowed)
@@ -1162,6 +1176,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+            
+            paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1220,6 +1236,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+            
+            paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1264,6 +1282,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+            
+            paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1294,6 +1314,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+            
+            paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1324,6 +1346,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+            
+            paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1356,6 +1380,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+            
+            paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1915,6 +1941,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+            
+            paused: false,
             },
         ];
         p.protocol_calls_per_window = 0; // disabled
@@ -1945,6 +1973,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+            
+            paused: false,
             },
         ];
         p.protocol_calls_per_window = 3;
@@ -1998,6 +2028,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+            
+            paused: false,
             },
         ];
         p.protocol_calls_per_window = 2;
@@ -2065,6 +2097,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+            
+            paused: false,
             },
         ];
         p.protocol_calls_per_window = 2;
@@ -2099,6 +2133,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+            
+            paused: false,
             },
         ];
         p.protocol_calls_per_window = 2;
