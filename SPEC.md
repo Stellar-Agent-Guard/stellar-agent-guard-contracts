@@ -816,6 +816,8 @@ Rules applied (in order; the denylist is checked before the allowlist/escape hat
 3. **Per-tx cap:** resolve the effective per-tx cap for the transfer's asset — the matching
    `asset_caps` entry's `per_tx_cap` when non-zero, otherwise the global `per_tx_cap`. If the
    effective cap is non-zero, `amount <= effective_per_tx_cap` or block `PerTxCapExceeded`.
+   The comparison is exclusive-of-blocking (i.e. the cap value itself is permitted:
+   `amount == effective_per_tx_cap` is admitted; only `amount > effective_per_tx_cap` is blocked).
 4. **Rolling window (§3.1):**
    - Global window: if `window_cap != 0`, prune expired entries, then
      `total + amount <= window_cap` or block `WindowCapExceeded`.
