@@ -16,6 +16,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -39,6 +47,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -64,6 +80,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -87,6 +111,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -112,6 +144,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -135,6 +175,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -160,6 +208,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -183,6 +239,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -208,6 +272,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -231,6 +303,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -256,6 +336,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -279,6 +367,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -304,6 +400,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -327,6 +431,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -352,6 +464,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -375,6 +495,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -400,6 +528,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -423,6 +559,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -448,6 +592,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -471,6 +623,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -496,6 +656,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -519,6 +687,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -544,6 +720,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -567,6 +751,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -592,6 +784,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -615,6 +815,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
