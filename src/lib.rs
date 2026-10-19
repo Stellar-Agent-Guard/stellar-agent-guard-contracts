@@ -566,8 +566,7 @@ fn emit_auth(
         Some(Context::Contract(ContractContext {
             contract, fn_name, ..
         })) => (Some(contract.clone()), Some(fn_name.clone())),
-        Some(Context::CreateContractHostFn(_))
-        | Some(Context::CreateContractWithCtorHostFn(_))
+        Some(Context::CreateContractHostFn(_) | Context::CreateContractWithCtorHostFn(_))
         | None => (None, None),
     };
     EventAuthChecked {
@@ -1205,7 +1204,7 @@ mod policy_engine_type {
                 },
                 &mut ledger,
                 now,
-                auth_contexts,
+                auth_contexts.clone(),
             );
 
             let mut all_passed = true;
