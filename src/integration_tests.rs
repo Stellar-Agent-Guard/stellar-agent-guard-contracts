@@ -1442,6 +1442,39 @@ fn per_tx_cap_violation_blocked_without_window_effect() {
     .expect_block(GuardError::WindowCapExceeded, &recv, 1); // ledger genuinely full
 }
 
+/// SPEC §6.2 rule 3: `per_tx_cap` comparison is exclusive-of-blocking (inclusive cap):
+/// a transfer with `amount == per_tx_cap` is admitted; `amount == per_tx_cap + 1` is
+/// blocked with `per_tx_cap_exceeded`.
+#[test]
+fn per_tx_cap_boundary_admitted_at_cap_and_blocked_at_cap_plus_one() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 50;
+    // Generous window cap so only the per-tx cap is exercised.
+    p.window_cap = 1_000;
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // amount == per_tx_cap (50): admitted.
+    h.transfer(&recv, 50);
+
+    // amount == per_tx_cap + 1 (51): blocked with per_tx_cap_exceeded.
+    let reason = h.transfer_blocked_reason(&recv, 51);
+    assert!(
+        reason.contains("per_tx_cap_exceeded"),
+        "expected per_tx_cap_exceeded for amount == per_tx_cap + 1, got: {reason}"
+    );
+
+    // Preflight simulation check() also agrees on the boundary.
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(client.check(&h.asset, &recv, &50), CheckResult::Allowed);
+    assert_eq!(
+        client.check(&h.asset, &recv, &51),
+        CheckResult::Blocked(Symbol::new(&h.env, "per_tx_cap_exceeded"))
+    );
+}
+
 #[test]
 fn rolling_window_cap_blocks_and_recovers_after_expiry() {
     let mut h = Harness::new();
