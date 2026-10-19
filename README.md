@@ -708,7 +708,8 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
 7. **All-or-nothing commit.** Window admissions are staged and only committed to storage
    if *every* context passes — a partially-validating batch can never spend. `Ok(())`
    approves; `Err(reason)` rejects the entire transaction, and the `auth_checked` event
-  records the outcome either way — with the same observability caveat as step 6 above:
+  records the outcome either way. Its data includes the authorized contract and function, so
+  a blocked decision identifies the denied call. The event has the same observability caveat as step 6 above:
    an allowed decision's event is committed, a blocked one exists only in diagnostics
    (the transaction it rolled back with carried it away). See [SPEC §9](SPEC.md#9-events-and-telemetry).
 

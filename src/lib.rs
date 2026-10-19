@@ -70,6 +70,10 @@ mod event_types {
         pub(super) result: Symbol,
         #[topic]
         pub(super) reason: Symbol,
+        /// The contract involved in the authorization context, when present.
+        pub(super) contract: Option<Address>,
+        /// The function involved in the authorization context, when present.
+        pub(super) fn_name: Option<Symbol>,
         pub(super) context_index: u32,
         pub(super) revision: u64,
     }
@@ -549,12 +553,27 @@ fn current_revision(env: &Env) -> u64 {
     persist_get::<u64>(env, &DataKey::PolicyRevision).unwrap_or(0)
 }
 
-fn emit_auth(env: &Env, allowed: bool, reason: Option<Error>, context_index: u32) {
+fn emit_auth(
+    env: &Env,
+    allowed: bool,
+    reason: Option<Error>,
+    context: Option<&Context>,
+    context_index: u32,
+) {
     let res = if allowed { "allowed" } else { "blocked" };
     let reason = reason.map_or("", |e| e.reason());
+    let (contract, fn_name) = match context {
+        Some(Context::Contract(ContractContext {
+            contract, fn_name, ..
+        })) => (Some(contract.clone()), Some(fn_name.clone())),
+        Some(Context::CreateContractHostFn(_) | Context::CreateContractWithCtorHostFn(_))
+        | None => (None, None),
+    };
     EventAuthChecked {
         result: Symbol::new(env, res),
         reason: Symbol::new(env, reason),
+        contract,
+        fn_name,
         context_index,
         revision: current_revision(env),
     }
@@ -1030,8 +1049,9 @@ mod policy_engine_type {
         /// engine returns no verdict for the single submitted preflight context.
         #[allow(clippy::must_use_candidate)] // public read surface
         pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
+            let call = transfer_context(&env, &asset, &to, amount);
             let Some(snapshot) = AuthSnapshot::load(&env) else {
-                emit_auth(&env, false, Some(Error::NoPolicy), 0);
+                emit_auth(&env, false, Some(Error::NoPolicy), Some(&call), 0);
                 return CheckDetail {
                     result: CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason())),
                     remaining_window: None,
@@ -1058,7 +1078,6 @@ mod policy_engine_type {
             let (remaining_window, per_tx_cap, effective_window_cap) =
                 cap_metrics(&policy, &ledger, &to);
             let effective_per_tx_cap = effective_per_tx_cap(&policy, &asset);
-            let call = transfer_context(&env, &asset, &to, amount);
             let verdicts = decide(
                 &env,
                 &self_addr,
@@ -1069,18 +1088,18 @@ mod policy_engine_type {
                 },
                 &mut ledger,
                 now,
-                vec![&env, call],
+                vec![&env, call.clone()],
             );
             let Some(verdict) = verdicts.first() else {
                 panic_with_error!(&env, Error::DecisionInvariantViolation);
             };
             let result = match verdict {
                 Decision::Allowed => {
-                    emit_auth(&env, true, None, 0);
+                    emit_auth(&env, true, None, Some(&call), 0);
                     CheckResult::Allowed
                 }
                 Decision::Blocked(e) => {
-                    emit_auth(&env, false, Some(*e), 0);
+                    emit_auth(&env, false, Some(*e), Some(&call), 0);
                     CheckResult::Blocked(Symbol::new(&env, e.reason()))
                 }
             };
@@ -1130,7 +1149,13 @@ mod policy_engine_type {
             let agent: Option<BytesN<32>> = env.storage().instance().get(&DataKey::AgentPubkey);
             let Some(agent) = agent else {
                 for i in 0..auth_contexts.len() {
-                    emit_auth(&env, false, Some(Error::NotInitialized), i);
+                    emit_auth(
+                        &env,
+                        false,
+                        Some(Error::NotInitialized),
+                        auth_contexts.get(i).as_ref(),
+                        i,
+                    );
                 }
                 return Err(Error::NotInitialized);
             };
@@ -1148,7 +1173,13 @@ mod policy_engine_type {
             //    exactly once per key — see the `AuthSnapshot` invariant.
             let Some(snapshot) = AuthSnapshot::load(&env) else {
                 for i in 0..auth_contexts.len() {
-                    emit_auth(&env, false, Some(Error::NoPolicy), i);
+                    emit_auth(
+                        &env,
+                        false,
+                        Some(Error::NoPolicy),
+                        auth_contexts.get(i).as_ref(),
+                        i,
+                    );
                 }
                 return Err(Error::NoPolicy);
             };
@@ -1173,7 +1204,7 @@ mod policy_engine_type {
                 },
                 &mut ledger,
                 now,
-                auth_contexts,
+                auth_contexts.clone(),
             );
 
             let mut all_passed = true;
@@ -1183,13 +1214,25 @@ mod policy_engine_type {
                     panic_with_error!(&env, Error::DecisionInvariantViolation);
                 };
                 match v {
-                    Decision::Allowed => emit_auth(&env, true, None, context_index),
+                    Decision::Allowed => emit_auth(
+                        &env,
+                        true,
+                        None,
+                        auth_contexts.get(context_index).as_ref(),
+                        context_index,
+                    ),
                     Decision::Blocked(e) => {
                         all_passed = false;
                         if first_error.is_none() {
                             first_error = Some(*e);
                         }
-                        emit_auth(&env, false, Some(*e), context_index);
+                        emit_auth(
+                            &env,
+                            false,
+                            Some(*e),
+                            auth_contexts.get(context_index).as_ref(),
+                            context_index,
+                        );
                     }
                 }
             }

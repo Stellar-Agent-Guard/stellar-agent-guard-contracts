@@ -3738,12 +3738,17 @@ fn batch_events_emit_in_order_with_context_index() {
             key: XdrScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from(key)).unwrap()),
             val,
         };
-        // `auth_checked` data: {context_index, revision} (issue #38: the
-        // policy revision in force at decision time joins the event to the
-        // policy generation that produced it).
+        let contract: Val = h.asset.clone().into_val(&h.env);
+        // `auth_checked` data identifies the evaluated contract call as well
+        // as its position and policy generation.
         XdrScVal::Map(Some(ScMap(
             VecM::try_from(std::vec::Vec::from([
                 entry("context_index", XdrScVal::U32(idx)),
+                entry("contract", XdrScVal::from_val(&h.env, &contract)),
+                entry(
+                    "fn_name",
+                    XdrScVal::from_val(&h.env, &Symbol::new(&h.env, "transfer")),
+                ),
                 entry("revision", XdrScVal::U64(revision)),
             ]))
             .unwrap(),
