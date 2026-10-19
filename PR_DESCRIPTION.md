@@ -1,48 +1,30 @@
-Closes #
+Closes #367
 
 ## Summary
 
-Provides an end-to-end, contributor-facing how-to guide and checklist for adding a new `Error` variant and denial reason across the repository.
+Pins the exact boundary behavior for `per_tx_cap`: `amount == per_tx_cap` is admitted, and `amount == per_tx_cap + 1` is blocked with `per_tx_cap_exceeded`.
 
-Adding a denial reason touches at least five distinct places — the enum, the `reason()` mapping, the decision site & `decision-table.json`, the `SPEC.md` §4/§6/§7 tables, and the consumer event vocabulary (`auth-checked-vocabulary.json` and `docs/reason-glossary.md`). While the consistency requirement is enforced in CI via the deny-list check (`scripts/check-spec-coverage.sh`), the decision-table drift test, and the ABI snapshot test, the end-to-end workflow was previously undocumented. This checklist makes the requirement executable by hand, turning potential review rejections into first-pass successes.
+The policy decision engine evaluates `effective_per_tx_cap(cfg, &asset).is_some_and(|cap| amount > cap)` (`src/engine.rs:483`), admitting transfers exactly at the cap value. Prior to this change, existing tests only verified the strict inequality case (`60 > 50`), leaving the equality boundary implicit and untested.
 
-## Key Additions
+This change documents the exclusive-of-blocking comparison in `SPEC.md` §6.2, adds boundary tests at both the engine (`decide`) and integration (`check` / `transfer`) levels, and updates the verified test count in `README.md`.
 
-1. **The Discriminant-Freeze Rule & 'Append, Never Insert' Convention**:
-   - Explicitly documents that numeric error discriminants are permanently frozen on testnet and mainnet (`Error(Contract, #N)`).
-   - Documents the three designated numerical groups:
-     - Generic & Lifecycle: `1..=9` (next free: `7`)
-     - Account-Level Gates: `10..=19` (next free: `15`)
-     - Per-Call Decisions & Context Classification: `20..=39` (next free: `34`)
-   - Details the 'append, never insert' convention: always allocating the next free integer at the tail of the appropriate group.
+## Key Changes
 
-2. **Step-by-Step End-to-End Checklist**:
-   - Step 1: Declare the variant in `src/types.rs` (`pub enum Error`) with doc comments and next free discriminant.
-   - Step 2: Implement string mappings in `src/types.rs` (`Error::reason()` and `all_errors` in `Error::from_block_reason()`).
-   - Step 3: Implement decision site (`src/engine.rs` / `src/lib.rs`) and update `decision-table.json`.
-   - Step 4: Update `SPEC.md` §4 decision table and §6 classification semantics.
-   - Step 5: Update `SPEC.md` §7.1 error mapping table and §7 `pub enum Error` code block.
-   - Step 6: Update consumer event vocabulary in `tests/fixtures/auth-checked-vocabulary.json` and `docs/reason-glossary.md` (with no-evasion agent guidance).
-   - Step 7: Update tests (pin discriminant in `error_code_discriminant_stability_spec_7`, engine test, and host-routed integration test in `src/integration_tests.rs`).
+1. **Specification Clarification** (`SPEC.md` §6.2 rule 3):
+   - Explicitly states that the comparison is exclusive-of-blocking (the cap value itself is permitted: `amount == effective_per_tx_cap` is admitted; only `amount > effective_per_tx_cap` is blocked).
 
-3. **Verification Commands**:
-   - Deny-list CI check: `./scripts/check-spec-coverage.sh`
-   - Decision-table drift test: `cargo test --test decision_table`
-   - Vocabulary fixture test: `cargo test --test auth_checked_vocabulary`
-   - Discriminant stability assertion: `cargo test error_code_discriminant_stability_spec_7`
-   - ABI snapshot gate: `UPDATE_SNAPSHOTS=1 cargo test --test abi_snapshot`
-   - Standard test and lint suite: `cargo fmt --check && cargo clippy --all-targets --all-features && cargo test`
+2. **Engine Unit Test** (`src/engine.rs`):
+   - Added `per_tx_cap_boundary_admitted_at_cap_and_blocked_at_cap_plus_one`: asserts `decide` yields `Decision::Allowed` when `amount == per_tx_cap` (50) and `Decision::Blocked(Error::PerTxCapExceeded)` when `amount == per_tx_cap + 1` (51).
 
-4. **Cross-Linking & Documentation Stability**:
-   - Added Rule 9 and section in `CONTRIBUTING.md`.
-   - Added Rule 8 and full section in `docs/contributing.md`.
-   - Linked from `src/types.rs` (`Error` enum doc comments and `error_code_discriminant_stability_spec_7` doc comments).
-   - Linked from `SPEC.md` §7.1 and `docs/reason-glossary.md`.
+3. **Integration Test** (`src/integration_tests.rs`):
+   - Added `per_tx_cap_boundary_admitted_at_cap_and_blocked_at_cap_plus_one`: asserts that `transfer` succeeds at `amount == per_tx_cap`, fails with `per_tx_cap_exceeded` at `amount == per_tx_cap + 1`, and validates that preflight `check()` returns identical verdicts.
 
-## Verification
+4. **Documentation Claims** (`README.md`):
+   - Updated test count claims from 217 to 219 to satisfy `scripts/verify-readme.sh`.
 
-- `cargo fmt --check`
-- `cargo clippy --all-targets --all-features`
-- `cargo test`
-- `./scripts/check-spec-coverage.sh`
-- `./scripts/verify-docs-reachability.sh`
+## Acceptance Criteria Verification
+
+- [x] Test: `amount == per_tx_cap` is admitted; `amount == per_tx_cap + 1` is blocked with `per_tx_cap_exceeded`.
+- [x] `SPEC.md` §6.2 states the comparison is exclusive-of-blocking (the cap value itself is permitted).
+- [x] Lints clean; no new `#[allow]`.
+- [x] PR description references this issue with `Closes #367`.
