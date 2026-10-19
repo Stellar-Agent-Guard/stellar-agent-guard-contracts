@@ -1,30 +1,36 @@
-Closes #367
+Closes #365
 
 ## Summary
 
-Pins the exact boundary behavior for `per_tx_cap`: `amount == per_tx_cap` is admitted, and `amount == per_tx_cap + 1` is blocked with `per_tx_cap_exceeded`.
+Adds integration tests asserting that all policy and key management functions are strictly admin-gated in enforcing authorization mode.
 
-The policy decision engine evaluates `effective_per_tx_cap(cfg, &asset).is_some_and(|cap| amount > cap)` (`src/engine.rs:483`), admitting transfers exactly at the cap value. Prior to this change, existing tests only verified the strict inequality case (`60 > 50`), leaving the equality boundary implicit and untested.
+Previously, the test harness registered `MockAdmin` and relied on `mock_all_auths()` for setup, authorizing admin calls via blanket mocking. No test asserted that a non-admin principal (such as the agent key or an unauthorized external address) cannot invoke policy or key management functions. A regression in admin gating would have silently permitted non-admin accounts to alter policy or rotate keys while tests remained green.
 
-This change documents the exclusive-of-blocking comparison in `SPEC.md` §6.2, adds boundary tests at both the engine (`decide`) and integration (`check` / `transfer`) levels, and updates the verified test count in `README.md`.
+This change adds explicit enforcing-mode tests for every admin-gated function and verifies that authorization entries from non-admin principals are rejected and fail closed.
 
 ## Key Changes
 
-1. **Specification Clarification** (`SPEC.md` §6.2 rule 3):
-   - Explicitly states that the comparison is exclusive-of-blocking (the cap value itself is permitted: `amount == effective_per_tx_cap` is admitted; only `amount > effective_per_tx_cap` is blocked).
+1. **Harness Extensions** (`src/integration_tests.rs`):
+   - Added `h.non_admin_entry(account, &root)` to build valid Soroban authorization entries for arbitrary custom accounts.
+   - Added invocation helper methods on `Harness`: `set_policy_invocation`, `revoke_policy_invocation`, `rotate_agent_key_invocation`, and `cancel_admin_invocation`.
+   - Updated `set_policy_enforcing` to reuse `set_policy_invocation`.
 
-2. **Engine Unit Test** (`src/engine.rs`):
-   - Added `per_tx_cap_boundary_admitted_at_cap_and_blocked_at_cap_plus_one`: asserts `decide` yields `Decision::Allowed` when `amount == per_tx_cap` (50) and `Decision::Blocked(Error::PerTxCapExceeded)` when `amount == per_tx_cap + 1` (51).
+2. **Admin-Gating Integration Tests** (`src/integration_tests.rs`):
+   - `admin_gating_set_policy_rejects_non_admin`: asserts that `set_policy` rejects entries from both non-admin accounts and the agent key, maintaining policy and revision invariants.
+   - `admin_gating_revoke_policy_rejects_non_admin`: asserts that `revoke_policy` rejects non-admin and agent-key auth entries, ensuring policy remains active.
+   - `admin_gating_freeze_rejects_non_admin`: asserts that `freeze` rejects non-admin and agent-key auth entries, leaving account unfrozen.
+   - `admin_gating_unfreeze_rejects_non_admin`: asserts that `unfreeze` rejects non-admin and agent-key auth entries on a frozen account, while legitimate admin unfreeze succeeds.
+   - `admin_gating_rotate_agent_key_rejects_non_admin`: asserts that a non-admin cannot call `rotate_agent_key` to bind an attacker key, proves that an attacker who failed to bind cannot authorize operations as the agent, and verifies the registered agent key remains valid.
+   - `admin_gating_propose_admin_rotation_rejects_non_admin`: asserts that `propose_admin_rotation` rejects non-admin and agent auth entries, leaving the pending admin slot empty.
+   - `admin_gating_cancel_admin_rotation_rejects_non_admin`: asserts that `cancel_admin_rotation` rejects non-admin and agent auth entries, preserving the pending rotation.
 
-3. **Integration Test** (`src/integration_tests.rs`):
-   - Added `per_tx_cap_boundary_admitted_at_cap_and_blocked_at_cap_plus_one`: asserts that `transfer` succeeds at `amount == per_tx_cap`, fails with `per_tx_cap_exceeded` at `amount == per_tx_cap + 1`, and validates that preflight `check()` returns identical verdicts.
-
-4. **Documentation Claims** (`README.md`):
-   - Updated test count claims from 217 to 219 to satisfy `scripts/verify-readme.sh`.
+3. **Documentation on `catch_unwind` vs `try_*`**:
+   - Explicitly documented in tests and module documentation that unit-returning contract functions (`()`) have no `try_*` client methods in the SDK for host-level auth rejection, and host `require_auth` traps are caught via `std::panic::catch_unwind` + `std::panic::AssertUnwindSafe`.
 
 ## Acceptance Criteria Verification
 
-- [x] Test: `amount == per_tx_cap` is admitted; `amount == per_tx_cap + 1` is blocked with `per_tx_cap_exceeded`.
-- [x] `SPEC.md` §6.2 states the comparison is exclusive-of-blocking (the cap value itself is permitted).
+- [x] One test per admin function showing that an authorization entry from a non-admin principal is rejected.
+- [x] Include `rotate_agent_key` specifically: a non-admin cannot bind their own key and then authorize as the agent.
+- [x] Documented why `catch_unwind` is the available mechanism where `try_*` is not generated for unit returns.
 - [x] Lints clean; no new `#[allow]`.
-- [x] PR description references this issue with `Closes #367`.
+- [x] PR description references this issue with `Closes #365`.
