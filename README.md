@@ -647,37 +647,59 @@ its own commit so the hash change is reviewable on its own.
 ## How it works
 
 ```
-┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
-│ Transaction requires │─────▶│ __check_auth         │─────▶│ Verify agent Ed25519 │
-│ the account's auth   │      │ (host-invoked)       │      │ signature over auth  │
-└──────────────────────┘      └──────────────────────┘      │ payload (bad sig ⇒  │
-                                                             │ host trap)          │
-                                                             └──────────┬───────────┘
-                                                                        ▼
-┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
-│ Load PolicyConfig,   │◀─────│ Contexts >64 block   │◀─────│ Load instance +      │
-│ AdminFrozen,         │      │ before gates; else   │      │ persistent state     │
-│ LastHeartbeat, now   │      │ admin → DMS → pause  │      │ (agent key, policy,  │
-└──────────┬───────────┘      │ → active window      │      │ window, heartbeat)   │
-           │                  └──────────────────────┘      └──────────────────────┘
+┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
+│ Transaction requires │───▶│ __check_auth         │───▶│ Verify agent Ed25519 │
+│ the account's auth   │    │ (host-invoked)       │    │ signature over auth  │
+│                      │    │                      │    │ payload              │
+│ [HOLDS FUNDS]        │    │ [HOST-ENFORCED]      │    │                      │
+│ Contract is account; │    │ Single enforcement   │    │ [HOST-ENFORCED]      │
+│ funds live in agent's│    │ vector (SPEC §1)     │    │ Host ed25519_verify; │
+│ own smart account    │    │                      │    │ bad sig traps frame  │
+│ with balances held   │    │ [NO FUNDS]           │    │ before policy eval   │
+│ at contract address  │    │ No third-party vault,│    │ (SPEC §1.1, §4.1)    │
+│ by SAC (SPEC §1)     │    │ no top_up, no deposit│    │                      │
+│                      │    │ step (SPEC §1)       │    │                      │
+└──────────────────────┘    └──────────────────────┘    └──────────┬───────────┘
+                                                [POLICY-BOUND]     │
+                                                From here, auth is │
+                                                policy-bound       ▼
+┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
+│ Load PolicyConfig,   │◀───│ Contexts >64 block   │◀───│ Load instance +      │
+│ AdminFrozen,         │    │ before gates; else   │    │ persistent state     │
+│ LastHeartbeat, now   │    │ admin → DMS → pause  │    │ (agent key, policy,  │
+└──────────┬───────────┘    │ → active window      │    │ window, heartbeat)   │
+           │                └──────────────────────┘    └──────────────────────┘
            ▼
-┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
-│ Per-context decision │─────▶│ parse_call: classify │─────▶│ Enforce per kind:    │
-│ loop — every context │      │ each auth context    │      │ • AssetTransfer →    │
-│ must pass            │      │ (SelfCall /          │      │   recipient allowlist│
-└──────────────────────┘      │  CreateContract /    │      │   + per-tx cap +     │
-                              │  Unknown / AssetOther│      │   rolling window     │
-                              │  / AssetTransfer /   │      │ • Protocol → contract│
-                              │  Protocol)           │      │   + fn allowlist     │
-                              └──────────────────────┘      │ • anything else →    │
-                                                             │   default-deny       │
-                                                             └──────────┬───────────┘
-                                                                        ▼
-                              ┌────────────────────────────────────────────────────┐
-                              │ All contexts admissible?  Yes → commit staged      │
-                              │ window admissions → Ok(()).  No → Err(reason) —     │
-                              │ the whole transaction is rejected pre-broadcast.   │
-                              └────────────────────────────────────────────────────┘
+┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
+│ Per-context decision │───▶│ parse_call: classify │───▶│ Enforce per kind:    │
+│ loop — every context │    │ each auth context    │    │ • AssetTransfer →    │
+│ must pass            │    │ (SelfCall /          │    │   recipient allowlist│
+└──────────────────────┘    │  CreateContract /    │    │   + per-tx cap +     │
+                            │  Unknown / AssetOther│    │   rolling window     │
+                            │  / AssetTransfer /   │    │ • Protocol → contract│
+                            │  Protocol)           │    │   + fn allowlist     │
+                            └──────────────────────┘    │ • anything else →    │
+                                                        │   default-deny       │
+                                                        └──────────┬───────────┘
+                                                                   ▼
+                          ┌────────────────────────────────────────────────────┐
+                          │ All contexts admissible?  Yes → commit staged      │
+                          │ window admissions → Ok(()).  No → Err(reason) —    │
+                          │ the whole transaction is rejected pre-broadcast.   │
+                          └────────────────────────────────────────────────────┘
+
+Trust boundaries & custody legend (SPEC §1):
+  [HOST-ENFORCED] Host-enforced step: Soroban host routes require_auth through
+                  __check_auth (SPEC §1); host crypto verification traps
+                  on bad signature (SPEC §1.1, §4.1).
+  [HOLDS FUNDS]   Contract is account (SPEC §1); funds live in agent's own
+                  smart account with balances held at contract address by
+                  Stellar Asset Contracts (SPEC §1).
+  [NO FUNDS]      Check logic takes no custody: there is no third-party vault,
+                  no top_up, no deposit step (SPEC §1).
+  [POLICY-BOUND]  From here, agent authorization is policy-bound: policy admin
+                  holds no fund-moving authority of any kind (admin functions
+                  change policy and freeze state only) (SPEC §1).
 ```
 
 Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
