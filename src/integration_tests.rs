@@ -3742,7 +3742,10 @@ fn batch_events_emit_in_order_with_context_index() {
         // as its position and policy generation.
         XdrScVal::Map(Some(ScMap(
             VecM::try_from(std::vec::Vec::from([
-                entry("contract", XdrScVal::from_val(&h.env, &h.asset)),
+                entry(
+                    "contract",
+                    XdrScVal::from_val(&h.env, &h.asset.clone().into_val(&h.env)),
+                ),
                 entry(
                     "fn_name",
                     XdrScVal::from_val(&h.env, &Symbol::new(&h.env, "transfer")),

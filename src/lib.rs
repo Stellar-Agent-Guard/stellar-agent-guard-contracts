@@ -1218,7 +1218,7 @@ mod policy_engine_type {
                         &env,
                         true,
                         None,
-                        auth_contexts.get(i as u32).as_ref(),
+                        auth_contexts.get(context_index).as_ref(),
                         context_index,
                     ),
                     Decision::Blocked(e) => {
@@ -1230,7 +1230,7 @@ mod policy_engine_type {
                             &env,
                             false,
                             Some(*e),
-                            auth_contexts.get(i as u32).as_ref(),
+                            auth_contexts.get(context_index).as_ref(),
                             context_index,
                         );
                     }
