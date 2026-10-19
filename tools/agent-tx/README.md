@@ -38,7 +38,7 @@ agent-tx status --guard C... --network futurenet
 ## Input validation
 
 `--guard`, `--asset`/`--token`, `--to`, the `guards add` address and its admin, and
-`--agent-secret` are validated as StrKeys *of the expected kind* before any RPC
+`AGENT_SECRET` are validated as StrKeys *of the expected kind* before any RPC
 request is made: `C...` for contract IDs (guard, token), `G...` for account IDs
 (recipients accepted as either, admin must be an account), `S...` for the secret seed.
 Length, the base-32 alphabet, and the CRC16 checksum are all checked, so a copy-paste
@@ -112,12 +112,12 @@ reason: per_tx_cap_exceeded
 authorization entry** (`src/main.rs`, `cmd_check`: `invoke_op(&invocation,
 VecM::default())`), so the host never calls the guard's `__check_auth` and the
 policy engine never runs. Recorded against the live testnet deployment, the
-same 1100-unit transfer printed `result: allowed` here while
-`preflight --secret` blocked it with `heartbeat_expired`. What `check` reports
+same 1100-unit transfer printed `result: allowed` here while a signed
+`preflight` blocked it with `heartbeat_expired`. What `check` reports
 is whether the *unsigned* simulation succeeds — i.e. the operation shape,
 footprint and fee — so treat `allowed` from `check` as "the call is well-formed
-and costed", never as "the policy admits it". For an enforced answer use
-`preflight --secret` (below) or the on-chain `check` / `check_detailed`
+and costed", never as "the policy admits it". For an enforced answer use a
+signed `preflight` with `AGENT_SECRET` (below) or the on-chain `check` / `check_detailed`
 read-only contract views (SPEC section 7), which run the same decision path
 without needing auth.
 
@@ -128,11 +128,16 @@ These reads use `getLedgerEntries` and `simulateTransaction` — no auth, no sub
 Run a transfer simulation without submitting a transaction (deprecated in favor of `check`):
 
 ```bash
-agent-tx preflight --guard C... --asset C... --to G... --amount 1100 --secret "$AGENT_SECRET"
+# Read without echo so the secret is not saved in shell history.
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
+agent-tx preflight --guard C... --asset C... --to G... --amount 1100
 ```
 
-The signed path uses the registered agent secret (also accepted as
-`--agent-secret` or from `AGENT_SECRET`) to simulate through the live
+Run `unset AGENT_SECRET` when you finish the shell session to clear it from
+subsequent commands.
+
+The signed path uses the registered agent secret from `AGENT_SECRET` to
+simulate through the live
 `__check_auth`. A policy denial is returned with diagnostic event details. For
 example, with the repository fixture policy's `per_tx_cap: 1000`:
 
@@ -172,8 +177,8 @@ actual inclusion costs can differ.
 Every preflight invocation begins with `send=no (preflight only)`, including
 blocked and inconclusive outcomes.
 
-`--secret` is optional. Without it, `agent-tx` reads the registered public key
-from guard instance storage and builds an unsigned simulation. This can provide
+The secret is optional. Without `AGENT_SECRET`, `agent-tx` reads the registered
+public key from guard instance storage and builds an unsigned simulation. This can provide
 a fee estimate, but it cannot authenticate the custom account or establish
 that `__check_auth` would admit the transfer. The result is therefore marked
 `INDETERMINATE`, with exit code `2` even if the unsigned simulation itself
@@ -192,7 +197,7 @@ It does not increment the account sequence or broadcast a transaction.
 ## Submission commands
 
 `transfer` and `heartbeat` submit transactions after successful simulation and
-require `--agent-secret` (or `AGENT_SECRET`). They are distinct from the
+require the registered agent secret in `AGENT_SECRET`. They are distinct from the
 non-broadcasting `preflight` command. See the repository README for the
 submission error mapping and troubleshooting guidance.
 
@@ -221,8 +226,10 @@ call path. The executing PR adds `invoke`, reusing the existing
 simulate-then-submit flow (`run`) and the `Call::invocation` auth-entry
 construction with a parameterized variant:
 
-```text
-agent-tx invoke --guard C... --contract C... --fn <name> [--arg <type:value> ...] --agent-secret S...
+```bash
+# Read without echo so the secret is not saved in shell history.
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
+agent-tx invoke --guard C... --contract C... --fn <name> [--arg <type:value> ...]
 ```
 
 Contract for the implementation (kept small on purpose):

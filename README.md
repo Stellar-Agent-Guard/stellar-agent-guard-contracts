@@ -269,9 +269,10 @@ The `stellar` CLI cannot invoke it, because it cannot sign Soroban auth entries 
 address is a contract. Use the repo's submission helper instead:
 ```bash
 cd tools/agent-tx && cargo build --release
+# Read without echo so the secret is not saved in shell history.
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
 ./target/release/agent-tx heartbeat \
-  --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
-  --agent-secret S...   # the registered agent's Ed25519 secret (AGENT_SECRET env also works)
+  --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7
 ```
 
 For the full steady-state loop an agent must run (heartbeat cadence, per-transfer
@@ -291,11 +292,13 @@ guarantee of the eventual inclusion fee.
 
 ```bash
 cd tools/agent-tx && cargo build --release
+# Read without echo so the secret is not saved in shell history.
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
 ./target/release/agent-tx preflight \
   --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --asset CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7 \
   --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX \
-  --amount 1100 --secret "$AGENT_SECRET"
+  --amount 1100
 # BLOCKED (pre-broadcast, enforced simulation)
 # diagnostic event: auth_checked, blocked, per_tx_cap_exceeded
 # broadcast: no
@@ -303,11 +306,12 @@ cd tools/agent-tx && cargo build --release
 
 The example exceeds the fixture policy's `per_tx_cap: 1000`. Exit codes:
 `0` means signed simulation admitted the call, `1` means signed simulation
-blocked it, and `2` means the unsigned simulation was inconclusive. `--secret`
-is optional (or supplied via `AGENT_SECRET`): without it the tool retrieves the
+blocked it, and `2` means the unsigned simulation was inconclusive. The secret
+is optional: without `AGENT_SECRET` the tool retrieves the
 registered public key and estimates a fee, but cannot sign the custom-account
 authorization, so it cannot establish whether `__check_auth` will admit the
-transfer. See [`tools/agent-tx/README.md`](tools/agent-tx/README.md) for details.
+transfer. The command above prompts without echo so the secret is not saved in
+shell history. See [`tools/agent-tx/README.md`](tools/agent-tx/README.md) for details.
 
 ### `freeze` / `unfreeze`
 ```rust

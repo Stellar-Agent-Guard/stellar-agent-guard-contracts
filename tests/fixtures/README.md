@@ -91,6 +91,14 @@ blocked result is only meaningful relative to the state that produced it.
 
 ## The five scenarios — real results
 
+The recorded `agent-tx` commands omit secret material. To reproduce them, load
+the appropriate seed into `AGENT_SECRET` with a hidden prompt; this keeps it out
+of shell history:
+
+```bash
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
+```
+
 ### 1. Allowed transaction — PASSED on-chain
 
 ```text
@@ -216,9 +224,10 @@ the tables above. `<PROTOCOL>` is a minimal protocol contract deployed fresh
 at run time (any contract with two functions, e.g. `ping` allowlisted and
 `admin_fn` denied - its contract ID is recorded then). `<NEW_PUBKEY_HEX>` is
 the 64-character raw Ed25519 public key of a fresh agent keypair (derive it
-with `cargo run --example agent_pubkey`); `<OLD_SECRET>` / `<NEW_SECRET>` are
-the corresponding secrets. Every `(recorded at run time)` marker below is a
-value the executing PR fills in, in both this prose and `index.json`.
+with `cargo run --example agent_pubkey`). Load the corresponding old or new
+secret interactively into `AGENT_SECRET` before each command. Every `(recorded
+at run time)` marker below is a value the executing PR fills in, in both this
+prose and `index.json`.
 
 ### 6. Agent-key rotation + old-key rejection (pending)
 
@@ -240,20 +249,22 @@ stellar contract invoke --id <GUARD> --network testnet \
 signature verification traps before policy evaluation, so there are no
 `auth_checked` topics - the evidence is the simulation error, not an event:
 
-```text
+```bash
+# Hidden prompt keeps the old secret out of shell history.
+read -rsp "Old agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
 agent-tx transfer --guard <GUARD> --token <TOKEN> --to <RECIPIENT> \
-  --amount 10 --agent-secret <OLD_SECRET> --expect-blocked
-(recorded at run time: host signature-trap error output)
-broadcast: no
+  --amount 10 --expect-blocked
+# recorded at run time: host signature-trap error output; broadcast: no
 ```
 
 3. New key admitted:
 
-```text
+```bash
+# Hidden prompt keeps the new secret out of shell history.
+read -rsp "New agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
 agent-tx transfer --guard <GUARD> --token <TOKEN> --to <RECIPIENT> \
-  --amount 10 --agent-secret <NEW_SECRET>
-(recorded at run time: submitted hash, ledger, created_at)
-(recorded at run time: topics [event_auth_checked, allowed])
+  --amount 10
+# recorded at run time: submitted hash, ledger, created_at; topics [event_auth_checked, allowed]
 ```
 
 4. DMS interplay: `status` after step 3 shows the same `last_heartbeat` as
@@ -277,30 +288,32 @@ the executing PR:
 
 - 7a admit:
 
-```text
-agent-tx invoke --guard <GUARD> --contract <PROTOCOL> --fn ping \
-  --agent-secret <AGENT_SECRET>
-(recorded at run time: submitted hash, ledger, created_at)
-(recorded at run time: topics [event_auth_checked, allowed])
+```bash
+# Hidden prompt keeps the secret out of shell history.
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
+agent-tx invoke --guard <GUARD> --contract <PROTOCOL> --fn ping
+# recorded at run time: submitted hash, ledger, created_at; topics [event_auth_checked, allowed]
 ```
 
 - 7b deny (wrong function, same contract):
 
-```text
+```bash
+# Hidden prompt keeps the secret out of shell history.
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
 agent-tx invoke --guard <GUARD> --contract <PROTOCOL> --fn admin_fn \
-  --agent-secret <AGENT_SECRET> --expect-blocked
-(recorded at run time: topics [event_auth_checked, blocked, function_not_allowed])
-broadcast: no
+  --expect-blocked
+# recorded at run time: topics [event_auth_checked, blocked, function_not_allowed]; broadcast: no
 ```
 
 - 7c deny (unknown contract - no deployment needed, any address outside
 `assets` and `protocols` exercises the path):
 
-```text
+```bash
+# Hidden prompt keeps the secret out of shell history.
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
 agent-tx invoke --guard <GUARD> --contract <UNLISTED> --fn anything \
-  --agent-secret <AGENT_SECRET> --expect-blocked
-(recorded at run time: topics [event_auth_checked, blocked, protocol_not_allowed])
-broadcast: no
+  --expect-blocked
+# recorded at run time: topics [event_auth_checked, blocked, protocol_not_allowed]; broadcast: no
 ```
 
 ### 8. Pause gate (pending)
@@ -310,11 +323,12 @@ entry).
 2. Agent transfer blocked pre-broadcast. Pause is decision-table gate 4, ahead
 of all classification, so no per-call reasoning applies:
 
-```text
+```bash
+# Hidden prompt keeps the secret out of shell history.
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
 agent-tx transfer --guard <GUARD> --token <TOKEN> --to <RECIPIENT> \
-  --amount 10 --agent-secret <AGENT_SECRET> --expect-blocked
-(recorded at run time: topics [event_auth_checked, blocked, paused])
-broadcast: no
+  --amount 10 --expect-blocked
+# recorded at run time: topics [event_auth_checked, blocked, paused]; broadcast: no
 ```
 
 3. Admin restores `paused: false` (hash recorded); the same transfer succeeds
