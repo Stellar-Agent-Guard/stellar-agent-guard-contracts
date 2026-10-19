@@ -457,3 +457,44 @@ Two notes that matter when these rows are used to triage a live incident:
 The five blocked/emitted events above are the contract's own
 `event_auth_checked` topics — grep the enforced-simulation output for
 `blocked, <reason>` to confirm each.
+
+## Contributing to the proof plan: when a change needs a testnet proof entry
+
+Per [`CONTRIBUTING.md` Coding Standard 6](../../CONTRIBUTING.md#coding-standards) and [`SPEC.md` §11](../../SPEC.md#11-testnet-proof-plan-scenarios-18-five-proven-three-planned), this directory records ground-truth on-chain evidence for contract behavior. To keep enforcement claims backed by real evidence without imposing unnecessary testnet runs on invisible changes, use the following guidelines:
+
+### What requires a testnet proof entry ("user-visible enforcement change")
+
+A change **requires** an on-chain testnet proof entry when it modifies externally observable authorization semantics:
+- **Decision-table changes:** Any change altering what `__check_auth` admits or blocks, or changing the error code, event topics, or diagnostic data emitted on allow or deny.
+- **Storage-layout or key-schema changes:** Changes to storage keys, data types, footprint, or TTL management (these probably require an entry because they alter on-chain state persistence, footprint, or contract upgrade/migration compatibility observable by callers).
+- **Policy/guard rules:** Adding, modifying, or removing policy constraints, guards, or authorization paths.
+
+### What does NOT require a testnet proof entry
+
+A change **does not** require a testnet proof entry when observable contract behavior and state remain identical:
+- **Gas / CPU / memory optimizations:** Internal performance improvements that preserve identical admit/block decisions, storage layouts, and emitted events.
+- **Documentation changes:** Updates to markdown files, doc comments, specs, or diagrams.
+- **Internal refactorings:** Restructuring internal helper functions, code cleanup, or modifying test harnesses and test-only code with zero external behavioral or state impact.
+
+### Summary comparison
+
+| Change category | Testnet proof entry required? | Examples / Notes |
+|---|---|---|
+| Decision-table change | Yes | Altering `__check_auth` admit/deny logic, error discriminants, event topics |
+| Storage-layout change | Probably | Modifying storage key schemas, persistent footprint, TTL policies |
+| Policy rule addition/removal | Yes | Adding new guard rules, allowlists, or authorization evaluation paths |
+| Gas / performance optimization | No | Reducing CPU/instructions while preserving exact input/output and event behavior |
+| Documentation update | No | Spec clarifications, README/diagram improvements, doc comments |
+| Internal refactoring | No | Restructuring helper functions, cleaning up tests, renaming internal variables |
+
+### Evidence bar and recording responsibility
+
+- **Evidence bar:** A complete testnet proof entry requires the on-chain testnet transaction hash (`tx hash`) and the corresponding captured event/diagnostic output (`topics: [event_auth_checked, <outcome>, <reason>]`), formatted consistently with the scenarios in this README and mirrored in [`tests/fixtures/index.json`](index.json). Both files are cross-checked by [`tests/fixtures_index.rs`](../fixtures_index.rs).
+- **Who records it:** The PR author proposing the user-visible enforcement change is responsible for executing the testnet scenario (using `tools/agent-tx` or standard Soroban CLI submission) and submitting the updated proof fixtures with their PR. When live testnet infrastructure or deployment keys are maintainer-managed during release/verification, the contributor provides the reproducible simulation command and rationale in the PR description, and maintainers record the live hashes upon verification.
+
+### Impractical testnet changes (the fallback path)
+
+When a change is enforcement-affecting (changes what `__check_auth` admits or blocks) but is impractical or non-deterministic to demonstrate on public testnet (such as extreme ledger-sequence/timestamp boundary conditions, complex time-warp states, specific host race conditions, or host resource-exhaustion limits):
+1. **Deterministic local test:** Implement a comprehensive unit or host-routed integration test using the Soroban test environment (`Harness` / `GuardScenario` in [`src/integration_tests.rs`](../../src/integration_tests.rs)) that precisely exercises the boundary condition or failure path.
+2. **Written rationale:** Include a clear written rationale in the PR description and proof plan documentation explaining why live testnet reproduction is impractical and how the local test suite conclusively guarantees the invariant.
+

@@ -136,10 +136,27 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
 6. **Testnet-proof pattern:** behavior that changes what `__check_auth` admits
    or blocks should add a unit/integration test **and**, where it is a user-
    visible enforcement change, be recorded in the testnet proof plan
-   (`tests/fixtures/README.md` **and** its machine-readable twin
-   `tests/fixtures/index.json`) per the Phase-1 exit-criteria pattern. The two
-   files are cross-checked by `tests/fixtures_index.rs`, so editing one without
+   ([`tests/fixtures/README.md`](tests/fixtures/README.md) **and** its machine-readable twin
+   [`tests/fixtures/index.json`](tests/fixtures/index.json)) per the Phase-1 exit-criteria pattern. The two
+   files are cross-checked by [`tests/fixtures_index.rs`](tests/fixtures_index.rs), so editing one without
    the other fails `cargo test`.
+
+   - **User-visible enforcement changes (proof entry required):**
+     - *Decision-table changes:* modifying what `__check_auth` admits or blocks, or changing error codes, event topics, or diagnostic data emitted on allow or deny.
+     - *Storage-layout & key-schema changes:* modifying storage keys, types, footprint, or TTL management (these probably require an entry because they alter on-chain state persistence, footprint, or contract upgrade/migration compatibility observable by callers).
+     - *Policy/guard rules:* adding, modifying, or removing policy constraints, guards, or authorization paths.
+   - **Changes not user-visible (no proof entry required):**
+     - *Gas/CPU/memory optimizations:* pure internal performance tuning where admit/block outcomes, storage layouts, and emitted events remain identical.
+     - *Documentation & formatting:* comments, documentation, and formatting updates.
+     - *Internal refactorings:* restructuring internal helper functions or test-only harness code with zero external behavioral change or storage impact.
+   - **Evidence bar & responsibility:**
+     - A proof entry requires an on-chain testnet transaction hash (`tx hash`) plus captured event/diagnostic output (`topics: [event_auth_checked, <outcome>, <reason>]`), matching the exact format defined in [`tests/fixtures/README.md`](tests/fixtures/README.md) and recorded in `tests/fixtures/index.json`.
+     - The PR author proposing the change is responsible for capturing and recording the testnet proof entry (using `tools/agent-tx` or standard Soroban CLI against testnet). When live testnet credentials or deployment fixtures are maintainer-gated during release/verification, the author provides the reproducible simulation script and rationale in the PR, and maintainers record the live hashes upon verification.
+   - **Impractical on testnet (fallback rationale):**
+     - If an enforcement-affecting change is impractical or non-deterministic to reproduce on live public testnet (e.g. extreme timestamp/ledger boundaries, race conditions, or host resource-exhaustion edge cases):
+       1. Provide a comprehensive deterministic unit or host-routed integration test ([`src/integration_tests.rs`](src/integration_tests.rs)) exercising the exact enforcement path in the Soroban test environment (`Env`).
+       2. Include a clear written rationale in the PR description and proof plan documentation detailing why live testnet reproduction is impractical and how the unit/integration tests conclusively verify the invariant.
+   - See [`tests/fixtures/README.md`](tests/fixtures/README.md) and [`SPEC.md` §11](SPEC.md#11-testnet-proof-plan-scenarios-18-five-proven-three-planned) for scenario definitions and fixture schemas.
 7. **Denial-reason messages:** `docs/reason-glossary.md` is the canonical
    message-content source for SDK/UI work — map new user-facing denial text to
    its agent/operator/auditor columns instead of inventing new phrasing.

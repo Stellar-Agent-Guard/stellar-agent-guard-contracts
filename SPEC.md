@@ -1660,3 +1660,27 @@ window invariant, auth-context parsing, signature verification, freeze/reversal,
 deny. Gates: `cargo test` green, `cargo clippy --all-targets --all-features` clean with
 `warnings`/`clippy::all`/`clippy::pedantic` deny, `cargo fmt --check` clean, CI (`ci` job) green
 on `main`.
+
+### 11.1 Testnet-proof criteria and fallback rationale
+
+Per [`CONTRIBUTING.md` Coding Standard 6](CONTRIBUTING.md#coding-standards) and [`tests/fixtures/README.md`](tests/fixtures/README.md):
+
+1. **User-visible enforcement changes (testnet proof entry required):**
+   - Alterations to the decision table (SPEC §§4, 6) affecting what `__check_auth` admits or blocks, or changing error codes/events emitted on allow or deny.
+   - Storage-layout, footprint, or key-schema changes affecting on-chain persistence, footprint, or contract upgrade/migration compatibility observable by callers.
+   - Adding, modifying, or removing policy/guard rules or authorization checks.
+
+2. **Changes not user-visible (no testnet proof entry required):**
+   - Pure internal gas/CPU/memory optimizations that preserve identical admit/deny decisions, storage layout, and events.
+   - Documentation, comments, or specification formatting updates.
+   - Refactorings of internal helpers, test harnesses, or test-only assertions.
+
+3. **Evidence bar & responsibility:**
+   - A valid proof entry requires an on-chain testnet transaction hash (`tx hash`) and the emitted event output (`topics: [event_auth_checked, <outcome>, <reason>]`), structured per [`tests/fixtures/README.md`](tests/fixtures/README.md) and mirrored in [`tests/fixtures/index.json`](tests/fixtures/index.json).
+   - The PR contributor proposing the change is responsible for capturing and recording the testnet proof.
+
+4. **Impractical testnet scenarios (fallback path):**
+   - If an enforcement change is impractical to demonstrate on live public testnet (e.g. extreme ledger-sequence/timestamp edge cases, complex multi-ledger rollbacks, or host resource exhaustion):
+     - The change must provide a deterministic unit/integration test in the Soroban test environment ([`src/integration_tests.rs`](src/integration_tests.rs)) covering the exact enforcement path.
+     - The PR description and proof documentation must include a written rationale explaining why testnet demonstration is impractical and how the deterministic test suite validates the invariant.
+
