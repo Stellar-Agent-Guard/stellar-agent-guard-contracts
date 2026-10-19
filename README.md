@@ -21,7 +21,7 @@
 
 # Stellar Agent Guard — Contracts
 
-📚 **[Documentation](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/)**
+📚 **[Documentation](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/)** • **[SPEC ↔ GitBook Cross-Reference](docs/README.md#spec--gitbook-cross-reference-map)**
 
 **Non-custodial, account-level spending firewall for autonomous AI agents on Stellar.**
 
@@ -800,7 +800,8 @@ Stellar Agent Guard operates across three dedicated repositories:
   build if that file, the SPEC §4 table, the “How it works” walkthrough above, the
   `Error` enum, and `src/engine.rs` disagree — so the three artifacts cannot drift
   apart silently.
-- `SPEC.md` — the full architecture specification.
+- `docs/README.md` — documentation contributor guide and the [SPEC ↔ GitBook cross-reference map](docs/README.md#spec--gitbook-cross-reference-map).
+- `SPEC.md` — the full architecture specification (normative source of truth).
 
 ## ✅ Verified against live testnet
 

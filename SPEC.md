@@ -6,6 +6,10 @@ smart-wallet policy contract, every public signature with auth-placement reasoni
 model (per-transaction cap, genuinely rolling window cap, recipient + protocol/function
 allowlists, pause, dead-man switch), and the exact enforcement scope.
 
+Documentation mapping: this specification is the **normative** source of truth for contract behavior.
+For corresponding explanatory guides, tutorials, and concept walkthroughs on the GitBook documentation
+site, see the [SPEC ↔ GitBook Cross-Reference Map](docs/README.md#spec--gitbook-cross-reference-map).
+
 Sibling context: this project builds on the research and reasoning of `agent-spend-policy` (a
 related but distinct project). Mechanism conclusions are shared; code, policy math (rolling, not
 fixed-bucket), and the product split (contracts / SDK / dashboard) are this project's own.
