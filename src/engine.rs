@@ -964,6 +964,28 @@ mod tests {
     }
 
     #[test]
+    fn per_tx_cap_boundary_admitted_at_cap_and_blocked_at_cap_plus_one() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.per_tx_cap = 50;
+        let mut l = Ledger::empty(&env);
+
+        // amount == per_tx_cap (50): admitted (SPEC §6.2 rule 3: cap is inclusive).
+        let ctx_admit = vec![&env, transfer_ctx(&env, 1, 2, 50)];
+        let d1 = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx_admit);
+        assert_eq!(d1.first(), Some(&Decision::Allowed));
+
+        // amount == per_tx_cap + 1 (51): blocked with PerTxCapExceeded.
+        let ctx_block = vec![&env, transfer_ctx(&env, 1, 2, 51)];
+        let d2 = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx_block);
+        assert!(matches!(
+            d2.first(),
+            Some(Decision::Blocked(Error::PerTxCapExceeded))
+        ));
+    }
+
+    #[test]
     fn recipient_allowlist_enforced_and_escaped() {
         let env = Env::default();
         let sa = self_addr(&env);
