@@ -40,6 +40,7 @@ use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, TryFromVal, Val,
 };
+pub use types::MAX_AUTH_CONTEXTS;
 pub use types::NO_POLICY_DIGEST;
 pub use types::{
     AssetCap, CheckDetail, Error, PolicyConfig, ProtocolRule, RecipientCap, RecipientWindowState,
@@ -1140,7 +1141,9 @@ mod policy_engine_type {
 
             // 2. Verify the agent's Ed25519 signature over the auth payload. The
             //    host crypto function traps the frame on a bad signature, so a
-            //    wrong key can never reach policy evaluation.
+            //    wrong key can never reach policy evaluation. This ordering is a
+            //    stated guarantee with named enforcing tests and a refactor
+            //    warning in SPEC §10.2 — do not move a read above this call.
             let message: Bytes = signature_payload.into();
             env.crypto().ed25519_verify(&agent, &message, &signatures);
 
@@ -1227,12 +1230,15 @@ pub use policy_engine_type::PolicyEngineClient;
 #[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
 #[allow(missing_docs)] // Test-only helper re-exports are not contract API.
 pub mod testutils {
-    pub use crate::engine::{contains_addr, decide, parse_call, AccountState, Decision};
+    pub use crate::engine::{
+        contains_addr, decide, parse_call, worst_case_transfer_policy, worst_case_transfer_target,
+        AccountState, Decision,
+    };
     pub use crate::types::policy_canonical_encoding;
     pub use crate::types::{
         CheckResult, DataKey, Error, PolicyConfig, PolicyRuleId, ProtocolRule, RecipientCap,
-        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_DMS_GRACE_SECS,
-        MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
+        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_AUTH_CONTEXTS,
+        MAX_DMS_GRACE_SECS, MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
     };
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};

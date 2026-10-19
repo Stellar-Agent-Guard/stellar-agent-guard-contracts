@@ -27,9 +27,11 @@ agent-tx status --guard C... --network futurenet
   `--rpc-url` together are rejected: they name two endpoints, and guessing which one
   an operator meant is exactly the failure mode presets exist to remove. A URL that
   *is* a preset endpoint is recognised, so `--rpc-url https://soroban.stellar.org`
-  still signs the mainnet payload.
-- `--network-passphrase <phrase>` overrides the passphrase (a local
-  `stellar standalone` network, a fork).
+  still signs the mainnet payload. An unrecognized URL requires an explicit
+  `--network-passphrase`; the tool never guesses the network identity.
+- `--network-passphrase <phrase>` overrides a preset passphrase or specifies the
+  network identity for a custom node (for example, a local `stellar standalone`
+  network or a fork). The resolved passphrase source is printed before submission.
 - Selecting mainnet prints a one-line reminder on stderr that this contract is
   unaudited and gates real funds; see the repository [SECURITY.md](../../SECURITY.md).
 
@@ -96,7 +98,8 @@ agent-tx check --guard C... --asset C... --to G... --amount 1100
 
 Output shows:
 - `result`: `allowed` or `blocked`
-- If blocked: `reason` (the policy rejection reason, e.g., `per_tx_cap_exceeded`)
+- If blocked: `reason` (the RPC's error code), plus `diagnostic_reason` decoded
+  from the diagnostic events when they are present
 - If allowed: `estimated_fee_stroops` (RPC's `minResourceFee`)
 
 Example (blocked by per-tx cap):
@@ -104,6 +107,19 @@ Example (blocked by per-tx cap):
 result: blocked
 reason: per_tx_cap_exceeded
 ```
+
+**`check` is not a policy verdict.** It simulates the SAC transfer with **no
+authorization entry** (`src/main.rs`, `cmd_check`: `invoke_op(&invocation,
+VecM::default())`), so the host never calls the guard's `__check_auth` and the
+policy engine never runs. Recorded against the live testnet deployment, the
+same 1100-unit transfer printed `result: allowed` here while
+`preflight --secret` blocked it with `heartbeat_expired`. What `check` reports
+is whether the *unsigned* simulation succeeds — i.e. the operation shape,
+footprint and fee — so treat `allowed` from `check` as "the call is well-formed
+and costed", never as "the policy admits it". For an enforced answer use
+`preflight --secret` (below) or the on-chain `check` / `check_detailed`
+read-only contract views (SPEC section 7), which run the same decision path
+without needing auth.
 
 These reads use `getLedgerEntries` and `simulateTransaction` — no auth, no submission, no sequence advancement.
 
@@ -127,6 +143,26 @@ BLOCKED (pre-broadcast, enforced simulation):
   event [C...] topics=(event_auth_checked, blocked, per_tx_cap_exceeded) data=...
   broadcast: no
 ```
+
+Read the reason from the `auth_checked` event's third topic. `preflight` is the
+only local path that is guaranteed to see it, because it is the only one that
+signs: the simulation failure comes back as `result.error` plus base64
+diagnostic events in `result.events`, and a submitted transaction that fails
+carries no readable reason field at all. The full observable-error → policy-reason
+mapping, with a verbatim live capture, is
+[`docs/functions/check-auth.md`](../../docs/functions/check-auth.md#what-an-operator-sees-when-this-rejects-issue-425)
+and the reason vocabulary is
+[`docs/reason-glossary.md`](../../docs/reason-glossary.md).
+
+> Known reporting gap, verified live (documented in the check-auth section above,
+> not fixed here): the block report parses the JSON-RPC *error-object* shape
+> (`error.code` / `error.message` / `error.data.events`) while soroban-rpc returns
+> a simulation failure as `result.error` (a string) with diagnostics in
+> `result.events`. Against the current deployment the header and
+> `broadcast: no` print but the `message:` / `diagnostic events:` lines above do
+> not. The exit code is unaffected, so `1` still means "the enforced simulation
+> blocked this call" — decode the reason from your own `simulateTransaction`
+> response if you need the symbol from a script.
 
 An admitted signed simulation prints `RESULT: ALLOWED (preflight only)`, the
 estimated fee in stroops, and `broadcast: no`. The fee estimate is the RPC's
@@ -159,6 +195,23 @@ It does not increment the account sequence or broadcast a transaction.
 require `--agent-secret` (or `AGENT_SECRET`). They are distinct from the
 non-broadcasting `preflight` command. See the repository README for the
 submission error mapping and troubleshooting guidance.
+
+`transfer-from` constructs the token call in the exact order
+`transfer_from(from, spender, to, amount)`. It requires `--from`; the guard is
+the spender and receives the signed authorization, while `--to` and `--amount`
+occupy argument positions 2 and 3. The token must already have an allowance for
+the guard as spender. This command uses the same simulate, sign, and submit flow
+as `transfer`.
+
+Submission fees use RPC `getFeeStats.inclusionFee.mode` plus the simulated
+`minResourceFee` and the guard-footprint fee allowance. `--inclusion-fee
+<stroops>` overrides the network-reported inclusion fee. If fee statistics are
+unavailable, the tool reports that it is using the 100-stroop fallback.
+
+RPC transport failures, HTTP failures, JSON-RPC rejections, and simulation-level
+transaction rejections are reported as distinct outcomes. `--expect-blocked`
+returns success only when the simulation contains a guard `auth_checked` block;
+other transaction failures are not treated as policy denials.
 
 ## Planned: generic `invoke` subcommand (scenario 7)
 

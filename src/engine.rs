@@ -125,6 +125,116 @@ fn contains_sym(list: &Vec<Symbol>, s: &Symbol) -> bool {
     false
 }
 
+// ── Worst-case decision-path fixtures (issue #118) ───────────────────────
+//
+// The recipient checks in `decide` are the only place the engine does work
+// proportional to a policy list length, and SPEC §8 caps every one of those
+// lists at `MAX_RECIPIENT_ENTRIES`. That makes the cost boundable: build the
+// lists at exactly the documented maximum, and the decision path can be
+// measured at its true worst case rather than at some arbitrary list size.
+//
+// Gated out of the shipped wasm: they exist only so `benches/` and the unit
+// test can drive the *identical* scenario behind the number SPEC §6.2 quotes
+// (issue #118 asks for one harness, not two that can drift).
+
+/// Namespace tag for a synthetic address family (see [`worst_case_transfer_policy`]).
+#[cfg(any(test, feature = "testutils"))]
+const WC_RECIPIENTS: u8 = 1;
+/// Namespace tag for the `blocked_recipients` family.
+#[cfg(any(test, feature = "testutils"))]
+const WC_BLOCKED: u8 = 2;
+/// Namespace tag for the transfer destination, absent from both lists.
+#[cfg(any(test, feature = "testutils"))]
+const WC_TARGET: u8 = 3;
+
+/// A contract address in the `tag` family, `index` of the way through it.
+/// Distinct tags yield disjoint addresses, so the recipient allowlist and the
+/// recipient denylist stay disjoint as SPEC §8 requires.
+#[cfg(any(test, feature = "testutils"))]
+pub fn worst_case_addr(env: &Env, tag: u8, index: u8) -> Address {
+    use soroban_sdk::xdr::{ContractId, Hash, ScAddress};
+    let mut hash = [0u8; 32];
+    hash[0] = tag;
+    hash[1..].fill(index);
+    let sc = ScAddress::Contract(ContractId(Hash(hash)));
+    let Ok(addr) = Address::try_from_val(env, &sc) else {
+        panic!("worst-case fixture address must decode");
+    };
+    addr
+}
+
+/// The policy whose decision path is the documented worst case (SPEC §6.2).
+///
+/// Every recipient list `set_policy` will accept is filled to exactly
+/// [`crate::types::MAX_RECIPIENT_ENTRIES`], and the returned transfer
+/// destination is deliberately in **none** of them:
+///
+/// - `allow_any_recipient == false` — the expensive case. `decide` scans
+///   `blocked_recipients` (§6.2 rule 1), then `recipients` (rule 2), and
+///   misses on the *last* element of each: a full sweep of both lists, with no
+///   early exit. This is what the escape hatch buys you.
+/// - `allow_any_recipient == true` — the cheap case. Rule 2 is skipped, so
+///   only the denylist is swept before the caps and window are applied. This
+///   is the case the escape hatch actually costs.
+///
+/// The two recipient lists use disjoint address families because SPEC §8
+/// rejects a destination that is both explicitly allowed and explicitly denied.
+///
+/// # Panics
+///
+/// If `MAX_RECIPIENT_ENTRIES` ever exceeded 256 entries the per-list index
+/// would no longer fit the synthetic address family. That is a test-fixture
+/// invariant, not a policy error: aliasing indices would silently shorten the
+/// measured sweep and understate the worst case, so it fails loudly instead.
+#[cfg(any(test, feature = "testutils"))]
+#[must_use]
+pub fn worst_case_transfer_policy(env: &Env, allow_any_recipient: bool) -> PolicyConfig {
+    let n = crate::types::MAX_RECIPIENT_ENTRIES;
+    let mut recipients = Vec::new(env);
+    let mut blocked_recipients = Vec::new(env);
+    for i in 0..n {
+        // Two indices that alias would silently shorten the measured sweep and
+        // understate the worst case, so a bound that no longer fits fails
+        // loudly instead.
+        let Ok(index) = u8::try_from(i) else {
+            panic!("MAX_RECIPIENT_ENTRIES must fit in a u8 index");
+        };
+        recipients.push_back(worst_case_addr(env, WC_RECIPIENTS, index));
+        blocked_recipients.push_back(worst_case_addr(env, WC_BLOCKED, index));
+    }
+    PolicyConfig {
+        per_tx_cap: 0,
+        window_secs: 86_400,
+        // A cap and a window are on, so the measured path also pays for the
+        // §6.2 rule-4 window evaluation the escape-on case must still run.
+        window_cap: 1_000,
+        assets: {
+            let mut assets = Vec::new(env);
+            assets.push_back(worst_case_addr(env, WC_RECIPIENTS, 0));
+            assets
+        },
+        protocols: Vec::new(env),
+        recipients,
+        recipient_window_caps: Vec::new(env),
+        blocked_recipients,
+        asset_caps: Vec::new(env),
+        allow_any_recipient,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
+    }
+}
+
+/// The transfer destination the worst-case policy admits only under the escape
+/// hatch — absent from `recipients` and from `blocked_recipients`.
+#[cfg(any(test, feature = "testutils"))]
+#[must_use]
+pub fn worst_case_transfer_target(env: &Env) -> Address {
+    worst_case_addr(env, WC_TARGET, 0)
+}
+
 #[allow(clippy::must_use_candidate)]
 fn recipient_override_cap(cfg: &PolicyConfig, recipient: &Address) -> Option<i128> {
     for i in 0..cfg.recipient_window_caps.len() {
@@ -263,8 +373,9 @@ fn parse_call_inner(
 // ── Decision ─────────────────────────────────────────────────────────────
 
 /// Evaluates the SPEC §4 decision table over every auth context, returning one
-/// [`Decision`] per context. Window admissions are staged and committed to
-/// `ledger` only when every context is allowed.
+/// [`Decision`] per context. Oversized batches return one aggregate blocking
+/// decision before any context is evaluated. Window admissions are staged and
+/// committed to `ledger` only when every context is allowed.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)] // by-value host Vec avoids slice/coercion limits
 pub fn decide(
     env: &Env,
@@ -276,6 +387,11 @@ pub fn decide(
     contexts: soroban_sdk::Vec<Context>,
 ) -> alloc::vec::Vec<Decision> {
     let mut verdicts = alloc::vec::Vec::new();
+
+    if contexts.len() as usize > crate::types::MAX_AUTH_CONTEXTS {
+        verdicts.push(Decision::Blocked(Error::TooManyAuthContexts));
+        return verdicts;
+    }
 
     if state.admin_frozen {
         for _ in 0..contexts.len() {
@@ -346,9 +462,19 @@ pub fn decide(
             }
             ParsedCall::CreateContract => Decision::Blocked(Error::CreateContractNotAllowed),
             ParsedCall::Unknown { .. } => Decision::Blocked(Error::UnknownContract),
-            ParsedCall::AssetOther { .. } => Decision::Blocked(Error::FunctionNotAllowed),
+            ParsedCall::AssetOther { asset, .. } => {
+                if matches!(cfg.asset_caps.iter().find(|cap| cap.asset == asset), Some(cap) if cap.paused)
+                {
+                    Decision::Blocked(Error::AssetNotAllowed)
+                } else {
+                    Decision::Blocked(Error::AssetFnNotAllowed)
+                }
+            }
             ParsedCall::AssetTransfer { asset, to, amount } => {
-                if amount <= 0 {
+                if matches!(cfg.asset_caps.iter().find(|cap| cap.asset == asset), Some(cap) if cap.paused)
+                {
+                    Decision::Blocked(Error::AssetNotAllowed)
+                } else if amount <= 0 {
                     Decision::Blocked(Error::InvalidAmount)
                 } else if contains_addr(&cfg.blocked_recipients, &to) {
                     Decision::Blocked(Error::RecipientBlocked)
@@ -359,6 +485,8 @@ pub fn decide(
                 } else {
                     // Window accounting: global cap plus an optional
                     // per-recipient override keyed by the destination.
+                    // The rolling window aggregates every asset listed in
+                    // `cfg.assets` into a single shared total (`ledger.total`).
                     // Projections are computed first; staging happens only
                     // when this context clears both caps.
                     let recip_cap = recipient_override_cap(cfg, &to);
@@ -420,11 +548,13 @@ pub fn decide(
             }
             ParsedCall::Protocol { contract, fname } => {
                 let mut found = false;
+                let mut paused = false;
                 let mut fn_ok = true;
                 for i in 0..cfg.protocols.len() {
                     if let Some(rule) = cfg.protocols.get(i) {
                         if rule.contract == contract {
                             found = true;
+                            paused = rule.paused;
                             fn_ok = match &rule.fns {
                                 None => true,
                                 Some(fns) => contains_sym(fns, &fname),
@@ -433,7 +563,7 @@ pub fn decide(
                         }
                     }
                 }
-                if !found {
+                if !found || paused {
                     Decision::Blocked(Error::ProtocolNotAllowed)
                 } else if !fn_ok {
                     Decision::Blocked(Error::FunctionNotAllowed)
@@ -485,7 +615,7 @@ pub fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ProtocolRule, RecipientCap, MAX_WINDOW_ENTRIES};
+    use crate::types::{ProtocolRule, RecipientCap, MAX_AUTH_CONTEXTS, MAX_WINDOW_ENTRIES};
     use soroban_sdk::{auth::ContractContext, vec, Address, Env, IntoVal, Symbol, Val, Vec};
 
     fn addr(env: &Env, n: u8) -> Address {
@@ -519,6 +649,103 @@ mod tests {
             admin_frozen: false,
             last_heartbeat: 0,
         }
+    }
+
+    #[test]
+    fn auth_context_batch_at_limit_is_evaluated_and_policy_still_applies() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut contexts = Vec::new(&env);
+        for _ in 0..MAX_AUTH_CONTEXTS {
+            contexts.push_back(transfer_ctx(&env, 1, 2, 1));
+        }
+
+        let mut p = base_policy(&env);
+        p.window_cap = MAX_AUTH_CONTEXTS as i128;
+        let mut ledger = Ledger::empty(&env);
+        let verdicts = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut ledger,
+            1_000,
+            contexts.clone(),
+        );
+        assert_eq!(verdicts.len(), MAX_AUTH_CONTEXTS);
+        assert!(verdicts
+            .iter()
+            .all(|decision| matches!(decision, Decision::Allowed)));
+        assert_eq!(ledger.total, MAX_AUTH_CONTEXTS as i128);
+
+        p.window_cap = MAX_AUTH_CONTEXTS as i128 - 1;
+        let mut limited_ledger = Ledger::empty(&env);
+        let limited = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut limited_ledger,
+            1_000,
+            contexts,
+        );
+        assert_eq!(limited.len(), MAX_AUTH_CONTEXTS);
+        assert!(matches!(
+            limited.last().unwrap(),
+            Decision::Blocked(Error::WindowCapExceeded)
+        ));
+        assert_eq!(limited_ledger.total, 0);
+
+        let mut deny_policy = base_policy(&env);
+        deny_policy.allow_any_recipient = true;
+        deny_policy.blocked_recipients = vec![&env, addr(&env, 3)];
+        let mut deny_contexts = Vec::new(&env);
+        for _ in 1..MAX_AUTH_CONTEXTS {
+            deny_contexts.push_back(transfer_ctx(&env, 1, 2, 1));
+        }
+        deny_contexts.push_back(transfer_ctx(&env, 1, 3, 1));
+        let mut deny_ledger = Ledger::empty(&env);
+        let denied = decide(
+            &env,
+            &sa,
+            Some(&deny_policy),
+            &alive(),
+            &mut deny_ledger,
+            1_000,
+            deny_contexts,
+        );
+        assert_eq!(denied.len(), MAX_AUTH_CONTEXTS);
+        assert!(matches!(
+            denied.last().unwrap(),
+            Decision::Blocked(Error::RecipientBlocked)
+        ));
+    }
+
+    #[test]
+    fn auth_context_batch_over_limit_fails_before_staging_admissions() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.allow_any_recipient = true;
+        p.window_cap = 1_000;
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit(1_000, 7);
+        let before_total = ledger.total;
+        let before_len = ledger.len();
+        let mut contexts = Vec::new(&env);
+        for _ in 0..=MAX_AUTH_CONTEXTS {
+            contexts.push_back(transfer_ctx(&env, 1, 2, 1));
+        }
+
+        let verdicts = decide(&env, &sa, Some(&p), &alive(), &mut ledger, 1_000, contexts);
+
+        assert_eq!(verdicts.len(), 1);
+        assert!(matches!(
+            verdicts.first().unwrap(),
+            Decision::Blocked(Error::TooManyAuthContexts)
+        ));
+        assert_eq!(ledger.total, before_total);
+        assert_eq!(ledger.len(), before_len);
     }
 
     fn transfer_ctx(env: &Env, asset: u8, to: u8, amount: i128) -> Context {
@@ -825,7 +1052,7 @@ mod tests {
     /// `transfer`/`transfer_from` (e.g. `mint`, `burn`) is classified as
     /// `AssetOther` and denied. The account is an authorizer, never a minter.
     #[test]
-    fn asset_other_function_is_function_not_allowed() {
+    fn asset_other_function_is_asset_fn_not_allowed() {
         let env = Env::default();
         let sa = self_addr(&env);
         let p = Some(base_policy(&env));
@@ -835,7 +1062,7 @@ mod tests {
         let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx.clone());
         assert!(matches!(
             d.first().unwrap(),
-            Decision::Blocked(Error::FunctionNotAllowed)
+            Decision::Blocked(Error::AssetFnNotAllowed)
         ));
     }
 
@@ -1052,6 +1279,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1110,6 +1339,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1154,6 +1385,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1184,6 +1417,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1214,6 +1449,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1246,6 +1483,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+
+                paused: false,
             },
         ];
         let mut l = Ledger::empty(&env);
@@ -1339,6 +1578,74 @@ mod tests {
             ));
         }
         assert_eq!(l.total, 0, "a blocked window must not admit spend");
+    }
+
+    /// SPEC §5.2: the dead-man gate (row 2) and the active-window gate (row 5)
+    /// can bind the same account at the same instant, and only one reason
+    /// surfaces. The reported reason is the dead-man one because `decide()`
+    /// tests the account-state gates in a single `if / else if` chain; applying
+    /// only the `unfreeze` half (`LastHeartbeat = now`, never `PolicyConfig`)
+    /// then reveals `outside_active_window` on the very next attempt.
+    #[test]
+    fn heartbeat_expiry_and_active_window_both_firing_reports_heartbeat_expired() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.dms_grace_secs = 100;
+        p.active_from = 5_000;
+        p.active_until = 6_000;
+        p.window_cap = 100;
+        let mut l = Ledger::empty(&env);
+
+        // A spend the classification rules would admit, plus the heartbeat that
+        // would be the agent's own escape route. Neither may slip past the gates.
+        let ctx = vec![&env, transfer_ctx(&env, 1, 2, 5), heartbeat_ctx(&env, &sa)];
+
+        // Both gates true at `now = 1_000`: silent for 500s (> grace 100) and
+        // before `active_from`. The dead-man leg is the only reason reported.
+        let stale = AccountState {
+            admin_frozen: false,
+            last_heartbeat: 500,
+        };
+        let both = decide(&env, &sa, Some(&p), &stale, &mut l, 1_000, ctx.clone());
+        assert_eq!(both.len(), 2, "one verdict per context");
+        for verdict in &both {
+            assert!(
+                matches!(verdict, Decision::Blocked(Error::HeartbeatExpired)),
+                "dead-man must outrank the active window, got {verdict:?}"
+            );
+        }
+        assert_eq!(l.total, 0, "a denied batch must not admit spend");
+
+        // The `unfreeze` half only. Same policy, same ledger time: the account is
+        // still blocked, and now the operator sees the other gate for the first
+        // time. This is the reversal trap §5.2 exists to name.
+        let re_armed = AccountState {
+            admin_frozen: false,
+            last_heartbeat: 1_000,
+        };
+        let after_unfreeze = decide(&env, &sa, Some(&p), &re_armed, &mut l, 1_000, ctx.clone());
+        for verdict in &after_unfreeze {
+            assert!(
+                matches!(verdict, Decision::Blocked(Error::OutsideActiveWindow)),
+                "unfreeze must not clear the window leg, got {verdict:?}"
+            );
+        }
+        assert_eq!(l.total, 0, "still denied, so still no spend");
+
+        // The `set_policy` half: a policy whose bounds admit `now`, installed at
+        // `now` (which is what stamps `LastHeartbeat = now`). Both legs clear.
+        let mut renewed = p.clone();
+        renewed.active_from = 0;
+        renewed.active_until = 0;
+        let revived = decide(&env, &sa, Some(&renewed), &re_armed, &mut l, 1_000, ctx);
+        for verdict in &revived {
+            assert!(
+                matches!(verdict, Decision::Allowed),
+                "renewed window plus a re-armed clock must admit, got {verdict:?}"
+            );
+        }
+        assert_eq!(l.total, 5, "the admitted transfer is the first spend");
     }
 
     #[test]
@@ -1467,6 +1774,28 @@ mod tests {
                 .unwrap(),
             Decision::Allowed
         ));
+    }
+
+    #[test]
+    fn bundled_heartbeat_with_spend_evaluated_against_pre_transaction_heartbeat() {
+        // Issue #318: A bundle of [heartbeat, transfer] is evaluated against
+        // the pre-transaction heartbeat. If the account is expired, both contexts
+        // are blocked by rule #2 with HeartbeatExpired.
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let bundle = vec![&env, heartbeat_ctx(&env, &sa), transfer_ctx(&env, 1, 2, 5)];
+        let mut p = base_policy(&env);
+        p.dms_grace_secs = 100;
+        let expired = AccountState {
+            admin_frozen: false,
+            last_heartbeat: 500,
+        };
+        let mut l = Ledger::empty(&env);
+        let verdicts = decide(&env, &sa, Some(&p), &expired, &mut l, 700, bundle);
+        assert_eq!(verdicts.len(), 2);
+        for v in verdicts {
+            assert!(matches!(v, Decision::Blocked(Error::HeartbeatExpired)));
+        }
     }
 
     #[test]
@@ -1805,6 +2134,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+
+                paused: false,
             },
         ];
         p.protocol_calls_per_window = 0; // disabled
@@ -1835,6 +2166,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+
+                paused: false,
             },
         ];
         p.protocol_calls_per_window = 3;
@@ -1888,6 +2221,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+
+                paused: false,
             },
         ];
         p.protocol_calls_per_window = 2;
@@ -1955,6 +2290,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+
+                paused: false,
             },
         ];
         p.protocol_calls_per_window = 2;
@@ -1989,6 +2326,8 @@ mod tests {
             ProtocolRule {
                 contract: addr(&env, 3),
                 fns: None,
+
+                paused: false,
             },
         ];
         p.protocol_calls_per_window = 2;
@@ -2138,5 +2477,228 @@ mod tests {
         assert!(matches!(d2.first().unwrap(), Decision::Allowed));
         assert_eq!(l.total, 70);
         assert_eq!(l.len(), 1);
+    }
+
+    /// The reason `__check_auth` reports for a set of verdicts: the **first**
+    /// blocked context in iteration order, mirroring the `first_error` fold in
+    /// `src/lib.rs`. `decide()` itself returns one verdict per context and never
+    /// short-circuits, so which code surfaces is a property of this fold, not of
+    /// the engine loop — hence a documented claim needs its own helper.
+    fn reported_reason(verdicts: &[Decision]) -> Option<Error> {
+        verdicts.iter().find_map(|v| match v {
+            Decision::Blocked(e) => Some(*e),
+            Decision::Allowed => None,
+        })
+    }
+
+    /// SPEC §6.0 worked example: a mixed batch authorizes nothing, commits no
+    /// window admission, and reports the first failing context — which is
+    /// order-dependent, so the order is pinned in both directions.
+    #[test]
+    fn mixed_multi_context_batch_reports_the_first_failing_context() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.per_tx_cap = 80;
+        p.window_cap = 100;
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 3),
+                fns: None,
+                paused: false,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+
+        // [allowlisted protocol call, admissible transfer, over-cap transfer].
+        let batch = vec![
+            &env,
+            proto_ctx(&env, 3, "deposit"),
+            transfer_ctx(&env, 1, 2, 40),
+            transfer_ctx(&env, 1, 2, 90),
+        ];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, batch);
+        assert_eq!(d.len(), 3, "one verdict per context");
+        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert!(matches!(d.get(1).unwrap(), Decision::Allowed));
+        assert!(matches!(
+            d.get(2).unwrap(),
+            Decision::Blocked(Error::PerTxCapExceeded)
+        ));
+        assert_eq!(
+            reported_reason(&d),
+            Some(Error::PerTxCapExceeded),
+            "the one failing context is the reported reason"
+        );
+        // The admissible 40 was staged and dropped with the batch: no global
+        // entry, no total. `Window` is never written for a denied batch.
+        assert_eq!(l.total, 0);
+        assert_eq!(l.len(), 0);
+
+        // The drop was real: 70 fits the untouched 100-unit budget. Had the
+        // staged 40 committed, 40 + 70 = 110 would have been `window_cap_exceeded`.
+        let after = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1_000,
+            vec![&env, transfer_ctx(&env, 1, 2, 70)],
+        );
+        assert!(matches!(after.first().unwrap(), Decision::Allowed));
+        assert_eq!(l.total, 70);
+
+        // Two failing contexts at once: the reported reason is whichever comes
+        // first in iteration order, and that order is the caller's transaction.
+        let mut l2 = Ledger::empty(&env);
+        let recipient_first = vec![
+            &env,
+            // addr(4) is in no allowlist, so this is a recipient denial.
+            transfer_ctx(&env, 1, 4, 5),
+            transfer_ctx(&env, 1, 2, 90),
+        ];
+        let d_recipient = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l2,
+            1_000,
+            recipient_first,
+        );
+        assert_eq!(
+            reported_reason(&d_recipient),
+            Some(Error::RecipientNotAllowed),
+            "the first blocked context wins, and the second is still evaluated"
+        );
+        assert!(matches!(
+            d_recipient.get(1).unwrap(),
+            Decision::Blocked(Error::PerTxCapExceeded)
+        ));
+
+        // Same two denials, opposite order: same verdicts, different report.
+        let cap_first = vec![
+            &env,
+            transfer_ctx(&env, 1, 2, 90),
+            transfer_ctx(&env, 1, 4, 5),
+        ];
+        let d_cap = decide(&env, &sa, Some(&p), &alive(), &mut l2, 1_000, cap_first);
+        assert_eq!(
+            reported_reason(&d_cap),
+            Some(Error::PerTxCapExceeded),
+            "reordering the contexts reorders the reported reason"
+        );
+        assert!(matches!(
+            d_cap.get(1).unwrap(),
+            Decision::Blocked(Error::RecipientNotAllowed)
+        ));
+        assert_eq!(l2.total, 0, "neither denied batch admitted any spend");
+    }
+
+    /// Per-instruction CPU budget the decision path is asserted against
+    /// (issue #118). Stellar meters a Soroban invocation against a
+    /// per-transaction instruction limit; this is the value quoted for the
+    /// current network setting. The assertion is "the whole decision path, at
+    /// the documented maximum list cardinalities, fits in one invocation's
+    /// budget" — the claim SPEC §6.2 makes about a bounded worst case.
+    const DECISION_PATH_CPU_BUDGET: u64 = 100_000_000;
+
+    /// CPU instructions for one `decide` call, measured in isolation.
+    ///
+    /// The budget is reset *after* the scenario is built so only the decision
+    /// path is charged, and the call is warmed first so one-time host setup
+    /// (allocating the returned verdict vector, interning symbols) is not
+    /// attributed to the path being measured.
+    fn measure_decision_path(env: &Env, policy: &PolicyConfig, target: &Address) -> u64 {
+        let asset = policy.assets.first().unwrap();
+        let self_addr = addr(env, 200);
+        let mut args: Vec<Val> = Vec::new(env);
+        args.push_back(self_addr.clone().into_val(env));
+        args.push_back(target.clone().into_val(env));
+        args.push_back(5i128.into_val(env));
+        let context = Context::Contract(ContractContext {
+            contract: asset,
+            fn_name: Symbol::new(env, "transfer"),
+            args,
+        });
+
+        let run = |ledger: &mut Ledger| {
+            decide(
+                env,
+                &self_addr,
+                Some(policy),
+                &alive(),
+                ledger,
+                1_000,
+                vec![env, context.clone()],
+            )
+        };
+
+        // Warm up, then charge only the measured call.
+        let mut warmup = Ledger::empty(env);
+        for _ in 0..10 {
+            std::hint::black_box(run(&mut warmup));
+        }
+        warmup = Ledger::empty(env);
+        env.cost_estimate().budget().reset_unlimited();
+        let verdicts = run(&mut warmup);
+        std::hint::black_box(&verdicts);
+        env.cost_estimate().budget().cpu_instruction_cost()
+    }
+
+    /// Issue #118: measure the §6.2 decision path at the **documented maximum**
+    /// list cardinalities, and assert the bound the SPEC now cites.
+    ///
+    /// Both shapes the issue calls for are measured:
+    ///
+    /// - **escape off**, the expensive case: the destination is in neither
+    ///   list, so rule 1 sweeps the full 256-entry denylist and rule 2 sweeps
+    ///   the full 256-entry allowlist before either misses. No early exit.
+    /// - **escape on**, the cheap case: rule 2 is skipped, so only the denylist
+    ///   is swept before the caps and window run.
+    ///
+    /// The escape-on cost is the *price of the escape hatch*, so it is
+    /// asserted to be strictly cheaper — otherwise `allow_any_recipient` would
+    /// be buying nothing. Both must fit one invocation's CPU budget; the
+    /// numbers are printed so SPEC §6.2 can quote them, and
+    /// `benches/worst_case_decision_path.rs` reports the same figures through
+    /// the identical fixtures.
+    #[test]
+    fn worst_case_decision_path_measured_cost() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+
+        let target = worst_case_transfer_target(&env);
+
+        let off = worst_case_transfer_policy(&env, false);
+        let on = worst_case_transfer_policy(&env, true);
+
+        let escape_off = measure_decision_path(&env, &off, &target);
+        let escape_on = measure_decision_path(&env, &on, &target);
+
+        std::println!(
+            "worst-case decision path cpu instructions: \
+             escape_off_full_scan={escape_off} escape_on={escape_on} \
+             lists=2x{} budget={DECISION_PATH_CPU_BUDGET}",
+            crate::types::MAX_RECIPIENT_ENTRIES,
+        );
+
+        assert!(
+            escape_off > escape_on,
+            "the full two-list scan must cost more than the escape-hatch path \
+             (escape_off={escape_off}, escape_on={escape_on})"
+        );
+        assert!(
+            escape_off <= DECISION_PATH_CPU_BUDGET,
+            "worst-case §6.2 decision path exceeds the per-invocation CPU \
+             budget: {escape_off} > {DECISION_PATH_CPU_BUDGET}"
+        );
+        assert!(
+            escape_on <= DECISION_PATH_CPU_BUDGET,
+            "escape-hatch §6.2 decision path exceeds the per-invocation CPU \
+             budget: {escape_on} > {DECISION_PATH_CPU_BUDGET}"
+        );
     }
 }

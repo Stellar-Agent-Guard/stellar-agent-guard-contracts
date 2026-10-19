@@ -10,6 +10,12 @@ Nothing here is simulated.
 - RPC used for submissions: `https://soroban-testnet.stellar.org`
 - Horizon used for verification: `https://horizon-testnet.stellar.org`
 
+This file is the on-chain half of [SECURITY.md § Verified against](../../SECURITY.md#verified-against):
+that section names the protocol and `soroban-sdk` version, and this file records
+the transactions that prove the behaviour on them. `index.json` mirrors the
+network (including `network.protocol: 28`) so the claim is machine-checkable;
+when the protocol or SDK changes, both files move together.
+
 ## Deployed contracts
 
 | Component | Address |
@@ -68,6 +74,20 @@ what Phase 2's SDK must do:
 Each invocation uses a fresh tx sequence as the auth nonce (the SAC's replay
 protection records every consumed nonce on-chain; the guard's own `__check_auth`
 ignores nonces, per SPEC §6).
+
+`agent-tx transfer-from` now builds `transfer_from(from, guard, to, amount)` with
+the guard as spender and preserves the token contract's exact argument order.
+This path is not demonstrated by the live fixtures: no allowance transaction
+was run or verified for the deployed testnet token.
+
+## How to read the blocks
+
+Every scenario block below carries the account state that produced its result —
+inline on the command or on the line directly above it — and live runs also
+carry the transaction hash and ledger that prove them. This is the same convention as the README's
+["How to read the output blocks"](../../README.md#how-to-read-the-output-blocks-in-this-readme)
+(issue #418): a block with no state line should not be cited as evidence, and a
+blocked result is only meaningful relative to the state that produced it.
 
 ## The five scenarios — real results
 
@@ -391,6 +411,39 @@ and [dashboard #263](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-
 > gate does not read this README today (it only checks which files a PR
 > touched), so there is no scraper to migrate yet; file the follow-up in that
 > repository if fixture evidence is ever wired into that gate.
+
+## What an operator sees for each recorded scenario
+
+The `→ BLOCKED (pre-broadcast, enforced simulation)` lines above are the CLI
+surface; the `topics: [event_auth_checked, blocked, <reason>]` lines are the
+on-chain surface, and they are the authoritative record of *why*. Both come from
+the same `simulateTransaction` response — the failure arrives as `result.error`
+(a string) with the base64 diagnostic events in `result.events`, not as a
+JSON-RPC `error` object — and the reason symbol is always the **third topic**.
+The complete mapping (including the post-broadcast and bad-signature surfaces)
+is
+[`docs/functions/check-auth.md`](../../docs/functions/check-auth.md#what-an-operator-sees-when-this-rejects-issue-425).
+
+| Scenario | Exit code from `agent-tx` | Reason an operator can decode | Reversal |
+|---|---|---|---|
+| 1 allowed | `0` | `topics: [event_auth_checked, allowed, ""]` — the reason topic is empty on an allow ([`auth-checked-vocabulary.json`](auth-checked-vocabulary.json)) | none needed |
+| 2 per-tx cap | `1` | `per_tx_cap_exceeded`, contract code 22 | lower the amount, or `set_policy` to raise `per_tx_cap` |
+| 3 rolling window | `1` | `window_cap_exceeded`, code 23 | wait for the oldest spend to age out of the window; `set_policy` resets the ledger |
+| 4 allowlist | `1` | `recipient_not_allowed`, code 21 | `set_policy` to add the recipient |
+| 5 dead-man | `1` | `heartbeat_expired`, code 11 — note the heartbeat self-call is **also** blocked, so only the admin can reverse it | admin `unfreeze` (scenario 5 above) |
+
+Two notes that matter when these rows are used to triage a live incident:
+
+- A block never changes state. Scenarios 2–4 consume nothing from the rolling
+  window (SPEC §4 commits admissions only when *every* context passes), so
+  replaying a blocked amount after a policy change behaves as if the failed
+  attempt never happened. Scenario 3's "50 + 110" arithmetic only holds because
+  scenario 1 was admitted.
+- These five scenarios each present a **single** auth context, so the reported
+  reason is that context's reason. A multi-context batch reports the first
+  failing context in iteration order while every context still gets its own
+  `auth_checked` event — worked through in SPEC §6.0 and pinned by
+  `mixed_multi_context_batch_reports_the_first_failing_context` (`src/engine.rs`).
 
 ## How to re-run
 

@@ -51,6 +51,7 @@ fn full_policy(env: &Env) -> PolicyConfig {
             stellar_agent_guard_contracts::ProtocolRule {
                 contract: addr(env, PROTO_STRKEY),
                 fns: Some(vec![env, soroban_sdk::Symbol::new(env, "swap")]),
+                paused: false,
             },
         ],
         recipients: vec![env, addr(env, RECV_STRKEY), addr(env, THIRD_STRKEY)],
@@ -259,6 +260,7 @@ fn mutated_policies(env: &Env) -> std::vec::Vec<(&'static str, PolicyConfig)> {
         stellar_agent_guard_contracts::ProtocolRule {
             contract: proto.clone(),
             fns: Some(vec![env, swap.clone(), drain.clone()]),
+            paused: false,
         },
     ];
     cases.push(("protocols.fns", c));
@@ -269,6 +271,7 @@ fn mutated_policies(env: &Env) -> std::vec::Vec<(&'static str, PolicyConfig)> {
         stellar_agent_guard_contracts::ProtocolRule {
             contract: proto.clone(),
             fns: None,
+            paused: false,
         },
     ];
     cases.push(("protocols.fns:None", c));

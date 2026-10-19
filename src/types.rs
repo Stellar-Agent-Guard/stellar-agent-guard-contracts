@@ -23,6 +23,10 @@ pub enum DmsHealthStatus {
 /// oldest entries forward (conservative over-count) — see SPEC §3.1.
 pub const MAX_WINDOW_ENTRIES: usize = 8192;
 
+/// Hard bound on auth contexts evaluated in one authorization (SPEC §4/§6).
+/// Sixty-four admits large DEX batches while bounding worst-case decision work.
+pub const MAX_AUTH_CONTEXTS: usize = 64;
+
 /// Maximum number of asset contracts in a policy (SPEC §8).
 pub const MAX_POLICY_ASSETS: usize = 256;
 
@@ -173,6 +177,8 @@ pub struct AssetCap {
     pub asset: Address,
     /// Per-tx cap for this asset; 0 = disabled / fall back to global.
     pub per_tx_cap: i128,
+    /// If true, the asset is blocked even when it is otherwise allowlisted.
+    pub paused: bool,
 }
 
 /// The policy an admin installs on the account. See SPEC §3/§4.
@@ -254,6 +260,8 @@ pub struct ProtocolRule {
     pub contract: Address,
     /// `None` = any function; `Some` = per-function allowlist.
     pub fns: Option<Vec<Symbol>>,
+    /// If true, the contract is blocked even when it is otherwise allowlisted.
+    pub paused: bool,
 }
 
 /// A single call the account must authorize, parsed into a form the pure
@@ -390,11 +398,13 @@ impl Error {
             Self::WindowCapExceeded,
             Self::ProtocolNotAllowed,
             Self::FunctionNotAllowed,
+            Self::AssetFnNotAllowed,
             Self::UnknownContract,
             Self::SelfFunctionNotAllowed,
             Self::CreateContractNotAllowed,
             Self::ProtocolCallRateExceeded,
             Self::DecisionInvariantViolation,
+            Self::TooManyAuthContexts,
         ];
         all_errors
             .into_iter()
@@ -454,6 +464,22 @@ pub enum DataKey {
 }
 
 /// Stable contract errors and decision reasons exposed by the ABI.
+///
+/// # Discriminant Stability & Frozen Codes
+///
+/// Error discriminants are permanently frozen across mainnet/testnet releases because
+/// off-chain SDKs, indexers, and telemetry decode errors using these exact numeric codes
+/// (`Error(Contract, #N)`).
+///
+/// Variants are partitioned into three numeric groups:
+/// - Generic / lifecycle (`1..=9`, next free: `7`)
+/// - Account-level gates (`10..=19`, next free: `15`)
+/// - Per-call decisions (`20..=39`, next free: `34`)
+///
+/// Always follow the 'append, never insert' convention when adding variants. For the
+/// full end-to-end contributor workflow (touching the enum, reason mappings, decision table,
+/// SPEC §4/§6/§7, event vocabulary, and tests), see the checklist in `docs/contributing.md`
+/// (`#how-to-add-a-new-error-variant-end-to-end`) and `CONTRIBUTING.md`.
 #[allow(missing_docs)] // individual ABI variants are described below
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -484,7 +510,7 @@ pub enum Error {
     Paused = 13,
     /// Current ledger time is outside the configured active interval.
     OutsideActiveWindow = 14,
-    // Per-call decisions (20..=30)
+    // Per-call decisions (20..=32)
     /// Transfer asset is absent from the asset allowlist.
     AssetNotAllowed = 20,
     /// Transfer destination is absent from the recipient allowlist.
@@ -497,7 +523,8 @@ pub enum Error {
     ProtocolNotAllowed = 24,
     /// Called function is not allowlisted for its protocol.
     FunctionNotAllowed = 25,
-    /// Call targets an unknown contract.
+    /// A call invokes a non-transfer function on an allowlisted asset.
+    AssetFnNotAllowed = 32,
     UnknownContract = 26,
     /// Account self-call is not permitted by the fixed self-call policy.
     SelfFunctionNotAllowed = 27,
@@ -509,6 +536,8 @@ pub enum Error {
     ProtocolCallRateExceeded = 30,
     /// An internal decision-engine invariant failed.
     DecisionInvariantViolation = 31,
+    /// One authorization contains more contexts than the engine evaluates.
+    TooManyAuthContexts = 33,
 }
 
 impl Error {
@@ -534,11 +563,155 @@ impl Error {
             Self::WindowCapExceeded => "window_cap_exceeded",
             Self::ProtocolNotAllowed => "protocol_not_allowed",
             Self::FunctionNotAllowed => "function_not_allowed",
+            Self::AssetFnNotAllowed => "asset_fn_not_allowed",
             Self::UnknownContract => "unknown_contract",
             Self::SelfFunctionNotAllowed => "self_function_not_allowed",
             Self::CreateContractNotAllowed => "create_contract_not_allowed",
             Self::ProtocolCallRateExceeded => "protocol_call_rate_exceeded",
             Self::DecisionInvariantViolation => "decision_invariant_violation",
+            Self::TooManyAuthContexts => "too_many_auth_contexts",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that each `Error` variant's numeric discriminant strictly matches
+    /// the value documented in SPEC §7 (and §7.1 error code mapping table).
+    ///
+    /// # Parity Obligation with SDK (`reasons.ts`)
+    ///
+    /// Soroban contract errors surface to the SDK and telemetry as numeric codes
+    /// (e.g. `Error(Contract, #12)` for `NoPolicy`). Off-chain decoders — specifically
+    /// `stellar-agent-guard-sdk` (see `src/reasons.ts` and `src/errors.ts`) — rely on these
+    /// numeric discriminants being completely stable.
+    ///
+    /// Renumbering any code silently corrupts error decoding across all consumers.
+    /// If an error code must change or a new variant is introduced:
+    /// 1. Update the error table and Error enum in SPEC §7 / §7.1.
+    /// 2. Update the SDK's `reasons.ts` (`REASON_CODES` / `REASON_BY_CODE` mapping).
+    /// 3. Update `tests/fixtures/auth-checked-vocabulary.json`.
+    /// 4. Update this test to assert the new or modified discriminant.
+    ///
+    /// For the complete contributor checklist and verification commands, see
+    /// `docs/contributing.md#how-to-add-a-new-error-variant-end-to-end` and `CONTRIBUTING.md`.
+    #[test]
+    fn error_code_discriminant_stability_spec_7() {
+        let all_errors = [
+            Error::Unauthorized,
+            Error::AlreadyInitialized,
+            Error::NotInitialized,
+            Error::InvalidConfig,
+            Error::InvalidAmount,
+            Error::NoPendingAdmin,
+            Error::AdminFrozen,
+            Error::HeartbeatExpired,
+            Error::NoPolicy,
+            Error::Paused,
+            Error::OutsideActiveWindow,
+            Error::AssetNotAllowed,
+            Error::RecipientNotAllowed,
+            Error::PerTxCapExceeded,
+            Error::WindowCapExceeded,
+            Error::ProtocolNotAllowed,
+            Error::FunctionNotAllowed,
+            Error::AssetFnNotAllowed,
+            Error::UnknownContract,
+            Error::SelfFunctionNotAllowed,
+            Error::CreateContractNotAllowed,
+            Error::RecipientBlocked,
+            Error::ProtocolCallRateExceeded,
+            Error::DecisionInvariantViolation,
+            Error::TooManyAuthContexts,
+        ];
+
+        // An exhaustive match asserting each variant's exact discriminant against SPEC §7.
+        // If a new variant is added, rustc will fail with E0004 (non-exhaustive patterns).
+        // If a variant is renumbered, the assertion inside the match arm will fail.
+        for err in all_errors {
+            let (expected_code, expected_reason) = match err {
+                Error::Unauthorized => (1, "unauthorized"),
+                Error::AlreadyInitialized => (2, "already_initialized"),
+                Error::NotInitialized => (3, "not_initialized"),
+                Error::InvalidConfig => (4, "invalid_config"),
+                Error::InvalidAmount => (5, "invalid_amount"),
+                Error::AdminFrozen => (10, "admin_frozen"),
+                Error::HeartbeatExpired => (11, "heartbeat_expired"),
+                Error::NoPolicy => (12, "no_policy"),
+                Error::Paused => (13, "paused"),
+                Error::OutsideActiveWindow => (14, "outside_active_window"),
+                Error::AssetNotAllowed => (20, "asset_not_allowed"),
+                Error::RecipientNotAllowed => (21, "recipient_not_allowed"),
+                Error::PerTxCapExceeded => (22, "per_tx_cap_exceeded"),
+                Error::WindowCapExceeded => (23, "window_cap_exceeded"),
+                Error::ProtocolNotAllowed => (24, "protocol_not_allowed"),
+                Error::FunctionNotAllowed => (25, "function_not_allowed"),
+                Error::UnknownContract => (26, "unknown_contract"),
+                Error::SelfFunctionNotAllowed => (27, "self_function_not_allowed"),
+                Error::CreateContractNotAllowed => (28, "create_contract_not_allowed"),
+                Error::RecipientBlocked => (29, "recipient_blocked"),
+                Error::NoPendingAdmin => (6, "no_pending_admin"),
+                Error::ProtocolCallRateExceeded => (30, "protocol_call_rate_exceeded"),
+                Error::DecisionInvariantViolation => (31, "decision_invariant_violation"),
+                Error::AssetFnNotAllowed => (32, "asset_fn_not_allowed"),
+                Error::TooManyAuthContexts => (33, "too_many_auth_contexts"),
+            };
+
+            assert_eq!(
+                err as u32, expected_code,
+                "Error::{:?} discriminant ({}) does not match SPEC §7 code ({}). Update SPEC §7 and SDK reasons.ts together if intentional.",
+                err,
+                err as u32,
+                expected_code
+            );
+            assert_eq!(
+                err.reason(),
+                expected_reason,
+                "Error::{:?} reason symbol ({}) does not match SPEC §7 symbol ({}). Update SPEC §7 and SDK reasons.ts together if intentional.",
+                err,
+                err.reason(),
+                expected_reason
+            );
+        }
+    }
+
+    #[test]
+    fn error_codes_are_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for err in [
+            Error::Unauthorized,
+            Error::AlreadyInitialized,
+            Error::NotInitialized,
+            Error::InvalidConfig,
+            Error::InvalidAmount,
+            Error::NoPendingAdmin,
+            Error::AdminFrozen,
+            Error::HeartbeatExpired,
+            Error::NoPolicy,
+            Error::Paused,
+            Error::OutsideActiveWindow,
+            Error::AssetNotAllowed,
+            Error::RecipientNotAllowed,
+            Error::PerTxCapExceeded,
+            Error::WindowCapExceeded,
+            Error::ProtocolNotAllowed,
+            Error::FunctionNotAllowed,
+            Error::AssetFnNotAllowed,
+            Error::UnknownContract,
+            Error::SelfFunctionNotAllowed,
+            Error::CreateContractNotAllowed,
+            Error::RecipientBlocked,
+            Error::ProtocolCallRateExceeded,
+            Error::DecisionInvariantViolation,
+            Error::TooManyAuthContexts,
+        ] {
+            let code = err as u32;
+            assert!(
+                seen.insert(code),
+                "duplicate error code {code} detected for {err:?}"
+            );
         }
     }
 }

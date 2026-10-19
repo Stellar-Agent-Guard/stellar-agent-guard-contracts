@@ -221,12 +221,14 @@ fn error_by_name(name: &str) -> Option<Error> {
         "WindowCapExceeded" => Error::WindowCapExceeded,
         "ProtocolNotAllowed" => Error::ProtocolNotAllowed,
         "FunctionNotAllowed" => Error::FunctionNotAllowed,
+        "AssetFnNotAllowed" => Error::AssetFnNotAllowed,
         "UnknownContract" => Error::UnknownContract,
         "SelfFunctionNotAllowed" => Error::SelfFunctionNotAllowed,
         "CreateContractNotAllowed" => Error::CreateContractNotAllowed,
         "RecipientBlocked" => Error::RecipientBlocked,
         "ProtocolCallRateExceeded" => Error::ProtocolCallRateExceeded,
         "DecisionInvariantViolation" => Error::DecisionInvariantViolation,
+        "TooManyAuthContexts" => Error::TooManyAuthContexts,
         _ => return None,
     };
     Some(err)

@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Rust 1.85+** with the `wasm32v1-none` target (Soroban 27 targets `wasm32v1-none`, not `wasm32-unknown-unknown`):
+- **Rust 1.91+** with the `wasm32v1-none` target (Soroban 27 targets `wasm32v1-none`, not `wasm32-unknown-unknown`). 1.91.0 is the declared `rust-version` and is tested by the `msrv` CI job; it is a dependency floor (`soroban-sdk` 27.0.6 requires it), not a preference:
 
 ```bash
 rustup target add wasm32v1-none
@@ -20,7 +20,7 @@ rustup target add wasm32v1-none
 ## Build from source
 
 ```bash
-git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
+git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
 # Contract WASM (the artifact to deploy)

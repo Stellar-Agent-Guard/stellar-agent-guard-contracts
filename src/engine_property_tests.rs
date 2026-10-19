@@ -57,6 +57,8 @@ fn policy(env: &Env, paused: bool, outside_window: bool, dms_expired: bool) -> P
             ProtocolRule {
                 contract: address(env, PROTOCOL_ADDRESS),
                 fns: Some(vec![env, Symbol::new(env, "swap")]),
+
+                paused: false,
             },
         ],
         recipients: vec![env, address(env, RECIPIENT_ADDRESS)],
@@ -130,7 +132,7 @@ fn reference_model(row: GateRow, input: ContextInput) -> Decision {
         match input.kind {
             CallKind::SelfCall if !input.self_call_ok => Some(Error::SelfFunctionNotAllowed),
             CallKind::AssetTransfer if !input.valid_detail => Some(Error::InvalidAmount),
-            CallKind::AssetOther => Some(Error::FunctionNotAllowed),
+            CallKind::AssetOther => Some(Error::AssetFnNotAllowed),
             CallKind::Protocol if !input.valid_detail => Some(Error::FunctionNotAllowed),
             CallKind::CreateContract => Some(Error::CreateContractNotAllowed),
             CallKind::Unknown => Some(Error::UnknownContract),

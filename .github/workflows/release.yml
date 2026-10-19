@@ -26,6 +26,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Verify that Cargo.toml version matches the git release tag before
+      # running any compiler or test gates (issue #407).
+      - name: Verify crate version matches release tag
+        run: scripts/verify-release-version.sh
+
       # Read the pin from rust-toolchain.toml so the compiler that gates the
       # release is the compiler that builds the artifact (issue #67).
       - name: Install pinned Rust toolchain (rust-toolchain.toml)
@@ -66,6 +71,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      # Defense-in-depth: ensure tag matches crate version before building
+      # or publishing release artifacts (issue #407).
+      - name: Verify crate version matches release tag
+        run: scripts/verify-release-version.sh
 
       # Same pin as the gates job: the checksum published below is only
       # meaningful if it names a toolchain nobody can silently move.

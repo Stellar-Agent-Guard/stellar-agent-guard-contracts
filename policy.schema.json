@@ -18,6 +18,11 @@
       "description": "Per-recipient overrides; 0 means fall back to the global window cap."
     },
     "blocked_recipients": { "$ref": "#/$defs/recipientList" },
+    "asset_caps": {
+      "type": "array", "maxItems": 256,
+      "items": { "$ref": "#/$defs/assetCap" },
+      "description": "Per-asset overrides; use paused=true to block an allowlisted asset without pausing the whole account."
+    },
     "allow_any_recipient": { "type": "boolean" },
     "active_from": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
     "active_until": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "0 means unrestricted; otherwise must be greater than active_from (also enforced by the contract)." },
@@ -25,7 +30,7 @@
     "dms_grace_secs": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
     "protocol_calls_per_window": { "type": "integer", "minimum": 0, "maximum": 4294967295, "default": 0 }
   },
-  "required": ["per_tx_cap", "window_secs", "window_cap", "assets", "protocols", "recipients", "recipient_window_caps", "blocked_recipients", "allow_any_recipient", "active_from", "active_until", "paused", "dms_grace_secs", "protocol_calls_per_window"],
+  "required": ["per_tx_cap", "window_secs", "window_cap", "assets", "protocols", "recipients", "recipient_window_caps", "blocked_recipients", "asset_caps", "allow_any_recipient", "active_from", "active_until", "paused", "dms_grace_secs", "protocol_calls_per_window"],
   "allOf": [
     {
       "if": { "properties": { "window_cap": { "pattern": "^[1-9]" } }, "required": ["window_cap"] },
@@ -51,9 +56,19 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "contract": { "$ref": "#/$defs/contractAddress" },
-        "fns": { "type": ["array", "null"], "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+        "fns": { "type": ["array", "null"], "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "paused": { "type": "boolean", "description": "Block the contract even when otherwise allowlisted." }
       },
       "required": ["contract"]
+    },
+    "assetCap": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "asset": { "$ref": "#/$defs/contractAddress" },
+        "per_tx_cap": { "$ref": "#/$defs/nonNegativeI128" },
+        "paused": { "type": "boolean", "description": "Block transfers for this asset even when it is allowlisted." }
+      },
+      "required": ["asset", "per_tx_cap"]
     },
     "recipientCap": {
       "type": "object", "additionalProperties": false,

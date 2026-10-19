@@ -21,13 +21,15 @@ vocabulary. For each reason this table gives the seat-specific read:
 > incident noise. SDK middleware that turns the agent column into
 > user-facing messages must reproduce this constraint verbatim.
 
-> **Vocabulary note.** The enum in `src/types.rs` has 22 variants; this table
+> **Vocabulary note.** The enum in `src/types.rs` has 25 variants; this table
 > covers every current policy-decision reason. `decision_invariant_violation`
 > is an internal guard for impossible verdict data and is surfaced as a stable
 > contract error if triggered.
 > Blocked reasons from *rejected* frames live in the client-side event log /
 > diagnostics, not in persisted ledger events (SPEC §9, issue #37) — the
 > auditor column assumes that evidence source.
+>
+> When adding a new denial reason to this table, follow the [end-to-end checklist](contributing.md#how-to-add-a-new-error-variant-end-to-end).
 
 | reason symbol | code | what was attempted | agent guidance | operator action | auditor note | SPEC ref |
 |---|---|---|---|---|---|---|
@@ -48,12 +50,14 @@ vocabulary. For each reason this table gives the seat-specific read:
 | `window_cap_exceeded` | 23 | A transfer that would push the rolling-window total over `window_cap`. | Wait for window entries to expire (`window_secs`) before retrying; escalate. Do not re-route spend outside the accounting path to evade the window. | Raise `window_cap` if legitimately needed, or reset cadence expectations. | Rolling cap held over the [T − `window_secs`, T] span (invariant, §3.1). | §3.1, §6.2 |
 | `protocol_not_allowed` | 24 | A call to a contract not in `protocols`. | Only call allowlisted protocol contracts. | Add the protocol to the allowlist if intended. | Protocol allowlist compliance at T. | §6.3 |
 | `function_not_allowed` | 25 | A call to a function not in the protocol's `fns` list. | Only call allowlisted functions. | Extend the per-protocol `fns` list if intended. | Function-level allowlist compliance at T. | §6.3 |
+| `asset_fn_not_allowed` | 32 | A call to a listed SAC function other than `transfer` or `transfer_from`. | Use only the SAC transfer functions supported by the policy; do not attempt a different asset operation. | Use an admin-approved path if the asset operation is intended; the guard does not authorize SAC minting or burning. | Records that a non-transfer function on a listed asset was denied. | §6.2 |
 | `unknown_contract` | 26 | A call to a contract that is neither this account, an allowlisted asset, nor an allowlisted protocol. | Unknown contracts are default-deny in v1; consult `policy()` and do not attempt workarounds. | Allowlist the contract if it should be callable under v1 intent. | Default-deny held at T. | §6.4 |
 | `self_function_not_allowed` | 27 | A call to one of the account's own functions outside the agent-allowed path (only `heartbeat` — and the `check` pre-flight — are agent-facing). | The agent may only call its own `heartbeat`; management functions belong to the admin seat. | Use the admin path for management; align tooling, no contract change needed. | Records the self-call surface being contained to the heartbeat/check path. | §6.1, §7 |
 | `create_contract_not_allowed` | 28 | Authorizing a host `CreateContract` context. | The account never authorizes contract creation in v1 — route creation to a dedicated operator-owned account. | Create contracts from a non-guarded account. | Proves the account never authorizes creation. | §6.4, §7 (enum) |
 | `recipient_blocked` | 29 | SAC transfer to an explicitly blocked recipient. | Do not retry to disguise the destination; stop and escalate. | Remove the denylist entry only if policy intent changed. | The explicit recipient denylist blocked this destination. | §6.2 |
 | `protocol_call_rate_exceeded` | 30 | An allowlisted protocol call exceeds its rolling-window call limit. | Wait for calls in the rolling window to expire; do not route around the configured protocol limit. | Raise `protocol_calls_per_window` only if justified by policy. | Records the configured auth-context protocol call limit enforcing the rate bound. | §3, §6.3, §7 |
 | `decision_invariant_violation` | 31 | Internal verdict data was inconsistent (empty result for a submitted preflight call, invalid context index, or a blocked result without a reason). | Stop and escalate; do not retry around the contract error. | Report the contract version and transaction details to maintainers. | Signals an enforcement implementation invariant failure; preserve the failed transaction diagnostics. | §7 |
+| `too_many_auth_contexts` | 33 | One authorization contains more than the fixed 64-context engine bound. | Do not split or reroute the batch to evade the bound; reduce the intended authorization only if its policy meaning is unchanged, otherwise escalate. | Review the router batch size and transaction design; the contract limit is fixed, not policy-configurable. | The engine rejected the whole authorization before parsing contexts or staging window admissions. | §4, §6, §7.1 |
 
 ## Consumers
 

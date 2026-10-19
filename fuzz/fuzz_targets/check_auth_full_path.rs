@@ -166,6 +166,7 @@ fuzz_target!(|input: &[u8]| {
                 | Error::WindowCapExceeded
                 | Error::ProtocolNotAllowed
                 | Error::FunctionNotAllowed
+                | Error::AssetFnNotAllowed
                 | Error::UnknownContract
                 | Error::SelfFunctionNotAllowed
                 | Error::CreateContractNotAllowed

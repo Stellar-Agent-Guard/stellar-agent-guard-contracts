@@ -44,6 +44,7 @@ use stellar_xdr::*;
 use strkey::KeyKind;
 
 const INCLUSION_FEE: u32 = 100;
+const GUARD_KEY_FEE_BUMP: u32 = 100_000;
 
 // ── strkey (base32 + CRC16-XModem) ───────────────────────────────────────
 
@@ -138,35 +139,146 @@ struct Rpc {
     url: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RpcFailureKind {
+    Transport,
+    Http,
+    JsonRpc,
+    InvalidResponse,
+}
+
+#[derive(Debug)]
+struct RpcError {
+    method: String,
+    kind: RpcFailureKind,
+    http_status: Option<u16>,
+    json_rpc_code: Option<serde_json::Value>,
+    message: String,
+}
+
+impl RpcError {
+    fn label(&self) -> &'static str {
+        match self.kind {
+            RpcFailureKind::Transport => "TRANSPORT FAILURE",
+            RpcFailureKind::Http => "HTTP RPC FAILURE",
+            RpcFailureKind::JsonRpc => "JSON-RPC REJECTION",
+            RpcFailureKind::InvalidResponse => "INVALID RPC RESPONSE",
+        }
+    }
+
+    fn exit_code(&self) -> i32 {
+        match self.kind {
+            RpcFailureKind::Transport | RpcFailureKind::Http => 3,
+            RpcFailureKind::JsonRpc | RpcFailureKind::InvalidResponse => 4,
+        }
+    }
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RPC {} failed", self.method)?;
+        if let Some(status) = self.http_status {
+            write!(f, " (HTTP status {status})")?;
+        }
+        if let Some(code) = &self.json_rpc_code {
+            write!(f, " (JSON-RPC code {code})")?;
+        }
+        write!(f, ": {}", self.message)
+    }
+}
+
+fn rpc_or_exit<T>(result: Result<T, RpcError>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("RESULT: {}", error.label());
+            eprintln!("{error}");
+            std::process::exit(error.exit_code());
+        }
+    }
+}
+
 trait PreflightRpc {
     fn account_seq(&self, account: &str) -> i64;
     fn latest_ledger(&self) -> u32;
     fn simulate(&self, envelope: &str) -> serde_json::Value;
     fn registered_agent_pubkey(&self, guard: &ScAddress) -> [u8; 32];
+    fn inclusion_fee(&self) -> Result<Option<u32>, RpcError>;
 }
 
 impl Rpc {
-    fn post(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+    fn post(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": method,
             "params": params,
         });
-        let resp = ureq::post(&self.url)
+        let response = ureq::post(&self.url)
             .set("Content-Type", "application/json")
-            .send_string(&body.to_string())
-            .unwrap_or_else(|e| panic!("RPC {method} request failed: {e}"));
+            .send_string(&body.to_string());
+        let response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::Status(_, response)) => response,
+            Err(ureq::Error::Transport(error)) => {
+                return Err(RpcError {
+                    method: method.to_string(),
+                    kind: RpcFailureKind::Transport,
+                    http_status: None,
+                    json_rpc_code: None,
+                    message: error.to_string(),
+                });
+            }
+        };
+        let status = response.status();
+        let response_body = response.into_string().map_err(|error| RpcError {
+            method: method.to_string(),
+            kind: RpcFailureKind::InvalidResponse,
+            http_status: Some(status),
+            json_rpc_code: None,
+            message: error.to_string(),
+        })?;
         let json: serde_json::Value =
-            serde_json::from_reader(resp.into_reader()).expect("RPC response JSON");
+            serde_json::from_str(&response_body).map_err(|error| RpcError {
+                method: method.to_string(),
+                kind: RpcFailureKind::InvalidResponse,
+                http_status: Some(status),
+                json_rpc_code: None,
+                message: format!("response is not valid JSON: {error}"),
+            })?;
         if let Some(err) = json.get("error") {
-            panic!("RPC {method} error: {err}");
+            return Err(RpcError {
+                method: method.to_string(),
+                kind: RpcFailureKind::JsonRpc,
+                http_status: Some(status),
+                json_rpc_code: err.get("code").cloned(),
+                message: err
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| err.to_string()),
+            });
         }
-        json["result"].clone()
+        if !(200..300).contains(&status) {
+            return Err(RpcError {
+                method: method.to_string(),
+                kind: RpcFailureKind::Http,
+                http_status: Some(status),
+                json_rpc_code: None,
+                message: json.to_string(),
+            });
+        }
+        json.get("result").cloned().ok_or_else(|| RpcError {
+            method: method.to_string(),
+            kind: RpcFailureKind::InvalidResponse,
+            http_status: Some(status),
+            json_rpc_code: None,
+            message: "response did not contain a result".to_string(),
+        })
     }
 
     fn latest_ledger(&self) -> u32 {
-        let res = self.post("getLatestLedger", serde_json::json!({}));
+        let res = rpc_or_exit(self.post("getLatestLedger", serde_json::json!({})));
         res["sequence"].as_u64().expect("latest ledger sequence") as u32
     }
 
@@ -178,10 +290,10 @@ impl Rpc {
             ScAddress::Account(a) => LedgerKey::Account(LedgerKeyAccount { account_id: a }),
             other => panic!("expected account address, got {other:?}"),
         };
-        let res = self.post(
+        let res = rpc_or_exit(self.post(
             "getLedgerEntries",
             serde_json::json!({ "keys": [b64_encode_xdr(&key)] }),
-        );
+        ));
         let entry = res["entries"][0]["xdr"].as_str().expect("ledger entry xdr");
         // getLedgerEntries returns the LedgerEntryData XDR per entry.
         let le: LedgerEntryData = xdr(entry);
@@ -192,21 +304,26 @@ impl Rpc {
     }
 
     fn simulate(&self, envelope: &str) -> serde_json::Value {
-        self.post(
+        rpc_or_exit(self.post(
             "simulateTransaction",
             serde_json::json!({ "transaction": envelope }),
-        )
+        ))
     }
 
     fn send(&self, envelope: &str) -> serde_json::Value {
-        self.post(
+        rpc_or_exit(self.post(
             "sendTransaction",
             serde_json::json!({ "transaction": envelope }),
-        )
+        ))
     }
 
     fn get_tx(&self, hash: &str) -> serde_json::Value {
-        self.post("getTransaction", serde_json::json!({ "hash": hash }))
+        rpc_or_exit(self.post("getTransaction", serde_json::json!({ "hash": hash })))
+    }
+
+    fn inclusion_fee(&self) -> Result<Option<u32>, RpcError> {
+        let stats = self.post("getFeeStats", serde_json::json!({}))?;
+        Ok(parse_inclusion_fee(&stats))
     }
 }
 
@@ -225,10 +342,10 @@ impl PreflightRpc for Rpc {
 
     fn registered_agent_pubkey(&self, guard: &ScAddress) -> [u8; 32] {
         let key = guard_instance_key(guard);
-        let res = self.post(
+        let res = rpc_or_exit(self.post(
             "getLedgerEntries",
             serde_json::json!({ "keys": [b64_encode_xdr(&key)] }),
-        );
+        ));
         let entry = res["entries"][0]["xdr"]
             .as_str()
             .expect("guard instance ledger entry XDR");
@@ -250,6 +367,56 @@ impl PreflightRpc for Rpc {
                 _ => None,
             })
             .expect("registered agent public key not found in guard instance storage")
+    }
+
+    fn inclusion_fee(&self) -> Result<Option<u32>, RpcError> {
+        Rpc::inclusion_fee(self)
+    }
+}
+
+fn parse_inclusion_fee(stats: &serde_json::Value) -> Option<u32> {
+    ["mode", "p50", "min"].iter().find_map(|field| {
+        let value = &stats["inclusionFee"][field];
+        value
+            .as_str()
+            .and_then(|fee| fee.parse::<u32>().ok())
+            .or_else(|| value.as_u64().and_then(|fee| u32::try_from(fee).ok()))
+    })
+}
+
+fn calculate_fee(min_resource_fee: u32, inclusion_fee: u32) -> u32 {
+    min_resource_fee
+        .saturating_add(inclusion_fee)
+        .saturating_add(GUARD_KEY_FEE_BUMP)
+}
+
+fn resolve_inclusion_fee<R: PreflightRpc>(
+    rpc: &R,
+    override_fee: Option<u32>,
+) -> (u32, &'static str) {
+    if let Some(fee) = override_fee {
+        return (fee, "explicit --inclusion-fee override");
+    }
+    match rpc.inclusion_fee() {
+        Ok(Some(fee)) => (fee, "RPC getFeeStats inclusionFee.mode"),
+        Ok(None) => {
+            eprintln!(
+                "warning: RPC fee statistics did not include an inclusion fee; using fallback {INCLUSION_FEE} stroops"
+            );
+            (
+                INCLUSION_FEE,
+                "fallback constant (fee statistics unavailable)",
+            )
+        }
+        Err(error) => {
+            eprintln!(
+                "warning: could not read the network inclusion fee ({error}); using fallback {INCLUSION_FEE} stroops"
+            );
+            (
+                INCLUSION_FEE,
+                "fallback constant (fee statistics unavailable)",
+            )
+        }
     }
 }
 
@@ -284,7 +451,7 @@ fn scval_str(v: &ScVal) -> String {
         },
         ScVal::Bytes(b) => hex::encode(b.0.as_slice()),
         ScVal::Vec(Some(items)) => {
-            let inner: Vec<String> = items.iter().map(|x| scval_str(x)).collect();
+            let inner: Vec<String> = items.iter().map(scval_str).collect();
             format!("[{}]", inner.join(", "))
         }
         ScVal::Vec(None) => "[]".into(),
@@ -324,6 +491,56 @@ fn print_events(events: &serde_json::Value) {
     }
 }
 
+fn simulation_error_message(simulation: &serde_json::Value) -> Option<String> {
+    let error = simulation.get("error")?;
+    if error.is_null() {
+        None
+    } else if let Some(message) = error.as_str() {
+        Some(message.to_string())
+    } else {
+        Some(
+            error["message"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| error.to_string()),
+        )
+    }
+}
+
+fn simulation_events(simulation: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    simulation["events"]
+        .as_array()
+        .or_else(|| simulation["error"]["data"]["events"].as_array())
+}
+
+fn is_guard_auth_checked_block(simulation: &serde_json::Value, guard: &ScAddress) -> bool {
+    let Some(events) = simulation_events(simulation) else {
+        return false;
+    };
+    events.iter().any(|event| {
+        let Some(b64) = event["xdr"].as_str().or_else(|| event.as_str()) else {
+            return false;
+        };
+        let Ok(decoded) = DiagnosticEvent::from_xdr_base64(b64, Limits::none()) else {
+            return false;
+        };
+        let contract_matches = match guard {
+            ScAddress::Contract(id) => decoded.event.contract_id.as_ref() == Some(id),
+            _ => false,
+        };
+        if !contract_matches {
+            return false;
+        }
+        let ContractEventBody::V0(body) = &decoded.event.body;
+        let has_topic = |expected: &str| {
+            body.topics.iter().any(|topic| {
+                matches!(topic, ScVal::Symbol(symbol) if symbol.0.as_slice() == expected.as_bytes())
+            })
+        };
+        has_topic("event_auth_checked") && has_topic("blocked")
+    })
+}
+
 // ── Footprint helpers ────────────────────────────────────────────────────
 
 fn guard_data_key(guard: &ScAddress, name: &str) -> LedgerKey {
@@ -358,7 +575,7 @@ fn merge_guard_footprint(mut fp: LedgerFootprint, guard: &ScAddress) -> LedgerFo
     ];
     let mut rw: Vec<LedgerKey> = fp.read_write.iter().cloned().collect();
     for k in extra {
-        if !rw.iter().any(|e| *e == k) {
+        if !rw.contains(&k) {
             rw.push(k);
         }
     }
@@ -371,9 +588,11 @@ fn merge_guard_footprint(mut fp: LedgerFootprint, guard: &ScAddress) -> LedgerFo
 struct Args {
     rpc: Rpc,
     passphrase: String,
+    passphrase_source: &'static str,
     guard: ScAddress,
     secret: Option<String>,
     expect_blocked: bool,
+    inclusion_fee_override: Option<u32>,
 }
 
 fn preflight<R: PreflightRpc>(call: &Call, args: &Args, rpc: &R) -> Result<(), i32> {
@@ -412,23 +631,24 @@ fn preflight<R: PreflightRpc>(call: &Call, args: &Args, rpc: &R) -> Result<(), i
     );
     let sim = rpc.simulate(&b64_encode_xdr(&env));
 
-    if let Some(err) = sim.get("error") {
-        if agent.is_some() {
-            println!("BLOCKED (pre-broadcast, enforced simulation):");
+    if let Some(message) = simulation_error_message(&sim) {
+        let policy_block = is_guard_auth_checked_block(&sim, &args.guard);
+        if policy_block {
+            println!("BLOCKED (pre-broadcast, guard auth_checked):");
+        } else if agent.is_some() {
+            println!("TRANSACTION REJECTED (pre-broadcast, not a guard policy block):");
         } else {
             println!("RESULT: INDETERMINATE (unsigned simulation failed):");
         }
-        if let Some(code) = err["code"].as_str() {
-            println!("  error code: {code}");
-        }
-        if let Some(msg) = err["message"].as_str() {
-            println!("  message: {msg}");
-        }
-        if let Some(events) = err["data"]["events"].as_array() {
+        println!("  message: {message}");
+        if let Some(events) = simulation_events(&sim) {
             println!("  diagnostic events:");
             print_events(&serde_json::Value::Array(events.clone()));
         }
         println!("  broadcast: no");
+        if policy_block && args.expect_blocked {
+            return Ok(());
+        }
         return Err(if agent.is_some() { 1 } else { 2 });
     }
 
@@ -437,16 +657,16 @@ fn preflight<R: PreflightRpc>(call: &Call, args: &Args, rpc: &R) -> Result<(), i
         .expect("simulation minResourceFee")
         .parse()
         .expect("simulation fee");
-    const GUARD_KEY_FEE_BUMP: u32 = 100_000;
-    let fee = min_fee
-        .saturating_add(INCLUSION_FEE)
-        .saturating_add(GUARD_KEY_FEE_BUMP);
+    let (inclusion_fee, fee_source) = resolve_inclusion_fee(rpc, args.inclusion_fee_override);
+    let fee = calculate_fee(min_fee, inclusion_fee);
     if agent.is_some() {
         println!("RESULT: ALLOWED (preflight only)");
     } else {
         println!("RESULT: INDETERMINATE (unsigned simulation)");
         println!("  limitation: provide --secret to run signed __check_auth simulation");
     }
+    println!("network passphrase source: {}", args.passphrase_source);
+    println!("inclusion fee source: {fee_source}");
     println!("estimated fee: {fee} stroops");
     println!("broadcast: no");
     if agent.is_some() {
@@ -602,6 +822,12 @@ enum Call {
         to: ScAddress,
         amount: i128,
     },
+    TransferFrom {
+        token: ScAddress,
+        from: ScAddress,
+        to: ScAddress,
+        amount: i128,
+    },
     Heartbeat,
 }
 
@@ -614,6 +840,25 @@ impl Call {
                 contract_address: token.clone(),
                 function_name: ScSymbol("transfer".try_into().unwrap()),
                 args: VecM::try_from(vec![
+                    ScVal::Address(guard.clone()),
+                    ScVal::Address(to.clone()),
+                    ScVal::I128(Int128Parts {
+                        lo: *amount as u64,
+                        hi: (*amount >> 64) as i64,
+                    }),
+                ])
+                .expect("arg count"),
+            },
+            Self::TransferFrom {
+                token,
+                from,
+                to,
+                amount,
+            } => InvokeContractArgs {
+                contract_address: token.clone(),
+                function_name: ScSymbol("transfer_from".try_into().unwrap()),
+                args: VecM::try_from(vec![
+                    ScVal::Address(from.clone()),
                     ScVal::Address(guard.clone()),
                     ScVal::Address(to.clone()),
                     ScVal::I128(Int128Parts {
@@ -639,6 +884,8 @@ fn run(call: &Call, args: &Args) {
     let source_pk = agent.verifying_key().to_bytes();
     let source_g = account_strkey(&source_pk);
     let network_id: [u8; 32] = Sha256::digest(args.passphrase.as_bytes()).into();
+    println!("network id: {}", hex::encode(network_id));
+    println!("network passphrase source: {}", args.passphrase_source);
 
     let seq = args.rpc.account_seq(&source_g);
     // The account entry stores the last-used sequence; the next tx uses
@@ -689,19 +936,24 @@ fn run(call: &Call, args: &Args) {
         }
     }
 
-    if let Some(err) = sim.get("error") {
-        println!("BLOCKED (pre-broadcast, enforced simulation):");
-        if let Some(code) = err["code"].as_str() {
-            println!("  error code: {code}");
+    if let Some(message) = simulation_error_message(&sim) {
+        let policy_block = is_guard_auth_checked_block(&sim, guard);
+        if policy_block {
+            println!("BLOCKED (pre-broadcast, guard auth_checked):");
+        } else {
+            println!("TRANSACTION REJECTED (pre-broadcast, not a guard policy block):");
         }
-        if let Some(msg) = err["message"].as_str() {
-            println!("  message: {msg}");
-        }
-        if let Some(events) = err["data"]["events"].as_array() {
+        println!("  message: {message}");
+        if let Some(events) = simulation_events(&sim) {
             println!("  diagnostic events:");
             print_events(&serde_json::Value::Array(events.clone()));
         }
-        std::process::exit(if args.expect_blocked { 0 } else { 1 });
+        println!("  broadcast: no");
+        std::process::exit(if policy_block && args.expect_blocked {
+            0
+        } else {
+            1
+        });
     }
     if args.expect_blocked {
         println!("expected a block, but the enforced simulation succeeded");
@@ -729,17 +981,18 @@ fn run(call: &Call, args: &Args) {
     // Cover the extra write entries (~few hundred stroops each) plus headroom
     // for `__check_auth`'s extra instructions, which the recording-mode
     // preflight also under-prices.
-    const GUARD_KEY_FEE_BUMP: i64 = 100_000;
     data.resources.footprint = merged;
-    data.resource_fee = data.resource_fee.saturating_add(GUARD_KEY_FEE_BUMP);
+    data.resource_fee = data
+        .resource_fee
+        .saturating_add(i64::from(GUARD_KEY_FEE_BUMP));
     let min_fee: u32 = sim["minResourceFee"]
         .as_str()
         .expect("minResourceFee")
         .parse()
         .expect("fee");
-    let fee = min_fee
-        .saturating_add(INCLUSION_FEE)
-        .saturating_add(GUARD_KEY_FEE_BUMP as u32);
+    let (inclusion_fee, fee_source) = resolve_inclusion_fee(&args.rpc, args.inclusion_fee_override);
+    let fee = calculate_fee(min_fee, inclusion_fee);
+    println!("inclusion fee source: {fee_source}");
     if std::env::var_os("AGENT_TX_DEBUG").is_some() {
         eprintln!(
             "minResourceFee: {min_fee}, resourceFee: {}, final fee: {fee}",
@@ -799,7 +1052,7 @@ fn run(call: &Call, args: &Args) {
             if let Some(errx) = gt["resultXdr"].as_str() {
                 println!("  resultXdr: {errx}");
             }
-            std::process::exit(if args.expect_blocked { 0 } else { 1 });
+            std::process::exit(1);
         }
     }
     println!("RESULT: TIMEOUT tx={hash}");
@@ -906,9 +1159,8 @@ fn verify_guard(rpc: &Rpc, guard_addr: &str, _passphrase: &str) -> Result<(), St
         signatures: VecM::default(),
     });
     let sim = rpc.simulate(&b64_encode_xdr(&env));
-    if let Some(err) = sim.get("error") {
-        let msg = err["message"].as_str().unwrap_or("unknown error");
-        return Err(format!("guard verification failed: {msg}"));
+    if let Some(message) = simulation_error_message(&sim) {
+        return Err(format!("guard verification failed: {message}"));
     }
     Ok(())
 }
@@ -1099,15 +1351,99 @@ mod tests {
     }
 
     #[test]
+    fn rpc_failure_classification_preserves_transport_and_json_rpc_details() {
+        let transport = RpcError {
+            method: "simulateTransaction".to_string(),
+            kind: RpcFailureKind::Transport,
+            http_status: None,
+            json_rpc_code: None,
+            message: "connection refused".to_string(),
+        };
+        assert_eq!(transport.label(), "TRANSPORT FAILURE");
+        assert_eq!(transport.exit_code(), 3);
+        assert!(transport.to_string().contains("connection refused"));
+
+        let rejection = RpcError {
+            method: "sendTransaction".to_string(),
+            kind: RpcFailureKind::JsonRpc,
+            http_status: Some(400),
+            json_rpc_code: Some(serde_json::json!(-32602)),
+            message: "tx_bad_seq".to_string(),
+        };
+        assert_eq!(rejection.label(), "JSON-RPC REJECTION");
+        assert_eq!(rejection.exit_code(), 4);
+        assert!(rejection.to_string().contains("HTTP status 400"));
+        assert!(rejection.to_string().contains("JSON-RPC code -32602"));
+    }
+
+    #[test]
+    fn fee_calculation_uses_network_inclusion_fee_and_supports_high_fees() {
+        let stats = serde_json::json!({ "inclusionFee": { "mode": "5000" } });
+        assert_eq!(parse_inclusion_fee(&stats), Some(5_000));
+        assert_eq!(calculate_fee(2_000, 5_000), 107_000);
+        assert_eq!(
+            calculate_fee(2_000, 50_000_000),
+            50_102_000,
+            "a rising network fee must not be capped at the old constant"
+        );
+        assert_eq!(parse_inclusion_fee(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn unsigned_simulation_rejection_is_not_a_guard_policy_block() {
+        let guard: ScAddress = VALID_GUARD.parse().unwrap();
+        let simulation = serde_json::json!({ "error": "tx_insufficient_fee", "events": [] });
+        assert_eq!(
+            simulation_error_message(&simulation).as_deref(),
+            Some("tx_insufficient_fee")
+        );
+        assert!(!is_guard_auth_checked_block(&simulation, &guard));
+    }
+
+    fn guard_block_event_xdr(guard: &ScAddress) -> String {
+        let ScAddress::Contract(guard_id) = guard.clone() else {
+            panic!("expected contract address");
+        };
+        let event = DiagnosticEvent {
+            in_successful_contract_call: false,
+            event: ContractEvent {
+                ext: ExtensionPoint::V0,
+                contract_id: Some(guard_id),
+                type_: ContractEventType::Contract,
+                body: ContractEventBody::V0(ContractEventV0 {
+                    topics: VecM::try_from(vec![
+                        ScVal::Symbol(ScSymbol("event_auth_checked".try_into().unwrap())),
+                        ScVal::Symbol(ScSymbol("blocked".try_into().unwrap())),
+                        ScVal::Symbol(ScSymbol("per_tx_cap_exceeded".try_into().unwrap())),
+                    ])
+                    .unwrap(),
+                    data: ScVal::Void,
+                }),
+            },
+        };
+        event.to_xdr_base64(Limits::none()).unwrap()
+    }
+
+    #[test]
+    fn guard_auth_checked_block_requires_guard_event_topics() {
+        let guard: ScAddress = VALID_GUARD.parse().unwrap();
+        let simulation = serde_json::json!({
+            "error": "HostError: auth_checked: per_tx_cap_exceeded",
+            "events": [{ "xdr": guard_block_event_xdr(&guard) }]
+        });
+        assert!(is_guard_auth_checked_block(&simulation, &guard));
+
+        let other_guard: ScAddress = VALID_TOKEN.parse().unwrap();
+        assert!(!is_guard_auth_checked_block(&simulation, &other_guard));
+    }
+
+    #[test]
     fn extract_dms_grace_secs_from_policy_map() {
         // Test that we can extract dms_grace_secs from a PolicyConfig map
-        let mut policy_map_entries = vec![];
-
-        // Add dms_grace_secs (u64) field
-        policy_map_entries.push(ScMapEntry {
+        let policy_map_entries = vec![ScMapEntry {
             key: ScVal::Symbol(ScSymbol("dms_grace_secs".try_into().unwrap())),
             val: ScVal::U64(3600), // 1 hour grace period
-        });
+        }];
 
         let policy_map = ScMap(stellar_xdr::VecM::try_from(policy_map_entries).unwrap());
 
@@ -1177,7 +1513,7 @@ mod tests {
 
     #[test]
     fn policy_read_returns_null_when_no_policy() {
-        let rpc = MockPreflightRpc {
+        let _rpc = MockPreflightRpc {
             response: serde_json::json!({
                 "entries": [
                     {
@@ -1188,7 +1524,7 @@ mod tests {
             ..Default::default()
         };
 
-        let guard: ScAddress = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
+        let _guard: ScAddress = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
             .parse()
             .unwrap();
         // The test verifies that cmd_policy can be called without panicking
@@ -1197,20 +1533,20 @@ mod tests {
 
     #[test]
     fn check_read_simulates_transfer_decision() {
-        let rpc = MockPreflightRpc {
+        let _rpc = MockPreflightRpc {
             response: serde_json::json!({
                 "minResourceFee": "100"
             }),
             ..Default::default()
         };
 
-        let guard: ScAddress = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
+        let _guard: ScAddress = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
             .parse()
             .unwrap();
-        let asset: ScAddress = "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"
+        let _asset: ScAddress = "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"
             .parse()
             .unwrap();
-        let to: ScAddress = "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"
+        let _to: ScAddress = "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"
             .parse()
             .unwrap();
         // The test verifies that cmd_check can be called without panicking
@@ -1231,6 +1567,34 @@ mod tests {
             }
             _ => panic!("expected contract address"),
         }
+    }
+
+    #[test]
+    fn transfer_from_invocation_uses_exact_contract_argument_order() {
+        let guard: ScAddress = VALID_GUARD.parse().unwrap();
+        let from: ScAddress = VALID_RECIPIENT.parse().unwrap();
+        let to: ScAddress = "GAOLI6NMXG5X3GZ2ASTIMX24IQQW7CSGHVSOU7HOWFCH73RBZXGAKSPP"
+            .parse()
+            .unwrap();
+        let token: ScAddress = VALID_TOKEN.parse().unwrap();
+        let call = Call::TransferFrom {
+            token: token.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            amount: 50,
+        };
+        let invocation = call.invocation(&guard);
+
+        assert_eq!(invocation.contract_address, token);
+        assert_eq!(invocation.function_name.to_string(), "transfer_from");
+        assert_eq!(invocation.args.len(), 4);
+        assert_eq!(invocation.args[0], ScVal::Address(from));
+        assert_eq!(invocation.args[1], ScVal::Address(guard));
+        assert_eq!(invocation.args[2], ScVal::Address(to));
+        assert_eq!(
+            invocation.args[3],
+            ScVal::I128(Int128Parts { lo: 50, hi: 0 })
+        );
     }
 
     #[derive(Default)]
@@ -1260,6 +1624,10 @@ mod tests {
             let seed = secret_to_seed("SBRVOEN5IIWAROJVJI2OHN2IYD2H3S75UOM3UKY7RQ42JRDPH5KRHQC4");
             SigningKey::from_bytes(&seed).verifying_key().to_bytes()
         }
+
+        fn inclusion_fee(&self) -> Result<Option<u32>, RpcError> {
+            Ok(Some(100))
+        }
     }
 
     #[test]
@@ -1272,11 +1640,13 @@ mod tests {
         let args = Args {
             rpc: Rpc { url: String::new() },
             passphrase: Network::Testnet.passphrase().to_string(),
+            passphrase_source: "default testnet preset",
             guard: "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
                 .parse()
                 .unwrap(),
             secret: None,
             expect_blocked: false,
+            inclusion_fee_override: None,
         };
 
         assert_eq!(preflight(&Call::Heartbeat, &args, &rpc), Err(2));
@@ -1301,17 +1671,54 @@ mod tests {
         let args = Args {
             rpc: Rpc { url: String::new() },
             passphrase: Network::Testnet.passphrase().to_string(),
+            passphrase_source: "default testnet preset",
             guard: "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"
                 .parse()
                 .unwrap(),
             secret: Some("SBRVOEN5IIWAROJVJI2OHN2IYD2H3S75UOM3UKY7RQ42JRDPH5KRHQC4".to_string()),
             expect_blocked: false,
+            inclusion_fee_override: None,
         };
 
         assert_eq!(preflight(&Call::Heartbeat, &args, &rpc), Err(1));
         assert_eq!(rpc.sequence_reads.get(), 1);
         assert_eq!(rpc.simulations.get(), 1);
         assert_eq!(rpc.sequence.get(), 7);
+    }
+
+    #[test]
+    fn expect_blocked_only_accepts_guard_auth_checked_blocks() {
+        let guard: ScAddress = VALID_GUARD.parse().unwrap();
+        let block = MockPreflightRpc {
+            sequence: std::cell::Cell::new(7),
+            response: serde_json::json!({
+                "error": "HostError: auth_checked: per_tx_cap_exceeded",
+                "events": [{ "xdr": guard_block_event_xdr(&guard) }]
+            }),
+            ..Default::default()
+        };
+        let args = Args {
+            rpc: Rpc { url: String::new() },
+            passphrase: Network::Testnet.passphrase().to_string(),
+            passphrase_source: "default testnet preset",
+            guard,
+            secret: Some(VALID_SECRET.to_string()),
+            expect_blocked: true,
+            inclusion_fee_override: None,
+        };
+        assert_eq!(preflight(&Call::Heartbeat, &args, &block), Ok(()));
+
+        // A transaction-level rejection is not a policy denial, so
+        // --expect-blocked must not turn it into success.
+        let rejection = MockPreflightRpc {
+            sequence: std::cell::Cell::new(7),
+            response: serde_json::json!({
+                "error": "tx_insufficient_fee",
+                "events": []
+            }),
+            ..Default::default()
+        };
+        assert_eq!(preflight(&Call::Heartbeat, &args, &rejection), Err(1));
     }
 
     // ── Input validation and network presets (issues #52, #54) ───────────
@@ -1406,7 +1813,15 @@ mod tests {
             ("--guard", ""),
         ];
         for (flag, value) in cases {
-            let args = argv(&["status", flag, value, "--rpc-url", &mock.url]);
+            let args = argv(&[
+                "status",
+                flag,
+                value,
+                "--rpc-url",
+                &mock.url,
+                "--network-passphrase",
+                "Local Test Network",
+            ]);
             let (cmd, rest) = args.split_first().expect("subcommand");
             let err = parse_request(cmd, rest).expect_err(&format!("{flag} '{value}' accepted"));
             assert!(err.contains(flag), "{err}");
@@ -1440,6 +1855,8 @@ mod tests {
                 value,
                 "--rpc-url",
                 &mock.url,
+                "--network-passphrase",
+                "Local Test Network",
             ]);
             let (cmd, rest) = args.split_first().expect("subcommand");
             let err = parse_request(cmd, rest).expect_err(&format!("{flag} '{value}' accepted"));
@@ -1457,7 +1874,15 @@ mod tests {
         // The control for the test above: the probe sees traffic, so its
         // silence there means no request, not a broken listener.
         let mock = MockRpc::start();
-        let args = argv(&["status", "--guard", VALID_GUARD, "--rpc-url", &mock.url]);
+        let args = argv(&[
+            "status",
+            "--guard",
+            VALID_GUARD,
+            "--rpc-url",
+            &mock.url,
+            "--network-passphrase",
+            "Local Test Network",
+        ]);
         let (_, rest) = args.split_first().expect("subcommand");
         let request = parse_request("status", rest).expect("valid inputs");
         assert_eq!(request.rpc().latest_ledger(), 1);
@@ -1482,6 +1907,8 @@ mod tests {
                 "5",
                 "--rpc-url",
                 &mock.url,
+                "--network-passphrase",
+                "Local Test Network",
             ]);
             let (_, rest) = args.split_first().expect("subcommand");
             let err = parse_request(cmd, rest).expect_err("account ID accepted as --asset");
@@ -1502,6 +1929,8 @@ mod tests {
                 "5",
                 "--rpc-url",
                 &mock.url,
+                "--network-passphrase",
+                "Local Test Network",
             ]);
             let (_, rest) = args.split_first().expect("subcommand");
             // A contract recipient is legal (`C...` addresses can receive), so
@@ -1523,6 +1952,8 @@ mod tests {
             VALID_SECRET,
             "--rpc-url",
             &mock.url,
+            "--network-passphrase",
+            "Local Test Network",
         ]);
         let (_, rest) = args.split_first().expect("subcommand");
         let err = parse_request("transfer", rest).expect_err("transfer accepted without a token");
@@ -1542,10 +1973,59 @@ mod tests {
             VALID_SECRET,
             "--rpc-url",
             &mock.url,
+            "--network-passphrase",
+            "Local Test Network",
         ]);
         let (_, rest) = args.split_first().expect("subcommand");
         parse_request("transfer", rest).expect("`--asset` rejected for transfer");
         assert!(mock.methods().is_empty(), "{:?}", mock.methods());
+    }
+
+    #[test]
+    fn transfer_from_request_requires_owner_and_accepts_fee_override() {
+        let args = argv(&[
+            "transfer-from",
+            "--guard",
+            VALID_GUARD,
+            "--token",
+            VALID_TOKEN,
+            "--from",
+            VALID_RECIPIENT,
+            "--to",
+            "GAOLI6NMXG5X3GZ2ASTIMX24IQQW7CSGHVSOU7HOWFCH73RBZXGAKSPP",
+            "--amount",
+            "50",
+            "--agent-secret",
+            VALID_SECRET,
+            "--rpc-url",
+            "http://127.0.0.1:8000/soroban/rpc",
+            "--network-passphrase",
+            "Local Test Network",
+            "--inclusion-fee",
+            "5000",
+        ]);
+        let (_, rest) = args.split_first().expect("subcommand");
+        let request = parse_request("transfer-from", rest).expect("valid transfer-from");
+        assert_eq!(request.from, Some(VALID_RECIPIENT.parse().unwrap()));
+        assert_eq!(request.inclusion_fee_override, Some(5_000));
+
+        let missing_from = argv(&[
+            "transfer-from",
+            "--guard",
+            VALID_GUARD,
+            "--token",
+            VALID_TOKEN,
+            "--to",
+            VALID_RECIPIENT,
+            "--amount",
+            "50",
+            "--agent-secret",
+            VALID_SECRET,
+        ]);
+        let (_, rest) = missing_from.split_first().expect("subcommand");
+        assert!(parse_request("transfer-from", rest)
+            .unwrap_err()
+            .contains("missing --from"));
     }
 
     #[test]
@@ -1665,6 +2145,8 @@ mod tests {
             VALID_GUARD,
             "--rpc-url",
             "http://127.0.0.1:8000/soroban/rpc",
+            "--network-passphrase",
+            "Local Test Network",
         ]);
         let (_, rest) = args.split_first().expect("subcommand");
         let request = parse_request("status", rest).expect("rpc-url override");
@@ -1673,6 +2155,11 @@ mod tests {
             "http://127.0.0.1:8000/soroban/rpc"
         );
         assert_eq!(request.endpoint.network, None);
+        assert_eq!(request.endpoint.passphrase, "Local Test Network");
+        assert_eq!(
+            request.endpoint.passphrase_source,
+            "explicit --network-passphrase"
+        );
         assert!(request.notice().is_none());
 
         let args = argv(&[
@@ -1709,7 +2196,7 @@ mod tests {
         if std::env::var_os("AGENT_SECRET").is_some() {
             return; // the environment supplies the secret, so the requirement holds anyway
         }
-        for cmd in ["transfer", "heartbeat"] {
+        for cmd in ["transfer", "transfer-from", "heartbeat"] {
             let values = if cmd == "transfer" {
                 argv(&[
                     cmd,
@@ -1819,11 +2306,13 @@ fn parse_amount(raw: &str) -> Result<i128, String> {
 struct Request {
     guard: ScAddress,
     token: Option<ScAddress>,
+    from: Option<ScAddress>,
     to: Option<ScAddress>,
     amount: Option<i128>,
     secret: Option<String>,
     endpoint: Endpoint,
     expect_blocked: bool,
+    inclusion_fee_override: Option<u32>,
 }
 
 impl Request {
@@ -1843,9 +2332,11 @@ impl Request {
         Args {
             rpc: self.rpc(),
             passphrase: self.endpoint.passphrase.clone(),
+            passphrase_source: self.endpoint.passphrase_source,
             guard: self.guard.clone(),
             secret: self.secret.clone(),
             expect_blocked: self.expect_blocked,
+            inclusion_fee_override: self.inclusion_fee_override,
         }
     }
 }
@@ -1856,6 +2347,7 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
     let mut guard = None;
     let mut token = None;
     let mut token_field = String::new();
+    let mut from = None;
     let mut to = None;
     let mut amount = None;
     let mut secret = None;
@@ -1864,6 +2356,7 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
     let mut rpc_url = None;
     let mut passphrase = None;
     let mut expect_blocked = false;
+    let mut inclusion_fee_override = None;
 
     while let Some(flag) = cli.next() {
         match flag.as_str() {
@@ -1872,8 +2365,15 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
                 token_field = flag.clone();
                 token = Some(cli.value(&flag)?);
             }
+            "--from" => from = Some(cli.value("--from")?),
             "--to" => to = Some(cli.value("--to")?),
             "--amount" => amount = Some(parse_amount(&cli.value("--amount")?)?),
+            "--inclusion-fee" => {
+                let raw = cli.value("--inclusion-fee")?;
+                inclusion_fee_override = Some(raw.parse::<u32>().map_err(|error| {
+                    format!("invalid --inclusion-fee '{raw}': {error}; expected stroops as u32")
+                })?);
+            }
             "--agent-secret" | "--secret" => {
                 secret_field = flag.clone();
                 secret = Some(cli.value(&flag)?);
@@ -1908,7 +2408,7 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
     if let Some(secret) = &secret {
         strkey::validate_key(&secret_field, KeyKind::Secret, secret)?;
     }
-    if matches!(cmd, "transfer" | "heartbeat") && secret.is_none() {
+    if matches!(cmd, "transfer" | "transfer-from" | "heartbeat") && secret.is_none() {
         return Err(format!(
             "missing --agent-secret (or AGENT_SECRET): `{cmd}` signs and submits, so it requires \
              the registered agent's secret seed"
@@ -1918,13 +2418,14 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
     // The spend-shaped subcommands take a token and a recipient. `transfer`
     // names the token flag `--token`, `preflight`/`check` name it `--asset`;
     // either spelling is accepted, and a complaint names the one used.
-    let spend_flags = matches!(cmd, "preflight" | "transfer" | "check");
+    let spend_flags = matches!(cmd, "preflight" | "transfer" | "transfer-from" | "check");
     let default_token_field = if cmd == "transfer" {
         "--token"
     } else {
         "--asset"
     };
     let mut parsed_token = None;
+    let mut parsed_from = None;
     let mut parsed_to = None;
     if spend_flags {
         let token_field = if token_field.is_empty() {
@@ -1936,6 +2437,14 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
             .as_deref()
             .ok_or_else(|| format!("missing {token_field}: `{cmd}` requires it"))?;
         parsed_token = Some(validate_address(&token_field, KeyKind::Contract, raw)?);
+        if cmd == "transfer-from" {
+            let raw = from
+                .as_deref()
+                .ok_or_else(|| "missing --from: `transfer-from` requires it".to_string())?;
+            parsed_from = Some(validate_address("--from", KeyKind::Recipient, raw)?);
+        } else if from.is_some() {
+            return Err("--from is only valid for `transfer-from`".to_string());
+        }
         let raw = to
             .as_deref()
             .ok_or_else(|| format!("missing --to: `{cmd}` requires it"))?;
@@ -1948,11 +2457,13 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
     Ok(Request {
         guard,
         token: parsed_token,
+        from: parsed_from,
         to: parsed_to,
         amount,
         secret,
         endpoint,
         expect_blocked,
+        inclusion_fee_override,
     })
 }
 
@@ -1961,6 +2472,7 @@ fn print_help() {
     println!("Usage:");
     println!("  agent-tx preflight --guard <C...> --asset <C...> --to <G...> --amount <N> [--secret <S...>]");
     println!("  agent-tx transfer --guard <C...> --token <C...> --to <G...> --amount <N> --agent-secret <S...>");
+    println!("  agent-tx transfer-from --guard <C...> --token <C...> --from <G|C...> --to <G|C...> --amount <N> --agent-secret <S...>");
     println!("  agent-tx heartbeat --guard <C...> --agent-secret <S...>");
     println!("  agent-tx status --guard <C...> [--network testnet|futurenet|mainnet]");
     println!("  agent-tx policy --guard <C...> [--network testnet|futurenet|mainnet]");
@@ -1981,6 +2493,10 @@ fn print_help() {
     println!("                                        refused together with an explicit --network");
     println!("  --network-passphrase <passphrase>     override the preset's passphrase (advanced:");
     println!("                                        private or non-standard networks)");
+    println!("  --inclusion-fee <stroops>              override the RPC-reported inclusion fee");
+    println!(
+        "  Custom --rpc-url values require --network-passphrase unless the URL is a known preset."
+    );
     println!(
         "  Selecting mainnet prints the unaudited-contract reminder from SECURITY.md to stderr."
     );
@@ -2039,14 +2555,10 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
     let heartbeat_key = guard_data_key(guard, "LastHeartbeat");
     let frozen_key = guard_data_key(guard, "AdminFrozen");
 
-    let keys = vec![instance_key, policy_key, heartbeat_key, frozen_key];
-    let keys_xdr: Vec<String> = keys.iter().map(|k| b64_encode_xdr(k)).collect();
+    let keys = [instance_key, policy_key, heartbeat_key, frozen_key];
+    let keys_xdr: Vec<String> = keys.iter().map(b64_encode_xdr).collect();
 
-    let res = rpc.post("getLedgerEntries", serde_json::json!({ "keys": keys_xdr }));
-
-    if let Some(err) = res.get("error") {
-        return Err(format!("failed to fetch guard status: {}", err));
-    }
+    let res = rpc_or_exit(rpc.post("getLedgerEntries", serde_json::json!({ "keys": keys_xdr })));
 
     let entries = res["entries"].as_array().ok_or("no entries in response")?;
 
@@ -2058,9 +2570,9 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
         let entry_xdr = entry["xdr"].as_str().ok_or("missing xdr")?;
         let le: LedgerEntryData = xdr(entry_xdr);
 
-        match le {
-            LedgerEntryData::ContractData(cdata) => match &cdata.key {
-                ScVal::Symbol(sym) => match sym.0.as_slice() {
+        if let LedgerEntryData::ContractData(cdata) = le {
+            if let ScVal::Symbol(sym) = &cdata.key {
+                match sym.0.as_slice() {
                     b"Policy" => {
                         has_policy = !matches!(cdata.val, ScVal::Void);
                     }
@@ -2075,10 +2587,8 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
                         }
                     }
                     _ => {}
-                },
-                _ => {}
-            },
-            _ => {}
+                }
+            }
         }
     }
 
@@ -2133,14 +2643,10 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
 /// Fetch and display the current policy configuration
 fn cmd_policy(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), String> {
     let policy_key = guard_data_key(guard, "Policy");
-    let res = rpc.post(
+    let res = rpc_or_exit(rpc.post(
         "getLedgerEntries",
         serde_json::json!({ "keys": [b64_encode_xdr(&policy_key)] }),
-    );
-
-    if let Some(err) = res.get("error") {
-        return Err(format!("failed to fetch policy: {}", err));
-    }
+    ));
 
     let entries = res["entries"].as_array().ok_or("no entries in response")?;
 
@@ -2205,12 +2711,10 @@ fn cmd_check(
 
     let sim = rpc.simulate(&b64_encode_xdr(&env));
 
-    if let Some(err) = sim.get("error") {
-        if let Some(code) = err["code"].as_str() {
-            println!("result: blocked");
-            println!("reason: {}", code);
-        }
-        if let Some(events) = err["data"]["events"].as_array() {
+    if let Some(error) = simulation_error_message(&sim) {
+        println!("result: rejected (unsigned simulation; no guard policy verdict)");
+        println!("reason: {error}");
+        if let Some(events) = simulation_events(&sim) {
             for ev in events {
                 if let Some(b64) = ev["xdr"].as_str() {
                     let de: DiagnosticEvent = xdr(b64);
@@ -2281,7 +2785,7 @@ fn main() {
     }
     if !matches!(
         cmd.as_str(),
-        "preflight" | "transfer" | "heartbeat" | "status" | "policy" | "check"
+        "preflight" | "transfer" | "transfer-from" | "heartbeat" | "status" | "policy" | "check"
     ) {
         exit_with(format!(
             "unknown subcommand '{cmd}' (see `agent-tx --help`)"
@@ -2335,6 +2839,15 @@ fn main() {
         "transfer" => {
             let call = Call::Transfer {
                 token: request.token.clone().expect("validated --token"),
+                to: request.to.clone().expect("validated --to"),
+                amount: request.amount.expect("validated --amount"),
+            };
+            run(&call, &request.args());
+        }
+        "transfer-from" => {
+            let call = Call::TransferFrom {
+                token: request.token.clone().expect("validated --token"),
+                from: request.from.clone().expect("validated --from"),
                 to: request.to.clone().expect("validated --to"),
                 amount: request.amount.expect("validated --amount"),
             };

@@ -1,5 +1,6 @@
 # Summary
 
+* [About the documentation site](README.md)
 * [Introduction](introduction.md)
 * [Installation](installation.md)
 * [Concepts](concepts/)
@@ -16,6 +17,7 @@
   * [check\_auth](functions/check-auth.md)
 * [Policy Templates](policy-templates.md)
 * [Key Rotation](key-rotation.md)
+* [Storage Rent and TTL](rent-and-ttl.md)
 * [Architecture](architecture.md)
 * [Testnet Verification](verification.md)
 * [Enforcement Scope](enforcement-scope.md)
