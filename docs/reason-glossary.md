@@ -28,6 +28,8 @@ vocabulary. For each reason this table gives the seat-specific read:
 > Blocked reasons from *rejected* frames live in the client-side event log /
 > diagnostics, not in persisted ledger events (SPEC §9, issue #37) — the
 > auditor column assumes that evidence source.
+>
+> When adding a new denial reason to this table, follow the [end-to-end checklist](contributing.md#how-to-add-a-new-error-variant-end-to-end).
 
 | reason symbol | code | what was attempted | agent guidance | operator action | auditor note | SPEC ref |
 |---|---|---|---|---|---|---|

@@ -111,6 +111,14 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    (`set_auths`) so `__check_auth` is genuinely exercised. See the full
    walkthrough in [`docs/contributing.md`](docs/contributing.md#writing-host-routed-integration-tests)
    and the module header of [`src/integration_tests.rs`](src/integration_tests.rs).
+9. **Adding a new Error variant:** Adding a denial reason touches at least five
+   places — the enum, the `reason()` mapping, the decision site & `decision-table.json`,
+   the SPEC §4/§6/§7 tables, and the event vocabulary (`auth-checked-vocabulary.json`
+   and `docs/reason-glossary.md`). Discriminants are frozen on mainnet/testnet and
+   strictly follow the 'append, never insert' convention. See the
+   [end-to-end checklist](#how-to-add-a-new-error-variant-end-to-end) below and the
+   comprehensive walkthrough in
+   [`docs/contributing.md`](docs/contributing.md#how-to-add-a-new-error-variant-end-to-end).
 
 ## How to read this codebase
 
@@ -121,8 +129,9 @@ logic through the ledger to the contract boundary:
    calls, storage keys, bounds, and stable error codes. `PolicyConfig`'s
    canonical policy hash uses ScVal XDR with sorted symbol keys, so changing a
    policy field changes its hash; keep numeric `Error` discriminants stable as
-   well. See [`tests/policy_hash_encoding.rs`](tests/policy_hash_encoding.rs)
-   and the `error_code_discriminant_stability_spec_7` test in this module.
+   well (see the [Error variant checklist](#how-to-add-a-new-error-variant-end-to-end),
+   [`tests/policy_hash_encoding.rs`](tests/policy_hash_encoding.rs), and the
+   `error_code_discriminant_stability_spec_7` test in this module).
 2. [`src/engine.rs`](src/engine.rs) — Pure evaluation of the host's auth
    contexts against policy and account state. It classifies calls and applies
    fail-closed gates, allowlists, caps, and staged window/rate-limit checks;
@@ -169,6 +178,50 @@ implementation in [`src/lib.rs`](src/lib.rs) and the SDK contract recorded in
 Host exposure of both contract-creation context variants is exercised by
 `contract_creation_denied_through_real_host_path` in
 [`src/integration_tests.rs`](src/integration_tests.rs).
+
+## How to add a new Error variant end-to-end
+
+Adding a new denial reason touches at least five places across the repository: the enum, the `reason()` mapping, the decision site & `decision-table.json`, the `SPEC.md` §4/§6/§7 tables, and the consumer event vocabulary. Forgetting any one of these breaks CI.
+
+### The Discriminant-Freeze Rule & 'Append, Never Insert' Convention
+- **Frozen discriminants:** Numeric error codes (`Error(Contract, #N)`) are consumed by off-chain tooling, indexing pipelines, and SDKs (`stellar-agent-guard-sdk`). Once assigned, discriminants are permanently frozen on testnet and mainnet. Never renumber, repurpose, or delete an existing variant.
+- **Group partitioning:**
+  - `1..=9`: Generic & lifecycle errors (next free: `7`).
+  - `10..=19`: Account-level gates (next free: `15`).
+  - `20..=39`: Per-call decisions & context classification (next free: `34`).
+- **'Append, never insert':** Always allocate the next free number in the appropriate group. Never insert between existing codes or shift discriminants down.
+
+### End-to-End Checklist
+1. **`src/types.rs` (`pub enum Error`)**: Declare the variant with doc comments and assign the next free discriminant in its group.
+2. **`src/types.rs` (`reason()` and `from_block_reason`)**:
+   - Map variant to its lower_snake_case symbol in `Error::reason()`.
+   - Add variant to `all_errors` in `Error::from_block_reason()`.
+3. **Decision site & `decision-table.json`**:
+   - Return the error at its enforcement site (`src/engine.rs` or `src/lib.rs`).
+   - If returned by the engine, add or update the row in `decision-table.json` under `"reasons"` with the pinning test name.
+4. **`SPEC.md` §4 and §6**:
+   - Paste the rendered table row from `decision-table.json` into the SPEC §4 table.
+   - Document semantics, precedence, and argument parsing rules in SPEC §6.
+5. **`SPEC.md` §7 and §7.1**:
+   - Add a row in the SPEC §7.1 mapping table (`| Code | Variant | Reason Symbol | Reachable in check()? | Rationale |`).
+   - Add the variant into the `pub enum Error` code block in SPEC §7.
+6. **Event vocabulary & glossary**:
+   - Add outcome entry to `tests/fixtures/auth-checked-vocabulary.json` (topics: `["event_auth_checked", "blocked", symbol]`).
+   - Add entry to `docs/reason-glossary.md` with agent guidance (no evasion!), operator action, and auditor note.
+7. **Tests**:
+   - In `src/types.rs`, add variant to `all_errors` and the match arm in `error_code_discriminant_stability_spec_7()`.
+   - Add unit test for the decision site in `src/engine.rs`.
+   - Add host-routed integration test in `src/integration_tests.rs` asserting the exact reason string.
+
+### Verification Commands
+- **Deny-list CI check**: `./scripts/check-spec-coverage.sh` (validates coverage in SPEC §4/§6 and §7 enum).
+- **Decision-table drift check**: `cargo test --test decision_table` (ensures `decision-table.json`, SPEC §4, and engine agree).
+- **Auth-checked vocabulary check**: `cargo test --test auth_checked_vocabulary` (verifies `auth-checked-vocabulary.json` coverage).
+- **Discriminant stability check**: `cargo test error_code_discriminant_stability_spec_7`.
+- **ABI snapshot check**: Update the committed baseline with `UPDATE_SNAPSHOTS=1 cargo test --test abi_snapshot`, then inspect with `git diff tests/snapshots/abi_snapshot.txt`.
+- **Local build & lints**: `cargo fmt --check && cargo clippy --all-targets --all-features && cargo test`.
+
+For the full detailed walkthrough, see [`docs/contributing.md`](docs/contributing.md#how-to-add-a-new-error-variant-end-to-end).
 
 ## Commit Discipline (strict)
 
