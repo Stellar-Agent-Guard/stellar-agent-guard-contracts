@@ -551,7 +551,7 @@ fn current_revision(env: &Env) -> u64 {
 
 fn emit_auth(env: &Env, allowed: bool, reason: Option<Error>, context_index: u32) {
     let res = if allowed { "allowed" } else { "blocked" };
-    let reason = reason.map_or("", |e| e.reason());
+    let reason = reason.map_or("ok", |e| e.reason());
     EventAuthChecked {
         result: Symbol::new(env, res),
         reason: Symbol::new(env, reason),
