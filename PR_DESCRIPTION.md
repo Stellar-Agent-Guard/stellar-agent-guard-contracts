@@ -1,48 +1,36 @@
-Closes #
+Closes #365
 
 ## Summary
 
-Provides an end-to-end, contributor-facing how-to guide and checklist for adding a new `Error` variant and denial reason across the repository.
+Adds integration tests asserting that all policy and key management functions are strictly admin-gated in enforcing authorization mode.
 
-Adding a denial reason touches at least five distinct places — the enum, the `reason()` mapping, the decision site & `decision-table.json`, the `SPEC.md` §4/§6/§7 tables, and the consumer event vocabulary (`auth-checked-vocabulary.json` and `docs/reason-glossary.md`). While the consistency requirement is enforced in CI via the deny-list check (`scripts/check-spec-coverage.sh`), the decision-table drift test, and the ABI snapshot test, the end-to-end workflow was previously undocumented. This checklist makes the requirement executable by hand, turning potential review rejections into first-pass successes.
+Previously, the test harness registered `MockAdmin` and relied on `mock_all_auths()` for setup, authorizing admin calls via blanket mocking. No test asserted that a non-admin principal (such as the agent key or an unauthorized external address) cannot invoke policy or key management functions. A regression in admin gating would have silently permitted non-admin accounts to alter policy or rotate keys while tests remained green.
 
-## Key Additions
+This change adds explicit enforcing-mode tests for every admin-gated function and verifies that authorization entries from non-admin principals are rejected and fail closed.
 
-1. **The Discriminant-Freeze Rule & 'Append, Never Insert' Convention**:
-   - Explicitly documents that numeric error discriminants are permanently frozen on testnet and mainnet (`Error(Contract, #N)`).
-   - Documents the three designated numerical groups:
-     - Generic & Lifecycle: `1..=9` (next free: `7`)
-     - Account-Level Gates: `10..=19` (next free: `15`)
-     - Per-Call Decisions & Context Classification: `20..=39` (next free: `34`)
-   - Details the 'append, never insert' convention: always allocating the next free integer at the tail of the appropriate group.
+## Key Changes
 
-2. **Step-by-Step End-to-End Checklist**:
-   - Step 1: Declare the variant in `src/types.rs` (`pub enum Error`) with doc comments and next free discriminant.
-   - Step 2: Implement string mappings in `src/types.rs` (`Error::reason()` and `all_errors` in `Error::from_block_reason()`).
-   - Step 3: Implement decision site (`src/engine.rs` / `src/lib.rs`) and update `decision-table.json`.
-   - Step 4: Update `SPEC.md` §4 decision table and §6 classification semantics.
-   - Step 5: Update `SPEC.md` §7.1 error mapping table and §7 `pub enum Error` code block.
-   - Step 6: Update consumer event vocabulary in `tests/fixtures/auth-checked-vocabulary.json` and `docs/reason-glossary.md` (with no-evasion agent guidance).
-   - Step 7: Update tests (pin discriminant in `error_code_discriminant_stability_spec_7`, engine test, and host-routed integration test in `src/integration_tests.rs`).
+1. **Harness Extensions** (`src/integration_tests.rs`):
+   - Added `h.non_admin_entry(account, &root)` to build valid Soroban authorization entries for arbitrary custom accounts.
+   - Added invocation helper methods on `Harness`: `set_policy_invocation`, `revoke_policy_invocation`, `rotate_agent_key_invocation`, and `cancel_admin_invocation`.
+   - Updated `set_policy_enforcing` to reuse `set_policy_invocation`.
 
-3. **Verification Commands**:
-   - Deny-list CI check: `./scripts/check-spec-coverage.sh`
-   - Decision-table drift test: `cargo test --test decision_table`
-   - Vocabulary fixture test: `cargo test --test auth_checked_vocabulary`
-   - Discriminant stability assertion: `cargo test error_code_discriminant_stability_spec_7`
-   - ABI snapshot gate: `UPDATE_SNAPSHOTS=1 cargo test --test abi_snapshot`
-   - Standard test and lint suite: `cargo fmt --check && cargo clippy --all-targets --all-features && cargo test`
+2. **Admin-Gating Integration Tests** (`src/integration_tests.rs`):
+   - `admin_gating_set_policy_rejects_non_admin`: asserts that `set_policy` rejects entries from both non-admin accounts and the agent key, maintaining policy and revision invariants.
+   - `admin_gating_revoke_policy_rejects_non_admin`: asserts that `revoke_policy` rejects non-admin and agent-key auth entries, ensuring policy remains active.
+   - `admin_gating_freeze_rejects_non_admin`: asserts that `freeze` rejects non-admin and agent-key auth entries, leaving account unfrozen.
+   - `admin_gating_unfreeze_rejects_non_admin`: asserts that `unfreeze` rejects non-admin and agent-key auth entries on a frozen account, while legitimate admin unfreeze succeeds.
+   - `admin_gating_rotate_agent_key_rejects_non_admin`: asserts that a non-admin cannot call `rotate_agent_key` to bind an attacker key, proves that an attacker who failed to bind cannot authorize operations as the agent, and verifies the registered agent key remains valid.
+   - `admin_gating_propose_admin_rotation_rejects_non_admin`: asserts that `propose_admin_rotation` rejects non-admin and agent auth entries, leaving the pending admin slot empty.
+   - `admin_gating_cancel_admin_rotation_rejects_non_admin`: asserts that `cancel_admin_rotation` rejects non-admin and agent auth entries, preserving the pending rotation.
 
-4. **Cross-Linking & Documentation Stability**:
-   - Added Rule 9 and section in `CONTRIBUTING.md`.
-   - Added Rule 8 and full section in `docs/contributing.md`.
-   - Linked from `src/types.rs` (`Error` enum doc comments and `error_code_discriminant_stability_spec_7` doc comments).
-   - Linked from `SPEC.md` §7.1 and `docs/reason-glossary.md`.
+3. **Documentation on `catch_unwind` vs `try_*`**:
+   - Explicitly documented in tests and module documentation that unit-returning contract functions (`()`) have no `try_*` client methods in the SDK for host-level auth rejection, and host `require_auth` traps are caught via `std::panic::catch_unwind` + `std::panic::AssertUnwindSafe`.
 
-## Verification
+## Acceptance Criteria Verification
 
-- `cargo fmt --check`
-- `cargo clippy --all-targets --all-features`
-- `cargo test`
-- `./scripts/check-spec-coverage.sh`
-- `./scripts/verify-docs-reachability.sh`
+- [x] One test per admin function showing that an authorization entry from a non-admin principal is rejected.
+- [x] Include `rotate_agent_key` specifically: a non-admin cannot bind their own key and then authorize as the agent.
+- [x] Documented why `catch_unwind` is the available mechanism where `try_*` is not generated for unit returns.
+- [x] Lints clean; no new `#[allow]`.
+- [x] PR description references this issue with `Closes #365`.
