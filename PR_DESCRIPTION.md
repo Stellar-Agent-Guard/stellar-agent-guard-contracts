@@ -2,38 +2,47 @@ Closes #
 
 ## Summary
 
-Documents how the integration test harness (`src/integration_tests.rs`) constructs Soroban authorization entries and switches between mocking and enforcing modes, turning a previously non-obvious copy-and-hope exercise into a clear, guided process for contributors.
+Provides an end-to-end, contributor-facing how-to guide and checklist for adding a new `Error` variant and denial reason across the repository.
 
-## Motivation & Background
+Adding a denial reason touches at least five distinct places — the enum, the `reason()` mapping, the decision site & `decision-table.json`, the `SPEC.md` §4/§6/§7 tables, and the consumer event vocabulary (`auth-checked-vocabulary.json` and `docs/reason-glossary.md`). While the consistency requirement is enforced in CI via the deny-list check (`scripts/check-spec-coverage.sh`), the decision-table drift test, and the ABI snapshot test, the end-to-end workflow was previously undocumented. This checklist makes the requirement executable by hand, turning potential review rejections into first-pass successes.
 
-Writing a host-routed test is the most valuable test a contributor can add to this repository and previously the highest-friction. Because `src/integration_tests.rs` replicates the host's `HashIdPreimage::SorobanAuthorization` hashing, constructs `SorobanAuthorizationEntry` records by hand, and manages the test environment's mode switches, auth construction was non-obvious and prone to subtle errors (stale nonces, expired ledger limits, mismatched invocation trees, or accidental testing under `mock_all_auths`).
+## Key Additions
 
-This PR provides comprehensive documentation both in code and in the contributing guides so contributors can confidently add host-routed tests and declarative scenario tests.
+1. **The Discriminant-Freeze Rule & 'Append, Never Insert' Convention**:
+   - Explicitly documents that numeric error discriminants are permanently frozen on testnet and mainnet (`Error(Contract, #N)`).
+   - Documents the three designated numerical groups:
+     - Generic & Lifecycle: `1..=9` (next free: `7`)
+     - Account-Level Gates: `10..=19` (next free: `15`)
+     - Per-Call Decisions & Context Classification: `20..=39` (next free: `34`)
+   - Details the 'append, never insert' convention: always allocating the next free integer at the tail of the appropriate group.
 
-## Changes
+2. **Step-by-Step End-to-End Checklist**:
+   - Step 1: Declare the variant in `src/types.rs` (`pub enum Error`) with doc comments and next free discriminant.
+   - Step 2: Implement string mappings in `src/types.rs` (`Error::reason()` and `all_errors` in `Error::from_block_reason()`).
+   - Step 3: Implement decision site (`src/engine.rs` / `src/lib.rs`) and update `decision-table.json`.
+   - Step 4: Update `SPEC.md` §4 decision table and §6 classification semantics.
+   - Step 5: Update `SPEC.md` §7.1 error mapping table and §7 `pub enum Error` code block.
+   - Step 6: Update consumer event vocabulary in `tests/fixtures/auth-checked-vocabulary.json` and `docs/reason-glossary.md` (with no-evasion agent guidance).
+   - Step 7: Update tests (pin discriminant in `error_code_discriminant_stability_spec_7`, engine test, and host-routed integration test in `src/integration_tests.rs`).
 
-1. **`src/integration_tests.rs` (Module Doc Header)**:
-   - Walkthrough of Soroban host authorization mechanics:
-     - The preimage the host hashes: `HashIdPreimage::SorobanAuthorization` (`network_id`, `nonce`, `signature_expiration_ledger`, and `invocation`).
-     - Why the signature covers it: SHA-256 hashing of the XDR-encoded preimage and Ed25519 signature verification against the registered agent key inside `__check_auth`.
-     - The role of the nonce in replay protection and monotonic tracking.
-     - How `Harness::enforce()` flips the `Env` from mocking to enforcing mode via `env.set_auths()`.
-   - In-depth explanation of the `mock_all_auths()` vs `set_auths()` distinction and when each is correct (preventing the common pitfall of false passes under mock mode).
-   - Invocations and sub-invocation tree structure (`SorobanAuthorizedInvocation`).
-   - Comprehensive reference table of reusable `Harness` helpers (setup, invocations, auth entries, execution).
-   - Step-by-step minimal worked example of adding a new host-routed test.
-   - Cross-reference to the declarative `GuardScenario` builder (issue #63) and the shared scenario matrix (`docs/scenario-matrix.md` and `decision-table.json`).
-   - Documentation for `MockAsset`, `MockAdmin`, and `MockDeployer`.
+3. **Verification Commands**:
+   - Deny-list CI check: `./scripts/check-spec-coverage.sh`
+   - Decision-table drift test: `cargo test --test decision_table`
+   - Vocabulary fixture test: `cargo test --test auth_checked_vocabulary`
+   - Discriminant stability assertion: `cargo test error_code_discriminant_stability_spec_7`
+   - ABI snapshot gate: `UPDATE_SNAPSHOTS=1 cargo test --test abi_snapshot`
+   - Standard test and lint suite: `cargo fmt --check && cargo clippy --all-targets --all-features && cargo test`
 
-2. **`docs/contributing.md`**:
-   - Added rule 7 to Coding Standards requiring real host-routed tests for enforcement changes.
-   - Added new section `## Writing host-routed integration tests` with the full conceptual walkthrough, mechanics, helper table, minimal worked example, and scenario matrix cross-reference.
-
-3. **`CONTRIBUTING.md`**:
-   - Added rule 8 to Coding Standards pointing contributors to the host-routed integration test walkthrough in `docs/contributing.md` and `src/integration_tests.rs`.
+4. **Cross-Linking & Documentation Stability**:
+   - Added Rule 9 and section in `CONTRIBUTING.md`.
+   - Added Rule 8 and full section in `docs/contributing.md`.
+   - Linked from `src/types.rs` (`Error` enum doc comments and `error_code_discriminant_stability_spec_7` doc comments).
+   - Linked from `SPEC.md` §7.1 and `docs/reason-glossary.md`.
 
 ## Verification
 
-- `cargo fmt --check`: Clean (passed)
-- `cargo clippy --all-targets --all-features`: Clean with `-D warnings` (passed)
-- `cargo test`: All tests pass locally
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features`
+- `cargo test`
+- `./scripts/check-spec-coverage.sh`
+- `./scripts/verify-docs-reachability.sh`
