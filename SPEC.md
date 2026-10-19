@@ -934,6 +934,8 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 
 To close the CheckResult/Error duality gap, every contract `Error` variant maps 1:1 to a `BlockReason` symbol emitted in `CheckResult::Blocked` and `auth_checked` events. The table below records the complete correspondence, including auth-only or admin-only variants that are unreachable via `check()` pre-flight reads and their rationale.
 
+**Discriminant stability & frozen codes:** Contract error codes (`Error(Contract, #N)`) are permanently frozen on testnet and mainnet (`1..=9` for generic/lifecycle, `10..=19` for account-level gates, and `20..=39` for per-call decisions). Renumbering any code breaks SDK/telemetry decoders. When introducing a new variant, contributors must adhere to the 'append, never insert' convention and execute the end-to-end checklist in [`docs/contributing.md`](docs/contributing.md#how-to-add-a-new-error-variant-end-to-end).
+
 | Error Code | Error Variant | Reason Symbol (`CheckResult::Blocked`) | Reachable via `check()`? | Rationale for Unreachable Direction |
 |---|---|---|---|---|
 | 1 | `Unauthorized` | `unauthorized` | No | Auth-path only: `ed25519_verify` traps the host frame (`InvokeError::Abort`) on invalid signature, and admin ops enforce `require_auth(Admin)`. `Unauthorized` is retained in the ABI error enum for protocol completeness. |
