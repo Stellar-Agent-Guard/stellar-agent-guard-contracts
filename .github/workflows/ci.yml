@@ -11,13 +11,24 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
-          components: clippy, rustfmt
+      # The toolchain version is read from rust-toolchain.toml, never repeated
+      # here: one pin, one place. `dtolnay/rust-toolchain@stable` would install
+      # a moving compiler and silently override the file, which is exactly the
+      # drift issue #67 removes.
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^channel = "(.*)"$/\1/p' rust-toolchain.toml)"
+          if [[ -z "$channel" ]]; then
+            echo "rust-toolchain.toml declares no [toolchain] channel" >&2
+            exit 1
+          fi
+          echo "Pinned channel: $channel"
+          rustup toolchain install "$channel" --profile minimal --no-self-update \
+            --target wasm32v1-none --component clippy --component rustfmt
+          rustc --version
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -26,10 +37,26 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            tools/agent-tx/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'tools/agent-tx/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-cargo-
 
       - name: Format check
         run: cargo fmt --check
+
+      # Guard deployable enforcement code. Test-only modules intentionally use
+      # unwraps for fixture assertions; integration_tests.rs is also test-only.
+      - name: Guard enforcement code against unwrap and expect
+        run: |
+          pattern='\.(unwrap|expect)[[:space:]]*\('
+          if grep -En "$pattern" src/lib.rs src/types.rs \
+            || sed '/^#\[cfg(test)\]$/,$d' src/engine.rs | grep -En "$pattern" \
+            || sed '/^#\[cfg(test)\]$/,$d' src/window.rs | grep -En "$pattern"; then
+            echo 'Enforcement source must use checked handling, not unwrap()/expect().' >&2
+            exit 1
+          fi
 
       - name: Clippy (all + pedantic deny, all targets/features)
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -37,8 +64,116 @@ jobs:
       - name: Unit + integration tests
         run: cargo test
 
+      - name: Public API documentation
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
       - name: Contract build (wasm32v1-none)
         run: cargo build --release --target wasm32v1-none
 
+      - name: Verify README claims
+        run: scripts/verify-readme.sh
+
+      - name: Verify documentation reachability
+        run: scripts/verify-docs-reachability.sh
+
+      - name: Agent submission tool format check (tools/agent-tx)
+        run: cargo fmt --manifest-path tools/agent-tx/Cargo.toml --check
+
+      - name: Agent submission tool clippy (tools/agent-tx)
+        run: cargo clippy --manifest-path tools/agent-tx/Cargo.toml --all-targets -- -D warnings
+
+      - name: Agent submission tool tests (tools/agent-tx)
+        run: cargo test --manifest-path tools/agent-tx/Cargo.toml
+
       - name: Agent submission tool build (tools/agent-tx)
         run: cargo build --release --manifest-path tools/agent-tx/Cargo.toml
+
+  # Issue #410: the `rust-version` in Cargo.toml is only a claim until CI
+  # builds on it. That field is the single source of truth — this job reads
+  # it rather than repeating a hardcoded number — and installs the wasm
+  # target for that release too, because the contract must *link* on the
+  # declared minimum, not merely type-check on the host.
+  #
+  # Separate from `ci` so a failure names the MSRV leg specifically instead
+  # of looking like a general regression, and so the required `ci` check is
+  # unaffected by toolchain-availability hiccups on the older release.
+  #
+  # `rustfmt` is deliberately NOT part of this leg: formatting is a property
+  # of the pinned compiler in `ci`, and rustfmt output is version-sensitive,
+  # so running it on two toolchains would give two contradictory definitions
+  # of "formatted". `RUSTUP_TOOLCHAIN` overrides the rust-toolchain.toml pin
+  # for every later step; without it `cargo` would silently keep using the
+  # pinned channel and this job would prove nothing.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install declared MSRV (Cargo.toml rust-version)
+        run: |
+          set -euo pipefail
+          msrv="$(sed -nE 's/^rust-version = "(.*)"$/\1/p' Cargo.toml)"
+          if [[ -z "$msrv" ]]; then
+            echo "Cargo.toml declares no [package] rust-version" >&2
+            exit 1
+          fi
+          echo "Declared MSRV: $msrv"
+          rustup toolchain install "$msrv" --profile minimal --no-self-update \
+            --target wasm32v1-none --component clippy
+          installed="$(rustup run "$msrv" rustc --version)"
+          echo "Installed: $installed"
+          [[ "$installed" == "rustc $msrv"* ]] || {
+            echo "rustup installed a different compiler than the declared MSRV" >&2
+            exit 1
+          }
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+
+      - name: Cache cargo (MSRV)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Keyed by the MSRV: a target directory built by the pinned channel
+          # must not be restored into this leg (cargo would rebuild it, but a
+          # shared key would also evict the `ci` job's cache entry).
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('Cargo.lock') }}
+
+      - name: Clippy on the MSRV (all + pedantic deny, all targets/features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Unit + integration tests on the MSRV
+        run: cargo test
+
+      - name: Contract build on the MSRV (wasm32v1-none)
+        run: cargo build --release --target wasm32v1-none
+
+  # Issue #67: the released artifact ships with a SHA-256 that downstream
+  # bytecode verification pins, so "two clean builds of this commit agree"
+  # has to be a checked property, not an assumption. Separate job from `ci`
+  # because it needs two *uncached* builds — reusing the `ci` cache would let a
+  # warm target directory hide non-determinism. Runs the same script a
+  # contributor can run locally.
+  wasm-reproducible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^channel = "(.*)"$/\1/p' rust-toolchain.toml)"
+          if [[ -z "$channel" ]]; then
+            echo "rust-toolchain.toml declares no [toolchain] channel" >&2
+            exit 1
+          fi
+          echo "Pinned channel: $channel"
+          rustup toolchain install "$channel" --profile minimal --no-self-update \
+            --target wasm32v1-none
+          rustc --version
+
+      # No cargo cache on purpose: each build must compile from scratch in its
+      # own target directory (see scripts/check-wasm-reproducible.sh).
+      - name: Build twice in clean target dirs, compare SHA-256
+        run: ./scripts/check-wasm-reproducible.sh
