@@ -231,9 +231,9 @@ Admin-only. Re-binds the agent's Ed25519 public key. The admin never gains fund-
 power — it can only replace the key the account will authenticate. Verified live
 (simulation): emits `EventAgentRotated`.
 
-Full operational runbook — scheduled rotation, suspected-leak ordering
-(freeze → rotate → unfreeze), rollback, and the admin-key handover
-ceremony: [`docs/key-rotation.md`](docs/key-rotation.md).
+Full operational runbook — scheduled hygiene, lost-key recovery (handling DMS
+expiration via `unfreeze`), suspected-leak ordering (freeze → rotate → unfreeze),
+rollback, and the admin-key handover ceremony: [`docs/key-rotation.md`](docs/key-rotation.md).
 
 ### `propose_admin_rotation` / `confirm_admin_rotation` / `cancel_admin_rotation`
 ```rust

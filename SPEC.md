@@ -978,7 +978,9 @@ pub fn revoke_policy(env: Env)
     // require_auth(Admin). Removes Policy and Window -> default-deny immediately.
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
     // require_auth(Admin). Re-binds AgentPubkey. Admin never gains fund-moving
-    // power; it can only replace the key the account will authenticate.
+    // power; it can only replace the key the account will authenticate. For the
+    // operational recovery runbook (lost/compromised keys and DMS unfreeze
+    // interaction), see docs/key-rotation.md.
 pub fn propose_admin_rotation(env: Env, new_admin: Address)
     // require_auth(Admin). Stores PendingAdmin; the current admin stays
     // authoritative until confirmation. Self-proposal -> InvalidConfig.
