@@ -55,6 +55,24 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 #    (AlreadyInitialized)
 ```
 
+**`AlreadyInitialized` is not a bug — it is your first attempt succeeding.** Deploy
+scripts that retry (fee-bump double-submit, operator panic-retry) read this error as a
+failure and redeploy, which is the wrong recovery. The correct procedure:
+
+1. Call `status()` on the same contract ID:
+   ```bash
+   stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+     --network testnet --source-account guard_admin --send=no -- status
+   ```
+2. If it reads sane (`has_policy: false`, `admin_frozen: false` — freshly initialized,
+   no policy installed yet), your first `initialize` landed. **Do not redeploy.** Proceed
+   directly to the next step: [`set_policy`](set-policy.md).
+3. Redeploy a fresh contract only if `status()` shows the account was never actually
+   initialized (`NotInitialized` on admin operations).
+
+Do not redeploy a second guard for the same agent: the old and new contract IDs would
+split the policy admin, and the agent key would be registered on the wrong one.
+
 ## Storage keys touched
 
 | Key | Type | Kind |

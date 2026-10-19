@@ -1,0 +1,15 @@
+# Explicit allowlist of docs/ pages intentionally excluded from docs/SUMMARY.md navigation.
+#
+# Rule: Any file under docs/ that is not referenced in docs/SUMMARY.md must be
+# listed here with an explicit rationale, rather than silently ignored.
+
+# Navigation root itself
+docs/SUMMARY.md
+
+# Internal research, RFCs, and design explorations awaiting maintainer sign-off
+# (not exposed in GitBook spaces or public user-facing navigation):
+docs/research/heartbeat-sources.md
+docs/research/multi-sig-threshold-models.md
+docs/research/non-sac-enforcement.md
+docs/research/policy-attestation.md
+docs/research/wire-format.md
