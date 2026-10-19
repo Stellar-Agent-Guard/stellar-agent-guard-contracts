@@ -7,6 +7,7 @@
 //! a key is renamed, the sorted-entry order changes, or a primitive switches
 //! `ScVal` variant (e.g. `i128` stops being `ScVal::I128`, `None` stops being
 //! `ScVal::Void`), this test fails and SPEC §3.2 must be updated in the same PR.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test/example code: panics and unwraps are assertions, not shipped behaviour
 
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{
