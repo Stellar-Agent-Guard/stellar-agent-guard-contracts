@@ -70,6 +70,9 @@ jobs:
       - name: Contract build (wasm32v1-none)
         run: cargo build --release --target wasm32v1-none
 
+      - name: Check release WASM for panic/unwrap strings
+        run: bash scripts/check-wasm-panic-strings.sh
+
       - name: Verify README claims
         run: scripts/verify-readme.sh
 
