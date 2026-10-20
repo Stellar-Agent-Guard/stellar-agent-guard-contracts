@@ -231,9 +231,9 @@ Admin-only. Re-binds the agent's Ed25519 public key. The admin never gains fund-
 power — it can only replace the key the account will authenticate. Verified live
 (simulation): emits `EventAgentRotated`.
 
-Full operational runbook — scheduled rotation, suspected-leak ordering
-(freeze → rotate → unfreeze), rollback, and the admin-key handover
-ceremony: [`docs/key-rotation.md`](docs/key-rotation.md).
+Full operational runbook — scheduled hygiene, lost-key recovery (handling DMS
+expiration via `unfreeze`), suspected-leak ordering (freeze → rotate → unfreeze),
+rollback, and the admin-key handover ceremony: [`docs/key-rotation.md`](docs/key-rotation.md).
 
 ### `propose_admin_rotation` / `confirm_admin_rotation` / `cancel_admin_rotation`
 ```rust
@@ -807,7 +807,7 @@ Stellar Agent Guard operates across three dedicated repositories:
 - `src/integration_tests.rs` — contract-level tests that exercise the real
   `__check_auth` path, including Ed25519 auth-signature verification (SPEC §11).
 - `tools/agent-tx/` — submission helper that signs Soroban auth entries for the guard
-  (custom-account) address and submits real testnet transactions. The `stellar` CLI
+  (custom-account) address and submits real testnet transactions. See [tools/agent-tx/README.md](tools/agent-tx/README.md) for install, usage, secret handling, and what it is for. The `stellar` CLI
   cannot sign auth entries whose address is a contract, so this tool fills that gap; it
   is the prototype of the Phase 2 SDK's signing path.
 - `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat

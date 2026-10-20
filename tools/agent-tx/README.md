@@ -1,16 +1,28 @@
 # agent-tx
 
-`agent-tx` builds Soroban authorization entries for the guard's custom-account
-address. Build it from the repository root with:
+`agent-tx` builds Soroban authorization entries for the guard's custom-account address. Build it from the repository root with:
 
 ```bash
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
 
+## Why this tool exists
+
+The `stellar` CLI builds Soroban auth entries and signs them with the transaction source key, but for a *custom account* the auth entry's address is a **contract** (the guard), not the source account, and the CLI refuses ("Missing signing key for account C..."). The only way to exercise the guard's `__check_auth` on-chain is to build the `SorobanAuthorizationEntry` for the guard address and sign its payload with the registered agent Ed25519 key — exactly what this tool does.
+
+## Five-step flow
+
+Every signed transaction follows this sequence:
+
+1. **Simulate the call with no auths** (records requirements + footprint).
+2. **Merge the guard's own storage keys** into the footprint (policy, window, heartbeat, freeze, instance — the parts only `__check_auth` touches).
+3. **Sign each returned auth entry** (address = guard) with the agent key over the `HashIdPreimage::SorobanAuthorization` payload.
+4. **Re-simulate with the signed entries** — this runs the *real* `__check_auth` against live testnet state, so policy blocks surface here, pre-broadcast.
+5. **On success, send the transaction and poll for the result**.
+
 ## Network selection
 
-Every subcommand resolves its endpoint from a named preset, which fixes both the RPC
-URL and the network passphrase the signed auth payload commits to:
+Every subcommand resolves its endpoint from a named preset, which fixes both the RPC URL and the network passphrase the signed auth payload commits to:
 
 ```bash
 agent-tx status --guard C...                    # testnet is the default
@@ -44,9 +56,7 @@ request is made: `C...` for contract IDs (guard, token), `G...` for account IDs
 Length, the base-32 alphabet, and the CRC16 checksum are all checked, so a copy-paste
 that lost a character fails with a message naming the flag, the value, and the rule.
 
-The leading character encodes the key *type*, never the network, so validation cannot
-(and does not claim to) catch a testnet contract ID used against mainnet — the
-`--network` preset and passphrase decide that.
+The leading character encodes the key *type*, never the network, so validation cannot (and does not claim to) catch a testnet contract ID used against mainnet — the `--network` preset and passphrase decide that.
 
 ## Read-only diagnostics
 
@@ -123,9 +133,9 @@ without needing auth.
 
 These reads use `getLedgerEntries` and `simulateTransaction` — no auth, no submission, no sequence advancement.
 
-## Preflight
+## Preflight (deprecated in favor of `check`)
 
-Run a transfer simulation without submitting a transaction (deprecated in favor of `check`):
+Run a transfer simulation without submitting a transaction:
 
 ```bash
 # Read without echo so the secret is not saved in shell history.
@@ -174,8 +184,7 @@ estimated fee in stroops, and `broadcast: no`. The fee estimate is the RPC's
 `minResourceFee`, plus the inclusion fee and the guard-footprint fee allowance;
 actual inclusion costs can differ.
 
-Every preflight invocation begins with `send=no (preflight only)`, including
-blocked and inconclusive outcomes.
+Every preflight invocation begins with `send=no (preflight only)`, including blocked and inconclusive outcomes.
 
 The secret is optional. Without `AGENT_SECRET`, `agent-tx` reads the registered
 public key from guard instance storage and builds an unsigned simulation. This can provide
@@ -190,9 +199,7 @@ succeeds. Use the signed path for an admission verdict.
 | `1` | Signed simulation blocked the call; inspect its diagnostic reason. |
 | `2` | Unsigned simulation; admission is inconclusive. |
 
-The preflight implementation only reads ledger state and invokes
-`simulateTransaction`; its RPC interface has no transaction-submission method.
-It does not increment the account sequence or broadcast a transaction.
+The preflight implementation only reads ledger state and invokes `simulateTransaction`; its RPC interface has no transaction-submission method. It does not increment the account sequence or broadcast a transaction.
 
 ## Submission commands
 
@@ -220,11 +227,7 @@ other transaction failures are not treated as policy denials.
 
 ## Planned: generic `invoke` subcommand (scenario 7)
 
-`transfer` and `heartbeat` only build SAC-transfer and self-call auth entries,
-so the protocol-allowlist proof (SPEC section 11, scenario 7) needs a generic
-call path. The executing PR adds `invoke`, reusing the existing
-simulate-then-submit flow (`run`) and the `Call::invocation` auth-entry
-construction with a parameterized variant:
+Transfer tokens via the guard's custom account:
 
 ```bash
 # Read without echo so the secret is not saved in shell history.
@@ -232,18 +235,38 @@ read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
 agent-tx invoke --guard C... --contract C... --fn <name> [--arg <type:value> ...]
 ```
 
-Contract for the implementation (kept small on purpose):
+## Secret handling
 
-- New `Call::Invoke { contract: ScAddress, fn_name: ScSymbol, args: Vec<ScVal> }`
-  variant; `invocation()` returns it verbatim as the `InvokeContractArgs` for
-  both the operation and the guard's auth entry root — the same "exact args in
-  both places" rule `Transfer` follows today.
-- `--arg` repeats; each value parses as `address:<C|G...>`, `i128:<n>`,
-  `u64:<n>`, or `symbol:<name>` (extend only with a documented reason; the
-  scenario-7 protocol contract needs no more than this).
-- Unknown `--arg` types and malformed values fail before any simulation, with
-  exit code `2` and no broadcast.
-- Admit/block reporting and exit codes match `transfer` (admitted submits and
-  prints the hash; `--expect-blocked` inverts the verdict for deny runs 7b/7c).
-- Unit tests mirror the existing `MockPreflightRpc` exit-code tests for at
-  least one admit and one deny shape.
+For security, prefer supplying the agent secret via:
+- Environment variable: `AGENT_SECRET` (recommended for automation)
+- File flag: `--agent-secret <path-to-file>` (reads the secret from a file)
+
+Avoid passing the secret directly on the command line (`--agent-secret S...`) as it may be exposed in shell history or process listings. The file flag and environment variable prevent the secret from appearing in `ps` output or shell history.
+
+If using `--agent-secret` with a value, the secret is still accepted but less secure. The tool will accept it for backward compatibility, but users are strongly encouraged to use `AGENT_SECRET` or a file.
+
+## AGENT_TX_DEBUG output
+
+Set the `AGENT_TX_DEBUG` environment variable to enable detailed diagnostic output to stderr, including:
+- Simulated transaction keys and error details
+- Footprint merge statistics
+- minResourceFee, resourceFee, and final fee calculations
+- Submitted transaction envelope (XDR base64)
+- Send transaction response
+- Transaction status polling details
+
+Example:
+```bash
+AGENT_TX_DEBUG=1 agent-tx check --guard C... --asset C... --to G... --amount 1100
+```
+
+## Prototype for SDK signing path
+
+This tool serves as the prototype for the SDK signing path. Its design decisions — particularly the five-step flow, strict input validation, and separation of read-only vs submission commands — are informed by the architecture described in [ARCHITECTURE.md](../../ARCHITECTURE.md). The SDK will follow the same principles for constructing and signing Soroban transactions on behalf of the guard's custom account.
+
+## Troubleshooting
+
+See the [Troubleshooting section in the root README](../../README.md#troubleshooting) for submission error mappings and remediation flags (e.g., `--fee-multiplier`).
+
+---
+*Link this file from the root README's repository-layout section and from CONTRIBUTING.md's project structure.*

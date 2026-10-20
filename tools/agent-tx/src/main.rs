@@ -46,6 +46,60 @@ use strkey::KeyKind;
 const INCLUSION_FEE: u32 = 100;
 const GUARD_KEY_FEE_BUMP: u32 = 100_000;
 
+/// Outcome of the transaction submission process.
+#[derive(Debug, PartialEq)]
+#[allow(dead_code)]
+enum RunOutcome {
+    /// The pre-flight simulation was blocked by policy or rejected pre-broadcast.
+    SimulationBlocked {
+        policy_block: bool,
+        error_code: Option<String>,
+        error_message: Option<String>,
+        events: Option<Vec<serde_json::Value>>,
+    },
+    /// The pre-flight simulation succeeded but `--expect-blocked` was set.
+    SimulationSuccessUnexpectedBlock,
+    /// An error occurred while sending the transaction.
+    SendError(String),
+    /// The submitted transaction had an empty hash.
+    EmptyHash(String),
+    /// The transaction was submitted and succeeded.
+    TransactionSuccess { hash: String, status: String },
+    /// The transaction was submitted but failed.
+    TransactionFailure {
+        hash: String,
+        result_xdr: Option<String>,
+    },
+    /// The transaction submission timed out.
+    TransactionTimeout { hash: String },
+}
+
+impl RunOutcome {
+    fn exit_code(&self, expect_blocked: bool) -> i32 {
+        match self {
+            Self::SimulationBlocked { policy_block, .. } => {
+                if *policy_block && expect_blocked {
+                    0
+                } else {
+                    1
+                }
+            }
+            Self::SimulationSuccessUnexpectedBlock
+            | Self::SendError(_)
+            | Self::EmptyHash(_)
+            | Self::TransactionTimeout { .. } => 1,
+            Self::TransactionSuccess { .. } => 0,
+            Self::TransactionFailure { .. } => {
+                if expect_blocked {
+                    0
+                } else {
+                    1
+                }
+            }
+        }
+    }
+}
+
 // ── strkey (base32 + CRC16-XModem) ───────────────────────────────────────
 
 const B32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -880,7 +934,7 @@ impl Call {
     }
 }
 
-fn run(call: &Call, args: &Args) {
+fn run(call: &Call, args: &Args) -> RunOutcome {
     let guard = &args.guard;
     let Some(secret) = args.secret.as_deref() else {
         exit_with("missing --agent-secret: signing requires the registered agent's secret seed (expected secret seed 'S...'; or set AGENT_SECRET env var)".into());
@@ -950,20 +1004,22 @@ fn run(call: &Call, args: &Args) {
             println!("TRANSACTION REJECTED (pre-broadcast, not a guard policy block):");
         }
         println!("  message: {message}");
-        if let Some(events) = simulation_events(&sim) {
+        let events = simulation_events(&sim).cloned();
+        if let Some(ref events) = events {
             println!("  diagnostic events:");
             print_events(&serde_json::Value::Array(events.clone()));
         }
         println!("  broadcast: no");
-        std::process::exit(if policy_block && args.expect_blocked {
-            0
-        } else {
-            1
-        });
+        return RunOutcome::SimulationBlocked {
+            policy_block,
+            error_code: sim["error"]["code"].as_str().map(str::to_string),
+            error_message: Some(message),
+            events,
+        };
     }
     if args.expect_blocked {
         println!("expected a block, but the enforced simulation succeeded");
-        std::process::exit(1);
+        return RunOutcome::SimulationSuccessUnexpectedBlock;
     }
 
     // Assemble the final envelope from the simulation's resources and submit.
@@ -1033,36 +1089,49 @@ fn run(call: &Call, args: &Args) {
         let err_str = err.to_string();
         let human = map_submission_error(&err_str);
         eprintln!("Error: {human}");
-        std::process::exit(1);
+        return RunOutcome::SendError(human);
     }
     let hash = sent["hash"].as_str().unwrap_or_default().to_string();
     if hash.is_empty() {
         let err_str = sent.to_string();
         let human = map_submission_error(&err_str);
         eprintln!("Error: {human}");
-        std::process::exit(1);
+        return RunOutcome::EmptyHash(human);
     }
     let status = sent["status"].as_str().unwrap_or("?").to_string();
     println!("submitted: hash={hash} status={status}");
 
+    let mut outcome = None;
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_secs(3));
         let gt = args.rpc.get_tx(&hash);
         let st = gt["status"].as_str().unwrap_or("PENDING");
         if st == "SUCCESS" {
             println!("RESULT: ALLOWED tx={hash}");
-            std::process::exit(0);
+            outcome = Some(RunOutcome::TransactionSuccess {
+                hash: hash.clone(),
+                status: st.to_string(),
+            });
+            break;
         }
         if st == "FAILED" {
             println!("RESULT: FAILED tx={hash}");
-            if let Some(errx) = gt["resultXdr"].as_str() {
+            let result_xdr = gt["resultXdr"].as_str().map(|s| s.to_string());
+            if let Some(ref errx) = result_xdr {
                 println!("  resultXdr: {errx}");
             }
-            std::process::exit(1);
+            outcome = Some(RunOutcome::TransactionFailure {
+                hash: hash.clone(),
+                result_xdr,
+            });
+            break;
         }
     }
+    if let Some(outcome) = outcome {
+        return outcome;
+    }
     println!("RESULT: TIMEOUT tx={hash}");
-    std::process::exit(1);
+    RunOutcome::TransactionTimeout { hash }
 }
 
 // ── Guard Registry ────────────────────────────────────────────────────────
@@ -3266,7 +3335,9 @@ fn main() {
                     ),
                 };
             let call = Call::Transfer { token, to, amount };
-            run(&call, &request.args());
+            let args = request.args();
+            let outcome = run(&call, &args);
+            std::process::exit(outcome.exit_code(args.expect_blocked));
         }
         "transfer-from" => {
             let (token, from, to, amount) = match (
@@ -3287,9 +3358,16 @@ fn main() {
                 to,
                 amount,
             };
-            run(&call, &request.args());
+            let args = request.args();
+            let outcome = run(&call, &args);
+            std::process::exit(outcome.exit_code(args.expect_blocked));
         }
-        "heartbeat" => run(&Call::Heartbeat, &request.args()),
+        "heartbeat" => {
+            let call = Call::Heartbeat;
+            let args = request.args();
+            let outcome = run(&call, &args);
+            std::process::exit(outcome.exit_code(args.expect_blocked));
+        }
         _ => exit_with(format!(
             "unknown subcommand '{cmd}' (see `agent-tx --help`)"
         )),
