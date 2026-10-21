@@ -160,7 +160,7 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    run `cargo test`. Adding an `Error::` branch without a JSON row fails the
    build on purpose.
 3. **`clippy::all` and `clippy::pedantic` clean** — enforced in CI with
-   `-D warnings`.
+   `-D warnings` for the contract crate and standalone `agent-tx` tool.
 4. **`cargo fmt` clean** — enforced in CI.
 5. **Doc comments on every public function** stating what it authorizes or
    changes, and which storage keys it touches.

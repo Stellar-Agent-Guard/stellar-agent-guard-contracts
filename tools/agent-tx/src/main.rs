@@ -30,7 +30,7 @@
 //! the on-chain-equivalent diagnostic events (the contract's own `auth_checked`
 //! blocked event with the reason symbol).
 //!
-//! Every address-typed flag is validated as a StrKey, and the endpoint is
+//! Every address-typed flag is validated as a `StrKey`, and the endpoint is
 //! resolved from a named preset, *before* the first RPC request — see
 //! `strkey.rs` and `network.rs`, the two helpers that hold those rules.
 
@@ -42,7 +42,20 @@ use base32::strkey_encode;
 use ed25519_dalek::{Signer, SigningKey};
 use network::{Endpoint, Network};
 use sha2::{Digest, Sha256};
-use stellar_xdr::*;
+use stellar_xdr::{
+    AccountEntry, AccountId, BytesM, ContractDataDurability, ContractEventBody, ContractId,
+    DecoratedSignature, DiagnosticEvent, EnvelopeType, Hash, HashIdPreimage,
+    HashIdPreimageSorobanAuthorization, HostFunction, Int128Parts, InvokeContractArgs,
+    InvokeHostFunctionOp, LedgerEntryData, LedgerFootprint, LedgerKey, LedgerKeyAccount,
+    LedgerKeyContractData, Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions,
+    PublicKey, ReadXdr, ScAddress, ScBytes, ScMap, ScSymbol, ScVal, SequenceNumber, Signature,
+    SignatureHint, SorobanAddressCredentials, SorobanAuthorizationEntry, SorobanAuthorizedFunction,
+    SorobanAuthorizedInvocation, SorobanCredentials, SorobanResources, SorobanTransactionData,
+    SorobanTransactionDataExt, Transaction, TransactionEnvelope, TransactionExt,
+    TransactionV1Envelope, Uint256, VecM, WriteXdr,
+};
+#[cfg(test)]
+use stellar_xdr::{ContractEvent, ContractEventType, ContractEventV0, ExtensionPoint, ScMapEntry};
 use strkey::KeyKind;
 
 const INCLUSION_FEE: u32 = 100;
@@ -80,24 +93,14 @@ impl RunOutcome {
     fn exit_code(&self, expect_blocked: bool) -> i32 {
         match self {
             Self::SimulationBlocked { policy_block, .. } => {
-                if *policy_block && expect_blocked {
-                    0
-                } else {
-                    1
-                }
+                i32::from(!(*policy_block && expect_blocked))
             }
             Self::SimulationSuccessUnexpectedBlock
             | Self::SendError(_)
             | Self::EmptyHash(_)
             | Self::TransactionTimeout { .. } => 1,
             Self::TransactionSuccess { .. } => 0,
-            Self::TransactionFailure { .. } => {
-                if expect_blocked {
-                    0
-                } else {
-                    1
-                }
-            }
+            Self::TransactionFailure { .. } => i32::from(!expect_blocked),
         }
     }
 }
@@ -111,8 +114,8 @@ const VER_CONTRACT: u8 = 2 << 3; // 0x12 -> C...
 fn secret_to_seed(secret: &str) -> [u8; 32] {
     match strkey::decode_strkey(secret) {
         Ok((ver, seed)) if ver == strkey::VER_SECRET => seed,
-        Ok(_) => exit_with("not an account secret seed (expected leading character 'S')".into()),
-        Err(err) => exit_with(format!(
+        Ok(_) => exit_with("not an account secret seed (expected leading character 'S')"),
+        Err(err) => exit_with(&format!(
             "invalid secret seed: {err}; expected a 56-character StrKey secret seed (S...)"
         )),
     }
@@ -200,7 +203,11 @@ trait PreflightRpc {
 }
 
 impl Rpc {
-    fn post(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
+    fn post(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -211,8 +218,7 @@ impl Rpc {
             .set("Content-Type", "application/json")
             .send_string(&body.to_string());
         let response = match response {
-            Ok(response) => response,
-            Err(ureq::Error::Status(_, response)) => response,
+            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
             Err(ureq::Error::Transport(error)) => {
                 return Err(RpcError {
                     method: method.to_string(),
@@ -248,8 +254,7 @@ impl Rpc {
                 message: err
                     .get("message")
                     .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| err.to_string()),
+                    .map_or_else(|| err.to_string(), str::to_string),
             });
         }
         if !(200..300).contains(&status) {
@@ -271,8 +276,9 @@ impl Rpc {
     }
 
     fn latest_ledger(&self) -> u32 {
-        let res = rpc_or_exit(self.post("getLatestLedger", serde_json::json!({})));
-        res["sequence"].as_u64().expect("latest ledger sequence") as u32
+        let res = rpc_or_exit(self.post("getLatestLedger", &serde_json::json!({})));
+        u32::try_from(res["sequence"].as_u64().expect("latest ledger sequence"))
+            .expect("latest ledger sequence exceeds u32")
     }
 
     fn account_seq(&self, account: &str) -> i64 {
@@ -285,7 +291,7 @@ impl Rpc {
         };
         let res = rpc_or_exit(self.post(
             "getLedgerEntries",
-            serde_json::json!({ "keys": [b64_encode_xdr(&key)] }),
+            &serde_json::json!({ "keys": [b64_encode_xdr(&key)] }),
         ));
         let entry = res["entries"][0]["xdr"].as_str().expect("ledger entry xdr");
         // getLedgerEntries returns the LedgerEntryData XDR per entry.
@@ -299,23 +305,23 @@ impl Rpc {
     fn simulate(&self, envelope: &str) -> serde_json::Value {
         rpc_or_exit(self.post(
             "simulateTransaction",
-            serde_json::json!({ "transaction": envelope }),
+            &serde_json::json!({ "transaction": envelope }),
         ))
     }
 
     fn send(&self, envelope: &str) -> serde_json::Value {
         rpc_or_exit(self.post(
             "sendTransaction",
-            serde_json::json!({ "transaction": envelope }),
+            &serde_json::json!({ "transaction": envelope }),
         ))
     }
 
     fn get_tx(&self, hash: &str) -> serde_json::Value {
-        rpc_or_exit(self.post("getTransaction", serde_json::json!({ "hash": hash })))
+        rpc_or_exit(self.post("getTransaction", &serde_json::json!({ "hash": hash })))
     }
 
     fn inclusion_fee(&self) -> Result<Option<u32>, RpcError> {
-        let stats = self.post("getFeeStats", serde_json::json!({}))?;
+        let stats = self.post("getFeeStats", &serde_json::json!({}))?;
         Ok(parse_inclusion_fee(&stats))
     }
 }
@@ -337,7 +343,7 @@ impl PreflightRpc for Rpc {
         let key = guard_instance_key(guard);
         let res = rpc_or_exit(self.post(
             "getLedgerEntries",
-            serde_json::json!({ "keys": [b64_encode_xdr(&key)] }),
+            &serde_json::json!({ "keys": [b64_encode_xdr(&key)] }),
         ));
         let entry = res["entries"][0]["xdr"]
             .as_str()
@@ -494,8 +500,7 @@ fn simulation_error_message(simulation: &serde_json::Value) -> Option<String> {
         Some(
             error["message"]
                 .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| error.to_string()),
+                .map_or_else(|| error.to_string(), str::to_string),
         )
     }
 }
@@ -930,6 +935,13 @@ enum Call {
     Heartbeat,
 }
 
+fn int128_parts(value: i128) -> Int128Parts {
+    let bytes = value.to_be_bytes();
+    let hi = i64::from_be_bytes(bytes[..8].try_into().expect("i128 high bytes"));
+    let lo = u64::from_be_bytes(bytes[8..].try_into().expect("i128 low bytes"));
+    Int128Parts { lo, hi }
+}
+
 impl Call {
     fn kind(&self) -> CallKind {
         match self {
@@ -948,10 +960,7 @@ impl Call {
                 args: VecM::try_from(vec![
                     ScVal::Address(guard.clone()),
                     ScVal::Address(to.clone()),
-                    ScVal::I128(Int128Parts {
-                        lo: *amount as u64,
-                        hi: (*amount >> 64) as i64,
-                    }),
+                    ScVal::I128(int128_parts(*amount)),
                 ])
                 .expect("arg count"),
             },
@@ -967,10 +976,7 @@ impl Call {
                     ScVal::Address(from.clone()),
                     ScVal::Address(guard.clone()),
                     ScVal::Address(to.clone()),
-                    ScVal::I128(Int128Parts {
-                        lo: *amount as u64,
-                        hi: (*amount >> 64) as i64,
-                    }),
+                    ScVal::I128(int128_parts(*amount)),
                 ])
                 .expect("arg count"),
             },
@@ -983,10 +989,11 @@ impl Call {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(call: &Call, args: &Args) -> RunOutcome {
     let guard = &args.guard;
     let Some(secret) = args.secret.as_deref() else {
-        exit_with("missing --agent-secret: signing requires the registered agent's secret seed (expected secret seed 'S...'; or set AGENT_SECRET env var)".into());
+        exit_with("missing --agent-secret: signing requires the registered agent's secret seed (expected secret seed 'S...'; or set AGENT_SECRET env var)");
     };
     let seed = secret_to_seed(secret);
     let agent = SigningKey::from_bytes(&seed);
@@ -1179,7 +1186,7 @@ fn run(call: &Call, args: &Args) -> RunOutcome {
         }
         if st == "FAILED" {
             println!("RESULT: FAILED tx={hash}");
-            let result_xdr = gt["resultXdr"].as_str().map(|s| s.to_string());
+            let result_xdr = gt["resultXdr"].as_str().map(str::to_string);
             if let Some(ref errx) = result_xdr {
                 println!("  resultXdr: {errx}");
             }
@@ -1335,13 +1342,13 @@ fn cmd_guards_add(cli: &mut Cli) -> Result<(), String> {
                 return Ok(());
             }
             "--network" => {
-                network = Some(cli.value_expected("--network", "testnet | futurenet | mainnet")?)
+                network = Some(cli.value_expected("--network", "testnet | futurenet | mainnet")?);
             }
             "--rpc-url" => {
-                rpc_url = Some(cli.value_expected("--rpc-url", "endpoint URL e.g. https://...")?)
+                rpc_url = Some(cli.value_expected("--rpc-url", "endpoint URL e.g. https://...")?);
             }
             "--network-passphrase" => {
-                passphrase = Some(cli.value_expected("--network-passphrase", "passphrase string")?)
+                passphrase = Some(cli.value_expected("--network-passphrase", "passphrase string")?);
             }
             other if other.starts_with("--") => return Err(cli.unknown(other)),
             other => positionals.push(other.to_string()),
@@ -1653,11 +1660,11 @@ mod tests {
         // When last_heartbeat=50, dms_grace_secs=60, now=100:
         // 100 - 50 = 50, which is NOT > 60, so heartbeat should NOT be expired
 
-        let now = 100u32;
+        let now = 100u64;
         let last_heartbeat = 50u64;
         let dms_grace_secs = 60u64;
 
-        let heartbeat_expired = now.saturating_sub(last_heartbeat as u32) as u64 > dms_grace_secs;
+        let heartbeat_expired = now.saturating_sub(last_heartbeat) > dms_grace_secs;
         assert!(
             !heartbeat_expired,
             "heartbeat should not be expired: (100-50)=50 is not > 60"
@@ -1665,8 +1672,8 @@ mod tests {
 
         // Test case 2: now=150, last_heartbeat=50, dms_grace_secs=60
         // 150 - 50 = 100, which IS > 60, so heartbeat SHOULD be expired
-        let now2 = 150u32;
-        let heartbeat_expired2 = now2.saturating_sub(last_heartbeat as u32) as u64 > dms_grace_secs;
+        let now2 = 150u64;
+        let heartbeat_expired2 = now2.saturating_sub(last_heartbeat) > dms_grace_secs;
         assert!(
             heartbeat_expired2,
             "heartbeat should be expired: (150-50)=100 is > 60"
@@ -3099,7 +3106,7 @@ impl<'a> Cli<'a> {
     }
 }
 
-/// Validate a StrKey argument and parse it into the XDR address type. Parsing
+/// Validate a `StrKey` argument and parse it into the XDR address type. Parsing
 /// cannot fail after `strkey::validate_key` accepted the value: the version,
 /// length and checksum checks above are exactly what `ScAddress::from_str`
 /// requires.
@@ -3120,7 +3127,7 @@ fn parse_amount(raw: &str) -> Result<i128, String> {
 
 /// One invocation's inputs, fully checked. Building a `Request` performs no
 /// network I/O: the guard, token, recipient and secret are all validated as
-/// StrKeys and the endpoint is resolved from a preset before an `Rpc` exists.
+/// `StrKeys` and the endpoint is resolved from a preset before an `Rpc` exists.
 #[derive(Debug)]
 struct Request {
     guard: ScAddress,
@@ -3161,6 +3168,7 @@ impl Request {
 }
 
 /// The flags each subcommand takes, collected and then validated in one pass.
+#[allow(clippy::too_many_lines)]
 fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
     let mut cli = Cli::new(cmd, argv);
     let mut guard = None;
@@ -3204,24 +3212,24 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
             }
             "--guard" => guard = Some(cli.value_expected("--guard", "contract ID 'C...'")?),
             "--token" | "--asset" => {
-                token_field = flag.clone();
+                token_field.clone_from(&flag);
                 token = Some(cli.value_expected(&flag, "contract ID 'C...'")?);
             }
             "--from" => {
                 from =
-                    Some(cli.value_expected("--from", "account ID 'G...' or contract ID 'C...'")?)
+                    Some(cli.value_expected("--from", "account ID 'G...' or contract ID 'C...'")?);
             }
             "--to" => {
                 to =
                     Some(cli.value_expected(
                         "--to",
                         "recipient account ID 'G...' or contract ID 'C...'",
-                    )?)
+                    )?);
             }
             "--amount" => {
                 amount = Some(parse_amount(
                     &cli.value_expected("--amount", "integer i128")?,
-                )?)
+                )?);
             }
             "--inclusion-fee" => {
                 let raw = cli.value_expected("--inclusion-fee", "stroops as u32")?;
@@ -3230,17 +3238,17 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
                 })?);
             }
             "--agent-secret" | "--secret" => {
-                secret_field = flag.clone();
+                secret_field.clone_from(&flag);
                 secret = Some(cli.value_expected(&flag, "secret seed 'S...'")?);
             }
             "--network" => {
-                network = Some(cli.value_expected("--network", "testnet | futurenet | mainnet")?)
+                network = Some(cli.value_expected("--network", "testnet | futurenet | mainnet")?);
             }
             "--rpc-url" => {
-                rpc_url = Some(cli.value_expected("--rpc-url", "endpoint URL e.g. https://...")?)
+                rpc_url = Some(cli.value_expected("--rpc-url", "endpoint URL e.g. https://...")?);
             }
             "--network-passphrase" => {
-                passphrase = Some(cli.value_expected("--network-passphrase", "passphrase string")?)
+                passphrase = Some(cli.value_expected("--network-passphrase", "passphrase string")?);
             }
             "--expect-blocked" => expect_blocked = true,
             other => return Err(cli.unknown(other)),
@@ -3376,6 +3384,7 @@ fn print_help() {
     println!("{}", tool_help());
 }
 
+#[allow(clippy::too_many_lines)]
 fn subcommand_help(cmd: &str) -> String {
     match cmd {
         "preflight" => {
@@ -3579,8 +3588,8 @@ fn print_guards_subcommand_help(sub: &str) {
 
 // ── Read-only diagnostics (status, policy, check) ───────────────────────
 
-/// Helper to extract a u64 field from a PolicyConfig ScVal::Map entry.
-/// PolicyConfig fields are stored as ScVal::Map with Symbol keys in sorted order.
+/// Helper to extract a u64 field from a `PolicyConfig` `ScVal::Map` entry.
+/// `PolicyConfig` fields are stored as `ScVal::Map` with Symbol keys in sorted order.
 fn extract_u64_from_map(map: &ScMap, field_name: &str) -> Option<u64> {
     let field_bytes = field_name.as_bytes();
     for entry in &map.0 {
@@ -3595,7 +3604,7 @@ fn extract_u64_from_map(map: &ScMap, field_name: &str) -> Option<u64> {
     None
 }
 
-/// Extract dms_grace_secs from a PolicyConfig map.
+/// Extract `dms_grace_secs` from a `PolicyConfig` map.
 /// Returns 0 if the field is not found or the structure is malformed.
 fn extract_dms_grace_secs(policy_val: &ScVal) -> u64 {
     if let ScVal::Map(Some(map)) = policy_val {
@@ -3605,7 +3614,8 @@ fn extract_dms_grace_secs(policy_val: &ScVal) -> u64 {
     }
 }
 
-/// Fetch guard status: admin_frozen, has_policy, heartbeat_expired, last_heartbeat, now
+/// Fetch guard status: `admin_frozen`, `has_policy`, `heartbeat_expired`, `last_heartbeat`, now
+#[allow(clippy::too_many_lines)]
 fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), String> {
     // Fetch instance storage: Initialized, Admin, AgentPubkey (instance keys)
     // and persistent storage: Policy, LastHeartbeat, AdminFrozen, PolicyRevision
@@ -3617,7 +3627,7 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
     let keys = [instance_key, policy_key, heartbeat_key, frozen_key];
     let keys_xdr: Vec<String> = keys.iter().map(b64_encode_xdr).collect();
 
-    let res = rpc_or_exit(rpc.post("getLedgerEntries", serde_json::json!({ "keys": keys_xdr })));
+    let res = rpc_or_exit(rpc.post("getLedgerEntries", &serde_json::json!({ "keys": keys_xdr })));
 
     let entries = res["entries"].as_array().ok_or("no entries in response")?;
 
@@ -3676,9 +3686,8 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
                                 heartbeat_expired = true;
                             } else {
                                 // Check if grace period has elapsed
-                                heartbeat_expired = now.saturating_sub(last_heartbeat as u32)
-                                    as u64
-                                    > dms_grace_secs;
+                                heartbeat_expired =
+                                    u64::from(now).saturating_sub(last_heartbeat) > dms_grace_secs;
                             }
                         }
                         break;
@@ -3689,11 +3698,11 @@ fn cmd_status(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
     }
 
     println!("{{");
-    println!("  \"has_policy\": {},", has_policy);
-    println!("  \"admin_frozen\": {},", admin_frozen);
-    println!("  \"heartbeat_expired\": {},", heartbeat_expired);
-    println!("  \"last_heartbeat\": {},", last_heartbeat);
-    println!("  \"now\": {}", now);
+    println!("  \"has_policy\": {has_policy},");
+    println!("  \"admin_frozen\": {admin_frozen},");
+    println!("  \"heartbeat_expired\": {heartbeat_expired},");
+    println!("  \"last_heartbeat\": {last_heartbeat},");
+    println!("  \"now\": {now}");
     println!("}}");
 
     Ok(())
@@ -3704,7 +3713,7 @@ fn cmd_policy(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
     let policy_key = guard_data_key(guard, "Policy");
     let res = rpc_or_exit(rpc.post(
         "getLedgerEntries",
-        serde_json::json!({ "keys": [b64_encode_xdr(&policy_key)] }),
+        &serde_json::json!({ "keys": [b64_encode_xdr(&policy_key)] }),
     ));
 
     let entries = res["entries"].as_array().ok_or("no entries in response")?;
@@ -3737,6 +3746,7 @@ fn cmd_policy(rpc: &Rpc, guard: &ScAddress, _passphrase: &str) -> Result<(), Str
 }
 
 /// Simulate a prospective transfer and display the decision (allowed/blocked with reason)
+#[allow(clippy::too_many_lines)]
 fn cmd_check(
     rpc: &Rpc,
     guard: &ScAddress,
@@ -3744,7 +3754,7 @@ fn cmd_check(
     to: &ScAddress,
     amount: i128,
     passphrase: &str,
-) -> Result<(), String> {
+) {
     // Build a transfer invocation and simulate it without auth
     // This shows whether the transfer would be allowed by policy
     let invocation = InvokeContractArgs {
@@ -3753,10 +3763,7 @@ fn cmd_check(
         args: VecM::try_from(vec![
             ScVal::Address(guard.clone()),
             ScVal::Address(to.clone()),
-            ScVal::I128(Int128Parts {
-                lo: amount as u64,
-                hi: (amount >> 64) as i64,
-            }),
+            ScVal::I128(int128_parts(amount)),
         ])
         .expect("arg count"),
     };
@@ -3789,7 +3796,7 @@ fn cmd_check(
                         if let ScVal::Symbol(reason) = &v0.topics[v0.topics.len() - 1] {
                             // Convert ScSymbol to string for display
                             let reason_str = String::from_utf8_lossy(&reason.0);
-                            println!("diagnostic_reason: {}", reason_str);
+                            println!("diagnostic_reason: {reason_str}");
                             break;
                         }
                     }
@@ -3799,14 +3806,12 @@ fn cmd_check(
     } else {
         println!("result: allowed");
         if let Some(fee) = sim["minResourceFee"].as_str() {
-            println!("estimated_fee_stroops: {}", fee);
+            println!("estimated_fee_stroops: {fee}");
         }
     }
-
-    Ok(())
 }
 
-fn exit_with(message: String) -> ! {
+fn exit_with(message: &str) -> ! {
     eprintln!("Error: {message}");
     std::process::exit(1)
 }
@@ -3827,7 +3832,7 @@ fn run_guards(argv: &[String]) {
         "a subcommand: add | list | remove | set-default (see `agent-tx guards --help`)",
     ) {
         Ok(subcommand) => subcommand,
-        Err(message) => exit_with(message),
+        Err(message) => exit_with(&message),
     };
     let result = match subcommand.as_str() {
         "add" => cmd_guards_add(&mut cli),
@@ -3842,10 +3847,11 @@ fn run_guards(argv: &[String]) {
         )),
     };
     if let Err(message) = result {
-        exit_with(message);
+        exit_with(&message);
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let Some((cmd, rest)) = argv.split_first() else {
@@ -3895,7 +3901,7 @@ fn main() {
         cmd.as_str(),
         "preflight" | "transfer" | "transfer-from" | "heartbeat" | "status" | "policy" | "check"
     ) {
-        exit_with(format!(
+        exit_with(&format!(
             "unknown subcommand '{cmd}' (see `agent-tx --help`)"
         ));
     }
@@ -3904,7 +3910,7 @@ fn main() {
     // nothing past this point can reach the network with a malformed input.
     let request = match parse_request(cmd, rest) {
         Ok(request) => request,
-        Err(message) => exit_with(message),
+        Err(message) => exit_with(&message),
     };
     if let Some(notice) = request.notice() {
         eprintln!("{notice}");
@@ -3918,70 +3924,56 @@ fn main() {
     match cmd.as_str() {
         "status" => {
             if let Err(e) = cmd_status(&rpc, &request.guard, &passphrase) {
-                exit_with(e);
+                exit_with(&e);
             }
         }
         "policy" => {
             if let Err(e) = cmd_policy(&rpc, &request.guard, &passphrase) {
-                exit_with(e);
+                exit_with(&e);
             }
         }
         "check" => {
-            let (asset, to, amount) =
-                match (request.token.clone(), request.to.clone(), request.amount) {
-                    (Some(asset), Some(to), Some(amount)) => (asset, to, amount),
-                    _ => exit_with(
-                        "missing required argument for `check` (see `agent-tx check --help`)"
-                            .into(),
-                    ),
-                };
-            if let Err(e) = cmd_check(&rpc, &request.guard, &asset, &to, amount, &passphrase) {
-                exit_with(e);
-            }
+            let (Some(asset), Some(to), Some(amount)) =
+                (request.token.clone(), request.to.clone(), request.amount)
+            else {
+                exit_with("missing required argument for `check` (see `agent-tx check --help`)")
+            };
+            cmd_check(&rpc, &request.guard, &asset, &to, amount, &passphrase);
         }
         "preflight" => {
-            let (token, to, amount) = match (
-                request.token.clone(),
-                request.to.clone(),
-                request.amount,
-            ) {
-                (Some(token), Some(to), Some(amount)) => (token, to, amount),
-                _ => exit_with(
-                    "missing required argument for `preflight` (see `agent-tx preflight --help`)"
-                        .into(),
-                ),
+            let (Some(token), Some(to), Some(amount)) =
+                (request.token.clone(), request.to.clone(), request.amount)
+            else {
+                exit_with(
+                    "missing required argument for `preflight` (see `agent-tx preflight --help`)",
+                )
             };
             let call = Call::Transfer { token, to, amount };
-            let args = request.args();
-            let result = preflight(&call, &args, &args.rpc);
+            let request_args = request.args();
+            let result = preflight(&call, &request_args, &request_args.rpc);
             std::process::exit(result.err().unwrap_or(0));
         }
         "transfer" => {
-            let (token, to, amount) =
-                match (request.token.clone(), request.to.clone(), request.amount) {
-                    (Some(token), Some(to), Some(amount)) => (token, to, amount),
-                    _ => exit_with(
-                        "missing required argument for `transfer` (see `agent-tx transfer --help`)"
-                            .into(),
-                    ),
-                };
+            let (Some(token), Some(to), Some(amount)) =
+                (request.token.clone(), request.to.clone(), request.amount)
+            else {
+                exit_with(
+                    "missing required argument for `transfer` (see `agent-tx transfer --help`)",
+                )
+            };
             let call = Call::Transfer { token, to, amount };
-            let args = request.args();
-            let outcome = run(&call, &args);
-            std::process::exit(outcome.exit_code(args.expect_blocked));
+            let request_args = request.args();
+            let outcome = run(&call, &request_args);
+            std::process::exit(outcome.exit_code(request_args.expect_blocked));
         }
         "transfer-from" => {
-            let (token, from, to, amount) = match (
+            let (Some(token), Some(from), Some(to), Some(amount)) = (
                 request.token.clone(),
                 request.from.clone(),
                 request.to.clone(),
                 request.amount,
-            ) {
-                (Some(token), Some(from), Some(to), Some(amount)) => (token, from, to, amount),
-                _ => exit_with(
-                    "missing required argument for `transfer-from` (see `agent-tx transfer-from --help`)"
-                        .into(),
-                ),
+            ) else {
+                exit_with("missing required argument for `transfer-from` (see `agent-tx transfer-from --help`)")
             };
             let call = Call::TransferFrom {
                 token,
@@ -3989,17 +3981,17 @@ fn main() {
                 to,
                 amount,
             };
-            let args = request.args();
-            let outcome = run(&call, &args);
-            std::process::exit(outcome.exit_code(args.expect_blocked));
+            let request_args = request.args();
+            let outcome = run(&call, &request_args);
+            std::process::exit(outcome.exit_code(request_args.expect_blocked));
         }
         "heartbeat" => {
             let call = Call::Heartbeat;
-            let args = request.args();
-            let outcome = run(&call, &args);
-            std::process::exit(outcome.exit_code(args.expect_blocked));
+            let request_args = request.args();
+            let outcome = run(&call, &request_args);
+            std::process::exit(outcome.exit_code(request_args.expect_blocked));
         }
-        _ => exit_with(format!(
+        _ => exit_with(&format!(
             "unknown subcommand '{cmd}' (see `agent-tx --help`)"
         )),
     }
