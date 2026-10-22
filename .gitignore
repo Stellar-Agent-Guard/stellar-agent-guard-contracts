@@ -7,3 +7,9 @@ test_snapshots/
 **/*.rs.bk
 *.swp
 .DS_Store
+# WASM build artifacts
+*.wasm
+# Secret hygiene — agent-tx reads AGENT_SECRET env; prevent committing .env files
+.env
+.env.*
+!.env.example

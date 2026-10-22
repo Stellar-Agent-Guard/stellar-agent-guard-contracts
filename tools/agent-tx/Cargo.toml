@@ -3,17 +3,21 @@ name = "agent-tx"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Sign and submit Soroban txs on behalf of the stellar-agent-guard custom account (agent Ed25519 key)"
+description = "Preflight, sign, and submit Soroban txs for the stellar-agent-guard custom account"
 
 # The stellar CLI cannot sign Soroban auth entries for contract addresses
-# (custom accounts), so this tool drives the RPC flow directly: simulate ->
+# custom accounts), so this tool drives the RPC flow directly: simulate ->
 # sign the guard's SorobanAuthorizationEntry with the registered agent key ->
-# re-simulate (real __check_auth enforcement) -> submit. See README.md.
+# re-simulate (real __check_auth enforcement) -> optionally submit. See README.md.
 
 [dependencies]
 stellar-xdr = { version = "27", features = ["base64", "std"] }
 ed25519-dalek = "2"
 sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = "2"
 hex = "0.4"
+dirs = "5"
+# OS randomness for the low half of the guard auth nonce (see `fresh_auth_nonce`).
+getrandom = "0.2"

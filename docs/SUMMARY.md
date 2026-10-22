@@ -1,5 +1,6 @@
 # Summary
 
+* [Documentation Guide & SPEC Cross-Reference](README.md)
 * [Introduction](introduction.md)
 * [Installation](installation.md)
 * [Concepts](concepts/)
@@ -12,9 +13,16 @@
   * [set\_policy](functions/set-policy.md)
   * [heartbeat](functions/heartbeat.md)
   * [freeze / unfreeze](functions/freeze-unfreeze.md)
+  * [admin rotation](functions/admin-rotation.md)
   * [check\_auth](functions/check-auth.md)
+* [Policy Templates](policy-templates.md)
+* [Key Rotation](key-rotation.md)
+* [Storage Rent and TTL](rent-and-ttl.md)
 * [Architecture](architecture.md)
 * [Testnet Verification](verification.md)
 * [Enforcement Scope](enforcement-scope.md)
+* [Scenario Matrix](scenario-matrix.md)
+* [Reason Glossary](reason-glossary.md)
+* [Audit Pack](audit-pack.md)
 * [Contributing](contributing.md)
 * [FAQ](faq.md)

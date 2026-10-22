@@ -5,22 +5,49 @@ edition = "2021"
 description = "Non-custodial Soroban custom-account contract enforcing agent spend policy (per-tx/rolling caps, allowlists, pause, dead-man switch) inside __check_auth — Stellar Agent Guard."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/aigbagbobila/stellar-agent-guard-contracts"
-rust-version = "1.85"
+# Minimum supported Rust version (issue #410).
+#
+# This is the *tested* floor, not an aspiration: the `msrv` job in
+# .github/workflows/ci.yml reads this field, installs exactly that release
+# with the wasm target, and runs clippy + the test suite + the wasm build on
+# it. The floor is set by the dependency graph, not by preference —
+# `soroban-sdk` 27.0.6 declares `rust-version = "1.91.0"` itself. Declaring
+# 1.85 here (as this file did before issue #410) was untestable and would
+# have failed a contributor's very first `cargo build`.
+#
+# Bumping this field is a reviewed change, not a side effect: raise it in the
+# same PR as the dependency that requires it, and update README/docs plus
+# SECURITY.md's "Verified against" section together.
+rust-version = "1.91.0"
 publish = false
 
 [lib]
 crate-type = ["lib", "cdylib"]
 doctest = false
 
+[features]
+testutils = []
+
 [dependencies]
-soroban-sdk = "27.0.6"
+# SPEC §1.1 verified against soroban-sdk 27.0.6 (CustomAccountInterface, Context, ContractContext)
+# Bumping soroban-sdk requires re-verifying SPEC §1.1 quotes against new version source.
+#
+# `alloc`: the engine returns one verdict per auth context via `alloc::vec::Vec`,
+# which needs a global allocator in the wasm guest. The SDK's `alloc` feature
+# registers a bump-pointer global allocator for wasm targets (no effect on host
+# builds/tests); see soroban-sdk `src/alloc`.
+soroban-sdk = { version = "27.0.6", features = ["alloc"] }
 
 [dev-dependencies]
 soroban-sdk = { version = "27.0.6", features = ["testutils"] }
 # ed25519 signing + SHA-256 for building real Soroban auth signatures in
 # contract-level integration tests (SPEC §11).
 ed25519-dalek = "2"
-sha2 = "0.10"
+sha2 = "0.11"
+# Parses tests/fixtures/index.json in the fixtures drift test (issue #92);
+# dev-only, never linked into the contract.
+serde_json = "1"
+jsonschema = "0.58"
 
 [profile.release]
 opt-level = "z"

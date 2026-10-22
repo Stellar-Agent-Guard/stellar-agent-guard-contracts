@@ -16,6 +16,23 @@ Transfer 500 → Allowed (500 ≤ 1000)
 Transfer 1100 → Blocked (1100 > 1000)
 ```
 
+## Per-asset caps
+
+The optional `asset_caps` map lets a single guard account enforce different per-transaction caps for different assets. This is the common case of holding XLM and a stablecoin in the same guard account: e.g. ≤100 XLM per tx, ≤10,000 stablecoin per tx.
+
+- The map is optional. When absent, behavior and encoding are byte-identical to the pre-per-asset configuration.
+- Each key is a SAC contract address and each value is the per-transaction cap for that asset.
+- An asset with an entry in the map uses that cap instead of the global `per_tx_cap`.
+- An asset without an entry falls back to the global `per_tx_cap`.
+- A per-asset cap of `0` disables the per-transaction cap for that asset only.
+
+```
+Policy: per_tx_cap = 1000, asset_caps = { XKA: 100, USDC: 10000 }
+XKA transfer 150      → Blocked (150 > 100)
+USDC transfer 5000   → Allowed (5000 ≤ 10000)
+Asset without override 500 → Allowed (falls back to 1000)
+```
+
 ## Rolling window cap
 
 The `window_cap` field sets a maximum total spend within a rolling time window of `window_secs` seconds. This is a **genuinely rolling** window, not a fixed-bucket reset.
@@ -47,6 +64,17 @@ The window is genuinely rolling — the transfer at `t=70` succeeds because the 
 
 For every authorization decision, `total` after any admission equals the sum of `entries[i].amount` over entries with `ts + window_secs > now`, and a new asset transfer is admitted only if that running total plus the transfer amount ≤ `window_cap`.
 
+## Window accounting with per-asset caps
+
+When `asset_caps` is set, the window remains a **single window** across all assets. The per-asset map only changes which per-transaction cap a transfer is compared against; it does not create separate windows per asset.
+
+A SAC transfer is admitted only if both of the following hold:
+
+1. The transfer amount is ≤ the asset's *effective* per-tx cap (the per-asset override if present, otherwise the global `per_tx_cap`).
+2. The running window total plus the transfer amount is ≤ `window_cap` (when `window_cap > 0`).
+
+The window total is therefore shared across assets, while the per-tx admission threshold is per-asset. Full per-asset windows are out of scope for this change and would be a separate feature if demanded.
+
 ## Configuration interaction
 
 | `per_tx_cap` | `window_cap` | Behavior |
@@ -56,7 +84,15 @@ For every authorization decision, `total` after any admission equals the sum of 
 | 0 | > 0 | Window cap only |
 | > 0 | > 0 | Both enforced (per-tx checked first, then window) |
 
+When `asset_caps` is set, the effective per-tx cap for an asset is its override if present, otherwise the global `per_tx_cap`. A per-asset override of `0` disables the per-tx cap for that asset only.
+
 If `window_cap > 0`, then `window_secs` must also be > 0 (validated by `set_policy`).
+
+## Validation
+
+- Every per-asset cap must be ≥ 0. Negative values are rejected by `set_policy`.
+- Overrides for assets not present in the configured `assets` list are rejected, not silently ignored. This prevents a mistyped asset address from seemingly accepting an override that never applies.
+- An absent map is valid and encodes identically to a config that never had the field.
 
 ## Scope
 

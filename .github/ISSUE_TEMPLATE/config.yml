@@ -1,0 +1,11 @@
+# Blank issues are disabled: please use the Feature / Bug / Question templates
+# so every issue arrives with Summary / Acceptance Criteria / Tech Stack.
+# Maintainer decision recorded per issue #70.
+blank_issues_enabled: false
+contact_links:
+  - name: "Telegram community"
+    url: "https://t.me/+EzSusj-2vVhhNmI0"
+    about: "Chat with the Stellar Agent Guard community (see README Community section)."
+  - name: "Discord community"
+    url: "https://discord.gg/Z766vsgjg"
+    about: "Chat with the Stellar Agent Guard community (see README Community section)."
