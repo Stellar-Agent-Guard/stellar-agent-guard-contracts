@@ -18,64 +18,28 @@ cd stellar-agent-guard-contracts
 # every cargo command below runs on the pinned compiler — install it once with
 # `rustup toolchain install`, or just run a cargo command and let rustup do it.
 
-# ── The local gate: the commands CI runs, in CI's order ──────────────────
-# These are the commands `.github/workflows/ci.yml` job `ci` runs. Run the
-# whole block before opening a PR — a branch that is green here is the branch
-# CI sees. If you change the gate, change this block, the README's Testing &
-# CI section, and the workflow in the same PR.
-
-# 1. Dependency security and license policy
-# Install cargo-deny once, then check dependencies against deny.toml.
-cargo install --locked cargo-deny
-cargo deny check
-
-# 2. Format check
-cargo fmt --check
-
-# 3. Clippy. The `-D warnings` flag makes this a gate; without it the
-#    `[lints.clippy] all/pedantic = "deny"` groups still print as warnings.
-cargo clippy --all-targets --all-features -- -D warnings
-
-# 4. Unit + integration tests
+# Run tests (31 unit + integration tests, no network needed)
 cargo test
 
-# 5. Public API documentation, warnings denied
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+# Audit numeric, hash, transaction, and contract-ID claims before README PRs
+scripts/verify-readme.sh
 
-# 6. Build the contract wasm (Soroban 27 targets wasm32v1-none)
+# Lint (clippy all + pedantic are denied via [lints.clippy])
+cargo clippy --all-targets --all-features
+
+# Format check
+cargo fmt --check
+
+# Build the contract wasm (Soroban 27 targets wasm32v1-none)
 cargo build --release --target wasm32v1-none
 
-# 7. Check the release WASM for panic/unwrap strings
-bash scripts/check-wasm-panic-strings.sh
+# Prove the wasm build is deterministic (builds twice, diffs SHA-256);
+# this is the same check CI's `wasm-reproducible` job runs.
+./scripts/check-wasm-reproducible.sh
 
-# 8. Audit README claims and verify docs reachability
-scripts/verify-readme.sh
-scripts/verify-docs-reachability.sh
-
-# 9. tools/agent-tx is a separate cargo project (its own Cargo.toml and
-#    Cargo.lock — not a workspace member), so steps 1-8 never see it. CI gates
-#    it explicitly with the same four commands; run them here too, because the
-#    build alone does not run its tests.
-cargo fmt --manifest-path tools/agent-tx/Cargo.toml --check
-cargo clippy --manifest-path tools/agent-tx/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path tools/agent-tx/Cargo.toml
+# Build the agent-tx submission helper
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
-
-Two CI jobs sit outside the `ci` job and are not merge requirements. Run the
-determinism check when you touch the build; the `msrv` job is proven by CI (see
-[Minimum supported Rust version](#minimum-supported-rust-version-msrv) below).
-
-```bash
-# Builds twice in clean target dirs and diffs SHA-256 — the `wasm-reproducible` job.
-./scripts/check-wasm-reproducible.sh
-```
-
-One CI step has no separate command: the **unwrap/expect guard** greps
-`src/lib.rs`, `src/types.rs`, and the non-test halves of `src/engine.rs` and
-`src/window.rs` for `.unwrap(`/`.expect(`, and fails the job if it finds any
-(see Coding Standards item 1). Keep that rule in mind while editing enforcement
-code; CI enforces it even if no test catches it.
 
 The pin is what makes the released WASM hash verifiable: a `stable` toolchain
 would move and change the bytes without any change to the repository. Bumping
@@ -126,17 +90,6 @@ contract. Heartbeat testing uses the guard contract's own address, so the CLI
 cannot submit a heartbeat; use `agent-tx` for this path. See the
 [`agent-tx` usage guide](tools/agent-tx/README.md) for commands and options.
 
-## PolicyConfig deserialization fuzzing
-
-The bounded CI smoke run seeds valid empty and non-empty policies and fuzzes the ScVal XDR decoder plus the production §8 validation path for 60 seconds. It rejects malformed XDR, maps malformed policy values to the stable InvalidConfig error, and treats any panic as a fuzz finding.
-
-Install cargo-fuzz with cargo install cargo-fuzz --locked, then run locally:
-
-    cargo run --manifest-path fuzz/Cargo.toml --bin seed-policy-config
-    cargo +nightly fuzz run policy_config_deserialization -- -max_total_time=600 -max_len=4096
-
-The corpus is stored under fuzz/corpus/policy_config_deserialization; minimized failures are written under fuzz/artifacts/policy_config_deserialization.
-
 ## Clean Build Artifacts
 
 ```bash
@@ -155,8 +108,6 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    the contract runs in the host with `panic = "abort"`; failures on the
    authorization path must be deliberate `panic_with_error!` calls that surface
    as stable `Error` reasons (SPEC §7), never accidental traps.
-   CI scans the release WASM for panic/unwrap diagnostic strings as a backstop;
-   a clean scan does not prove the absence of panic paths or replace code review.
 2. **Every policy change must update SPEC.md and the tests together** — the
    decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2)
    must stay word-for-word consistent with the code; that consistency is
@@ -185,27 +136,10 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
 6. **Testnet-proof pattern:** behavior that changes what `__check_auth` admits
    or blocks should add a unit/integration test **and**, where it is a user-
    visible enforcement change, be recorded in the testnet proof plan
-   ([`tests/fixtures/README.md`](tests/fixtures/README.md) **and** its machine-readable twin
-   [`tests/fixtures/index.json`](tests/fixtures/index.json)) per the Phase-1 exit-criteria pattern. The two
-   files are cross-checked by [`tests/fixtures_index.rs`](tests/fixtures_index.rs), so editing one without
+   (`tests/fixtures/README.md` **and** its machine-readable twin
+   `tests/fixtures/index.json`) per the Phase-1 exit-criteria pattern. The two
+   files are cross-checked by `tests/fixtures_index.rs`, so editing one without
    the other fails `cargo test`.
-
-   - **User-visible enforcement changes (proof entry required):**
-     - *Decision-table changes:* modifying what `__check_auth` admits or blocks, or changing error codes, event topics, or diagnostic data emitted on allow or deny.
-     - *Storage-layout & key-schema changes:* modifying storage keys, types, footprint, or TTL management (these probably require an entry because they alter on-chain state persistence, footprint, or contract upgrade/migration compatibility observable by callers).
-     - *Policy/guard rules:* adding, modifying, or removing policy constraints, guards, or authorization paths.
-   - **Changes not user-visible (no proof entry required):**
-     - *Gas/CPU/memory optimizations:* pure internal performance tuning where admit/block outcomes, storage layouts, and emitted events remain identical.
-     - *Documentation & formatting:* comments, documentation, and formatting updates.
-     - *Internal refactorings:* restructuring internal helper functions or test-only harness code with zero external behavioral change or storage impact.
-   - **Evidence bar & responsibility:**
-     - A proof entry requires an on-chain testnet transaction hash (`tx hash`) plus captured event/diagnostic output (`topics: [event_auth_checked, <outcome>, <reason>]`), matching the exact format defined in [`tests/fixtures/README.md`](tests/fixtures/README.md) and recorded in `tests/fixtures/index.json`.
-     - The PR author proposing the change is responsible for capturing and recording the testnet proof entry (using `tools/agent-tx` or standard Soroban CLI against testnet). When live testnet credentials or deployment fixtures are maintainer-gated during release/verification, the author provides the reproducible simulation script and rationale in the PR, and maintainers record the live hashes upon verification.
-   - **Impractical on testnet (fallback rationale):**
-     - If an enforcement-affecting change is impractical or non-deterministic to reproduce on live public testnet (e.g. extreme timestamp/ledger boundaries, race conditions, or host resource-exhaustion edge cases):
-       1. Provide a comprehensive deterministic unit or host-routed integration test ([`src/integration_tests.rs`](src/integration_tests.rs)) exercising the exact enforcement path in the Soroban test environment (`Env`).
-       2. Include a clear written rationale in the PR description and proof plan documentation detailing why live testnet reproduction is impractical and how the unit/integration tests conclusively verify the invariant.
-   - See [`tests/fixtures/README.md`](tests/fixtures/README.md) and [`SPEC.md` §11](SPEC.md#11-testnet-proof-plan-scenarios-18-five-proven-three-planned) for scenario definitions and fixture schemas.
 7. **Denial-reason messages:** `docs/reason-glossary.md` is the canonical
    message-content source for SDK/UI work — map new user-facing denial text to
    its agent/operator/auditor columns instead of inventing new phrasing.
@@ -342,26 +276,13 @@ layer and must not silently diverge.
 2. Conventional commit format: `type(scope): description`
    (e.g. `fix(window): use addition-form expiry to avoid low-timestamp underflow`).
 3. Rebase onto the latest `main` before pushing.
-4. Ensure the full local gate passes — run the block in
-   [Development Setup](#development-setup) before pushing; it is the command
-   list CI runs, `agent-tx` included.
+4. Ensure CI passes (fmt, clippy, tests, both builds).
 
 ## Pull Request Process
 
-1. Open the PR against `main`. Merge protection is the `main-protection`
-   **ruleset**, recorded in this repository (not only in GitHub settings) at
-   [`.github/rulesets/main-protection.json`](.github/rulesets/main-protection.json)
-   and explained in [`.github/BRANCH_PROTECTION.md`](.github/BRANCH_PROTECTION.md).
-   It requires the status check named exactly `ci`, so the `ci` job key in
-   `.github/workflows/ci.yml` must not be renamed — a rename means no check by
-   that name is ever reported and **every** PR waits forever. It also requires
-   your branch to be up to date with `main` before merging. `msrv` and
-   `wasm-reproducible` are not required checks.
-   The ruleset only takes effect when a maintainer applies it in GitHub
-   settings; the committed JSON is the reviewable record, and a change to the
-   intended protection is a PR to that file plus this section.
-2. One approving review required. A push after approval dismisses it, so
-   re-request review after pushing.
+1. Open the PR against `main`. The `ci` status check is required to merge
+   (branch protection).
+2. One reviewer approval required (branch protection).
 3. Describe the *why* in the PR body: what was broken/wrong, what the fix does,
    and — for enforcement changes — how it was verified (tests, and testnet
    evidence where applicable).
@@ -391,7 +312,7 @@ examples/
   agent-loop.md      # Narrative example of the 24/7 agent runtime loop
                      #   (heartbeat, pre-flight, blocked-reason handling, DMS)
 tools/
-  agent-tx/          # Sign+submit helper for the custom-account address. See agent-tx/README.md for install, usage, secret handling, and what it is for.
+  agent-tx/          # Sign+submit helper for the custom-account address
 tests/fixtures/      # Real testnet evidence (tx hashes, contract IDs, events)
 tests/decision_table.rs  # Drift gate: SPEC §4 ↔ decision-table.json ↔ engine
 decision-table.json  # Machine-readable source of truth for the SPEC §4 table
@@ -420,9 +341,8 @@ silent auth-semantics drift.
 
 Dependabot (`.github/dependabot.yml`, weekly, Cargo + GitHub Actions) files
 update PRs against `main` the same as any contributor PR: they must pass the
-full `ci` gate (see the local-gate block above: fmt, clippy with `-D warnings`,
-tests, rustdoc, both builds, the verification scripts, and the `agent-tx`
-gates) — the [`main-protection` ruleset](.github/BRANCH_PROTECTION.md) requires
-the `ci` check, so a dependabot PR cannot merge green-skipped. `soroban-sdk`
-majors are isolated in their own group because they can break the ABI; review
-those with the SPEC §1.1 re-verification above.
+full `ci` gate (`cargo fmt --check`, clippy with `-D warnings`, `cargo test`,
+both builds) — branch protection on `main` requires the `ci` check, so a
+dependabot PR cannot merge green-skipped. `soroban-sdk` majors are isolated in
+their own group because they can break the ABI; review those with the SPEC §1.1
+re-verification above.

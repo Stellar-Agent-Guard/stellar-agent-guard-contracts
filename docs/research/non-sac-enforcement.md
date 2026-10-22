@@ -1,7 +1,7 @@
 # Non-SAC Enforcement: Defining "Fine-Grained for Protocol Calls" Honestly
 
-**Issue:** #152 (refinement of #1)  
-**Status:** Design exploration — maintainer decision required  
+**Issue:** #152 (refinement of #1)
+**Status:** Design exploration — maintainer decision required
 **Constraint:** SPEC §2 — trustworthy amounts not in auth context generally
 
 ---
@@ -19,7 +19,7 @@ We must decompose #1 into honest sub-strategies.
 ### (a) Protocol-Specific Parsers (Known ABI Adapters)
 **Concept**: Allowlist specific protocols (DEX, lending) with known function signatures; parse args at known positions (e.g., `swap(amount_in, amount_out_min, path, to, deadline)` → extract `amount_in`).
 
-**Feasibility per SPEC §2**: 
+**Feasibility per SPEC §2**:
 - ✅ Works for **known, stable ABIs** (Soroswap, Phoenix, Comet, etc.)
 - ❌ Fails for **any unknown/upgraded contract** — args are opaque `Vec<Val>`
 - ❌ **Maintenance burden**: Every protocol upgrade breaks parser
@@ -81,7 +81,7 @@ We must decompose #1 into honest sub-strategies.
 
 > **Issue #1 (refined): Non-SAC protocol call enforcement — rate limiting first, parsing opt-in**
 >
-> **Accepted strategy**: 
+> **Accepted strategy**:
 > 1. **Protocol rate limiting** (core): `max_calls_per_window` per protocol, enforced via existing rolling window machinery. No ABI parsing. Addresses runaway loops.
 > 2. **Opt-in protocol parsers** (secondary): For known DEXes (Soroswap, Phoenix), admin can enable `parser: Soroswap` to extract `amount_in` from `swap` args. Documented as best-effort.
 > 3. **Declared-max**: Not implemented — documented as "not enforceable."

@@ -71,13 +71,9 @@ what Phase 2's SDK must do:
    against live testnet state, so policy blocks surface pre-broadcast.
 3. On approval, submit and report the on-chain result.
 
-Each invocation draws a fresh auth nonce: the latest ledger sequence in the high
-32 bits and 32 bits of OS randomness in the low 32, independent of the tx
-sequence, so a retry after a failed or unconsumed attempt never reuses one (the
-host records every consumed nonce on-chain until the entry's signature
-expiration; the guard's own `__check_auth` ignores nonces, per SPEC §6). The
-collision argument is on `auth_nonce` in `tools/agent-tx/src/main.rs`. The runs
-below predate this and used the tx sequence as the nonce.
+Each invocation uses a fresh tx sequence as the auth nonce (the SAC's replay
+protection records every consumed nonce on-chain; the guard's own `__check_auth`
+ignores nonces, per SPEC §6).
 
 `agent-tx transfer-from` now builds `transfer_from(from, guard, to, amount)` with
 the guard as spender and preserves the token contract's exact argument order.
@@ -94,14 +90,6 @@ carry the transaction hash and ledger that prove them. This is the same conventi
 blocked result is only meaningful relative to the state that produced it.
 
 ## The five scenarios — real results
-
-The recorded `agent-tx` commands omit secret material. To reproduce them, load
-the appropriate seed into `AGENT_SECRET` with a hidden prompt; this keeps it out
-of shell history:
-
-```bash
-read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
-```
 
 ### 1. Allowed transaction — PASSED on-chain
 
@@ -228,10 +216,9 @@ the tables above. `<PROTOCOL>` is a minimal protocol contract deployed fresh
 at run time (any contract with two functions, e.g. `ping` allowlisted and
 `admin_fn` denied - its contract ID is recorded then). `<NEW_PUBKEY_HEX>` is
 the 64-character raw Ed25519 public key of a fresh agent keypair (derive it
-with `cargo run --example agent_pubkey`). Load the corresponding old or new
-secret interactively into `AGENT_SECRET` before each command. Every `(recorded
-at run time)` marker below is a value the executing PR fills in, in both this
-prose and `index.json`.
+with `cargo run --example agent_pubkey`); `<OLD_SECRET>` / `<NEW_SECRET>` are
+the corresponding secrets. Every `(recorded at run time)` marker below is a
+value the executing PR fills in, in both this prose and `index.json`.
 
 ### 6. Agent-key rotation + old-key rejection (pending)
 
@@ -253,22 +240,20 @@ stellar contract invoke --id <GUARD> --network testnet \
 signature verification traps before policy evaluation, so there are no
 `auth_checked` topics - the evidence is the simulation error, not an event:
 
-```bash
-# Hidden prompt keeps the old secret out of shell history.
-read -rsp "Old agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
+```text
 agent-tx transfer --guard <GUARD> --token <TOKEN> --to <RECIPIENT> \
-  --amount 10 --expect-blocked
-# recorded at run time: host signature-trap error output; broadcast: no
+  --amount 10 --agent-secret <OLD_SECRET> --expect-blocked
+(recorded at run time: host signature-trap error output)
+broadcast: no
 ```
 
 3. New key admitted:
 
-```bash
-# Hidden prompt keeps the new secret out of shell history.
-read -rsp "New agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
+```text
 agent-tx transfer --guard <GUARD> --token <TOKEN> --to <RECIPIENT> \
-  --amount 10
-# recorded at run time: submitted hash, ledger, created_at; topics [event_auth_checked, allowed]
+  --amount 10 --agent-secret <NEW_SECRET>
+(recorded at run time: submitted hash, ledger, created_at)
+(recorded at run time: topics [event_auth_checked, allowed])
 ```
 
 4. DMS interplay: `status` after step 3 shows the same `last_heartbeat` as
@@ -292,32 +277,30 @@ the executing PR:
 
 - 7a admit:
 
-```bash
-# Hidden prompt keeps the secret out of shell history.
-read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
-agent-tx invoke --guard <GUARD> --contract <PROTOCOL> --fn ping
-# recorded at run time: submitted hash, ledger, created_at; topics [event_auth_checked, allowed]
+```text
+agent-tx invoke --guard <GUARD> --contract <PROTOCOL> --fn ping \
+  --agent-secret <AGENT_SECRET>
+(recorded at run time: submitted hash, ledger, created_at)
+(recorded at run time: topics [event_auth_checked, allowed])
 ```
 
 - 7b deny (wrong function, same contract):
 
-```bash
-# Hidden prompt keeps the secret out of shell history.
-read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
+```text
 agent-tx invoke --guard <GUARD> --contract <PROTOCOL> --fn admin_fn \
-  --expect-blocked
-# recorded at run time: topics [event_auth_checked, blocked, function_not_allowed]; broadcast: no
+  --agent-secret <AGENT_SECRET> --expect-blocked
+(recorded at run time: topics [event_auth_checked, blocked, function_not_allowed])
+broadcast: no
 ```
 
 - 7c deny (unknown contract - no deployment needed, any address outside
 `assets` and `protocols` exercises the path):
 
-```bash
-# Hidden prompt keeps the secret out of shell history.
-read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
+```text
 agent-tx invoke --guard <GUARD> --contract <UNLISTED> --fn anything \
-  --expect-blocked
-# recorded at run time: topics [event_auth_checked, blocked, protocol_not_allowed]; broadcast: no
+  --agent-secret <AGENT_SECRET> --expect-blocked
+(recorded at run time: topics [event_auth_checked, blocked, protocol_not_allowed])
+broadcast: no
 ```
 
 ### 8. Pause gate (pending)
@@ -327,12 +310,11 @@ entry).
 2. Agent transfer blocked pre-broadcast. Pause is decision-table gate 4, ahead
 of all classification, so no per-call reasoning applies:
 
-```bash
-# Hidden prompt keeps the secret out of shell history.
-read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
+```text
 agent-tx transfer --guard <GUARD> --token <TOKEN> --to <RECIPIENT> \
-  --amount 10 --expect-blocked
-# recorded at run time: topics [event_auth_checked, blocked, paused]; broadcast: no
+  --amount 10 --agent-secret <AGENT_SECRET> --expect-blocked
+(recorded at run time: topics [event_auth_checked, blocked, paused])
+broadcast: no
 ```
 
 3. Admin restores `paused: false` (hash recorded); the same transfer succeeds
@@ -475,44 +457,3 @@ Two notes that matter when these rows are used to triage a live incident:
 The five blocked/emitted events above are the contract's own
 `event_auth_checked` topics — grep the enforced-simulation output for
 `blocked, <reason>` to confirm each.
-
-## Contributing to the proof plan: when a change needs a testnet proof entry
-
-Per [`CONTRIBUTING.md` Coding Standard 6](../../CONTRIBUTING.md#coding-standards) and [`SPEC.md` §11](../../SPEC.md#11-testnet-proof-plan-scenarios-18-five-proven-three-planned), this directory records ground-truth on-chain evidence for contract behavior. To keep enforcement claims backed by real evidence without imposing unnecessary testnet runs on invisible changes, use the following guidelines:
-
-### What requires a testnet proof entry ("user-visible enforcement change")
-
-A change **requires** an on-chain testnet proof entry when it modifies externally observable authorization semantics:
-- **Decision-table changes:** Any change altering what `__check_auth` admits or blocks, or changing the error code, event topics, or diagnostic data emitted on allow or deny.
-- **Storage-layout or key-schema changes:** Changes to storage keys, data types, footprint, or TTL management (these probably require an entry because they alter on-chain state persistence, footprint, or contract upgrade/migration compatibility observable by callers).
-- **Policy/guard rules:** Adding, modifying, or removing policy constraints, guards, or authorization paths.
-
-### What does NOT require a testnet proof entry
-
-A change **does not** require a testnet proof entry when observable contract behavior and state remain identical:
-- **Gas / CPU / memory optimizations:** Internal performance improvements that preserve identical admit/block decisions, storage layouts, and emitted events.
-- **Documentation changes:** Updates to markdown files, doc comments, specs, or diagrams.
-- **Internal refactorings:** Restructuring internal helper functions, code cleanup, or modifying test harnesses and test-only code with zero external behavioral or state impact.
-
-### Summary comparison
-
-| Change category | Testnet proof entry required? | Examples / Notes |
-|---|---|---|
-| Decision-table change | Yes | Altering `__check_auth` admit/deny logic, error discriminants, event topics |
-| Storage-layout change | Probably | Modifying storage key schemas, persistent footprint, TTL policies |
-| Policy rule addition/removal | Yes | Adding new guard rules, allowlists, or authorization evaluation paths |
-| Gas / performance optimization | No | Reducing CPU/instructions while preserving exact input/output and event behavior |
-| Documentation update | No | Spec clarifications, README/diagram improvements, doc comments |
-| Internal refactoring | No | Restructuring helper functions, cleaning up tests, renaming internal variables |
-
-### Evidence bar and recording responsibility
-
-- **Evidence bar:** A complete testnet proof entry requires the on-chain testnet transaction hash (`tx hash`) and the corresponding captured event/diagnostic output (`topics: [event_auth_checked, <outcome>, <reason>]`), formatted consistently with the scenarios in this README and mirrored in [`tests/fixtures/index.json`](index.json). Both files are cross-checked by [`tests/fixtures_index.rs`](../fixtures_index.rs).
-- **Who records it:** The PR author proposing the user-visible enforcement change is responsible for executing the testnet scenario (using `tools/agent-tx` or standard Soroban CLI submission) and submitting the updated proof fixtures with their PR. When live testnet infrastructure or deployment keys are maintainer-managed during release/verification, the contributor provides the reproducible simulation command and rationale in the PR description, and maintainers record the live hashes upon verification.
-
-### Impractical testnet changes (the fallback path)
-
-When a change is enforcement-affecting (changes what `__check_auth` admits or blocks) but is impractical or non-deterministic to demonstrate on public testnet (such as extreme ledger-sequence/timestamp boundary conditions, complex time-warp states, specific host race conditions, or host resource-exhaustion limits):
-1. **Deterministic local test:** Implement a comprehensive unit or host-routed integration test using the Soroban test environment (`Harness` / `GuardScenario` in [`src/integration_tests.rs`](../../src/integration_tests.rs)) that precisely exercises the boundary condition or failure path.
-2. **Written rationale:** Include a clear written rationale in the PR description and proof plan documentation explaining why live testnet reproduction is impractical and how the local test suite conclusively guarantees the invariant.
-

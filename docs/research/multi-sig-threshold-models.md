@@ -1,7 +1,7 @@
 # Multi-Sig Threshold Models Against Soroban Auth Realities
 
-**Issue:** #153 (refinement of #2)  
-**Status:** Design exploration — maintainer sign-off required per branch protection  
+**Issue:** #153 (refinement of #2)
+**Status:** Design exploration — maintainer sign-off required per branch protection
 **Cross-link:** SDK `AgentSigner` interface awaits this decision
 
 ---

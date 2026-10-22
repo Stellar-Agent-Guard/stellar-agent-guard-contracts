@@ -149,35 +149,6 @@ mod event_types {
         pub(super) revision: u64,
     }
 
-    /// Admin policy pause: data `by` (the admin address that acted) plus
-    /// `revision` — the `PolicyRevision` this call produced. The counter is
-    /// incremented only when the call actually flips `paused`, so `revision`
-    /// changes exactly when the effective policy changes (issues #290, #38).
-    #[contractevent]
-    #[derive(Clone)]
-    pub(super) struct EventPaused {
-        pub(super) by: Address,
-        pub(super) revision: u64,
-    }
-
-    /// Admin policy resume: data `by` (the admin address that acted) plus
-    /// `revision` — same counter semantics as [`EventPaused`] (issue #290).
-    #[contractevent]
-    #[derive(Clone)]
-    pub(super) struct EventResumed {
-        pub(super) by: Address,
-        pub(super) revision: u64,
-    }
-
-    /// Admin rolling-window reset: data `by` (the admin address that acted).
-    /// `set_policy` preserves the window across edits (issue #289); this event
-    /// is the audit trail of the *explicit* reset that zeroes it.
-    #[contractevent]
-    #[derive(Clone)]
-    pub(super) struct EventWindowReset {
-        pub(super) by: Address,
-    }
-
     /// Agent key rotation: data `by` (the admin that acted) plus truncated
     /// fingerprints of the outgoing and incoming agent keys, so an auditor can
     /// reconstruct the old→new linkage without carrying full pubkeys (SPEC §9).
@@ -569,7 +540,7 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
 /// single stable `InvalidConfig` error code — deliberately unchanged by
 /// issue #35 so the on-chain error surface (and every consumer matching on
 /// it) stays byte-compatible.
-pub(crate) fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
+fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
     first_failing_rule(env, cfg).map_err(|_| Error::InvalidConfig)
 }
 
@@ -658,26 +629,6 @@ fn key_fingerprint(env: &Env, pubkey: &BytesN<32>) -> BytesN<8> {
     BytesN::from_array(env, &fingerprint)
 }
 
-fn emit_paused(env: &Env, by: &Address) {
-    EventPaused {
-        by: by.clone(),
-        revision: current_revision(env),
-    }
-    .publish(env);
-}
-
-fn emit_resumed(env: &Env, by: &Address) {
-    EventResumed {
-        by: by.clone(),
-        revision: current_revision(env),
-    }
-    .publish(env);
-}
-
-fn emit_window_reset(env: &Env, by: &Address) {
-    EventWindowReset { by: by.clone() }.publish(env);
-}
-
 fn emit_agent_rotated(env: &Env, by: &Address, old: &BytesN<32>, new: &BytesN<32>) {
     EventAgentRotated {
         by: by.clone(),
@@ -761,92 +712,17 @@ mod policy_engine_type {
             }
         }
 
-        /// Installs a new policy. A policy *edit* — any `set_policy` while a
-        /// policy is already installed — **preserves** the rolling window and
-        /// the dead-man-switch clock (issue #289): pausing, tightening, or
-        /// widening a policy no longer hands the agent a fresh budget or a
-        /// fresh grace period. Only a *first* install (no policy stored,
-        /// including an install after `revoke_policy`) seeds an empty window
-        /// and arms the DMS clock at install time (a fresh policy gets full
-        /// grace). Use [`PolicyEngine::reset_window`] to zero the window
-        /// explicitly.
+        /// Installs a new policy. Resets the rolling window and starts the
+        /// dead-man-switch clock at install time (a fresh policy gets full grace).
         pub fn set_policy(env: Env, config: PolicyConfig) {
             let admin = Self::admin_or_panic(&env);
             validate_config(&env, &config).unwrap_or_else(|e| panic_with_error!(&env, e));
-            // Window/DMS semantics (issue #289): only a first install gets a
-            // fresh window and a fresh grace clock. An edit of an installed
-            // policy leaves both untouched — the accumulated spend stays
-            // counted and a DMS-expired account stays expired (the documented
-            // reversal path for expiry is `unfreeze`, not a policy edit).
-            let first_install = !env.storage().persistent().has(&DataKey::Policy);
             persist_set(&env, &DataKey::Policy, &config);
             increment_revision(&env);
-            if first_install {
-                save_ledger(&env, &Ledger::empty(&env));
-                let now = env.ledger().timestamp();
-                persist_set(&env, &DataKey::LastHeartbeat, &now);
-            }
+            save_ledger(&env, &Ledger::empty(&env));
+            let now = env.ledger().timestamp();
+            persist_set(&env, &DataKey::LastHeartbeat, &now);
             emit_policy_set(&env, &admin);
-        }
-
-        /// Explicitly zeroes the rolling spend window (issue #289). Admin-only.
-        ///
-        /// `set_policy` preserves the window across edits, so this is the one
-        /// entry point that hands the agent a fresh budget — reach for it only
-        /// when a reset is actually intended (e.g. after raising `window_cap`
-        /// mid-incident). Idempotent: resetting an already-empty (or absent)
-        /// window is a no-op that still records the admin action. Emits
-        /// `window_reset` carrying `by`. Does not touch the policy, the
-        /// revision counter, or the dead-man-switch clock.
-        pub fn reset_window(env: Env) {
-            let admin = Self::admin_or_panic(&env);
-            env.storage().persistent().remove(&DataKey::Window);
-            emit_window_reset(&env, &admin);
-        }
-
-        /// Policy-level kill switch (issue #290): flips the stored policy's
-        /// `paused` flag **in place** — the rolling window, the dead-man-switch
-        /// clock, and every other field are untouched. Admin-only, idempotent
-        /// (pausing an already-paused account is not an error; the event is
-        /// still emitted so the audit trail records the admin action), and
-        /// requires an installed policy (`NoPolicy` otherwise — with no policy
-        /// the account is default-deny and there is nothing to pause).
-        ///
-        /// Reach for `pause`/`resume` for routine halts and restarts; `freeze`
-        /// is the emergency lever that binds even a policyless account.
-        pub fn pause(env: Env) {
-            Self::set_paused(&env, true);
-        }
-
-        /// Lifts a [`PolicyEngine::pause`]: flips the stored policy's `paused`
-        /// flag back to `false` in place, again without touching the rolling
-        /// window — resuming does not restore a spent budget, it only restores
-        /// admissibility. Same admin/idempotency/`NoPolicy` rules as `pause`.
-        pub fn resume(env: Env) {
-            Self::set_paused(&env, false);
-        }
-
-        /// Shared implementation of [`PolicyEngine::pause`] /
-        /// [`PolicyEngine::resume`] (issues #289/#290): flip `paused` on the
-        /// stored config, nothing else. The revision counter advances only when
-        /// the flag actually changes, keeping the §9 join-key invariant —
-        /// same revision ⟺ same effective policy — while a redundant
-        /// double-pause still emits its event (idempotent-safe).
-        fn set_paused(env: &Env, paused: bool) {
-            let admin = Self::admin_or_panic(env);
-            let Some(mut cfg) = persist_get::<PolicyConfig>(env, &DataKey::Policy) else {
-                panic_with_error!(env, Error::NoPolicy);
-            };
-            if cfg.paused != paused {
-                cfg.paused = paused;
-                persist_set(env, &DataKey::Policy, &cfg);
-                increment_revision(env);
-            }
-            if paused {
-                emit_paused(env, &admin);
-            } else {
-                emit_resumed(env, &admin);
-            }
         }
 
         /// Removes the policy and window → immediate default-deny.
@@ -873,6 +749,42 @@ mod policy_engine_type {
                 .instance()
                 .set(&DataKey::AgentPubkey, &new_pubkey);
             emit_agent_rotated(&env, &admin, &old_pubkey, &new_pubkey);
+        }
+
+        /// Adds a recipient to the recipient allowlist of the current policy.
+        pub fn add_recipient(env: Env, recipient: Address) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            if !contains_addr(&cfg.recipients, &recipient) {
+                cfg.recipients.push_back(recipient);
+            }
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_policy_set(&env, &admin);
+        }
+
+        /// Removes a recipient from the recipient allowlist of the current policy.
+        pub fn remove_recipient(env: Env, recipient: Address) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            let mut new_recipients = soroban_sdk::Vec::new(&env);
+            for i in 0..cfg.recipients.len() {
+                if let Some(addr) = cfg.recipients.get(i) {
+                    if addr != recipient {
+                        new_recipients.push_back(addr);
+                    }
+                }
+            }
+            cfg.recipients = new_recipients;
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_policy_set(&env, &admin);
         }
 
         // ── Admin rotation (two-step handover, SPEC §7.2) ───────────────────────────
@@ -1006,6 +918,16 @@ mod policy_engine_type {
         }
 
         // ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ─
+
+        #[allow(clippy::must_use_candidate)] // public read surface
+        pub fn admin(env: Env) -> Option<Address> {
+            env.storage().instance().get(&DataKey::Admin)
+        }
+
+        #[allow(clippy::must_use_candidate)] // public read surface
+        pub fn agent_pubkey(env: Env) -> Option<BytesN<32>> {
+            env.storage().instance().get(&DataKey::AgentPubkey)
+        }
 
         #[allow(clippy::must_use_candidate)] // public read surface
         pub fn policy(env: Env) -> Option<PolicyConfig> {
@@ -1405,125 +1327,4 @@ pub mod testutils {
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};
     pub use soroban_sdk::{vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Val, Vec};
-    fn has_exact_scval_fields(value: &soroban_sdk::xdr::ScVal, expected: &[&str]) -> bool {
-        use soroban_sdk::xdr::ScVal;
-
-        let ScVal::Map(Some(entries)) = value else {
-            return false;
-        };
-        if entries.len() != expected.len() {
-            return false;
-        }
-        let mut previous_key: Option<alloc::string::String> = None;
-        for entry in entries.iter() {
-            let ScVal::Symbol(symbol) = &entry.key else {
-                return false;
-            };
-            let Ok(key) = symbol.to_utf8_string() else {
-                return false;
-            };
-            if previous_key
-                .as_deref()
-                .is_some_and(|previous| previous >= key.as_str())
-                || !expected.contains(&key.as_str())
-            {
-                return false;
-            }
-            previous_key = Some(key);
-        }
-        expected.iter().all(|field| {
-            entries.iter().any(|entry| {
-                matches!(
-                    &entry.key,
-                    ScVal::Symbol(symbol)
-                        if symbol.to_utf8_string().is_ok_and(|key| key == *field)
-                )
-            })
-        })
-    }
-
-    fn scval_field<'a>(
-        value: &'a soroban_sdk::xdr::ScVal,
-        field: &str,
-    ) -> Option<&'a soroban_sdk::xdr::ScVal> {
-        use soroban_sdk::xdr::ScVal;
-
-        let ScVal::Map(Some(entries)) = value else {
-            return None;
-        };
-        entries.iter().find_map(|entry| match &entry.key {
-            ScVal::Symbol(symbol) if symbol.to_utf8_string().is_ok_and(|key| key == field) => {
-                Some(&entry.val)
-            }
-            _ => None,
-        })
-    }
-
-    fn policy_config_scval_has_safe_struct_shape(value: &soroban_sdk::xdr::ScVal) -> bool {
-        use soroban_sdk::xdr::ScVal;
-
-        const POLICY_FIELDS: &[&str] = &[
-            "per_tx_cap",
-            "window_secs",
-            "window_cap",
-            "assets",
-            "asset_caps",
-            "protocols",
-            "recipients",
-            "recipient_window_caps",
-            "blocked_recipients",
-            "allow_any_recipient",
-            "active_from",
-            "active_until",
-            "paused",
-            "dms_grace_secs",
-            "protocol_calls_per_window",
-        ];
-        if !has_exact_scval_fields(value, POLICY_FIELDS) {
-            return false;
-        }
-        let Some(ScVal::Vec(Some(asset_caps))) = scval_field(value, "asset_caps") else {
-            return false;
-        };
-        if !asset_caps
-            .iter()
-            .all(|cap| has_exact_scval_fields(cap, &["asset", "per_tx_cap"]))
-        {
-            return false;
-        }
-        let Some(ScVal::Vec(Some(protocols))) = scval_field(value, "protocols") else {
-            return false;
-        };
-        if !protocols
-            .iter()
-            .all(|rule| has_exact_scval_fields(rule, &["contract", "fns"]))
-        {
-            return false;
-        }
-        let Some(ScVal::Vec(Some(recipient_caps))) = scval_field(value, "recipient_window_caps")
-        else {
-            return false;
-        };
-        recipient_caps
-            .iter()
-            .all(|cap| has_exact_scval_fields(cap, &["recipient", "cap"]))
-    }
-    /// Decode and validate a host-provided policy `ScVal` without panicking.
-    ///
-    /// Conversion failures use the same stable error as policy validation.
-    /// Call from a contract context so address self-entry checks match production.
-    ///
-    /// # Errors
-    /// Returns `Error::InvalidConfig` when `ScVal` conversion or policy validation fails.
-    pub fn validate_policy_config_scval(
-        env: &Env,
-        scval: &soroban_sdk::xdr::ScVal,
-    ) -> Result<(), Error> {
-        if !policy_config_scval_has_safe_struct_shape(scval) {
-            return Err(Error::InvalidConfig);
-        }
-        let value = Val::try_from_val(env, scval).map_err(|_| Error::InvalidConfig)?;
-        let config = PolicyConfig::try_from_val(env, &value).map_err(|_| Error::InvalidConfig)?;
-        super::validate_config(env, &config)
-    }
 }
