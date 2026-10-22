@@ -330,6 +330,35 @@ impl Harness {
 // ── Scenarios ────────────────────────────────────────────────────────────
 
 #[test]
+fn test_admin_and_agent_pubkey_reads() {
+    let env = Env::default();
+    let guard = env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&env, &guard);
+
+    // Before initialization
+    assert_eq!(client.admin(), None);
+    assert_eq!(client.agent_pubkey(), None);
+
+    // After initialization
+    env.mock_all_auths();
+    let admin = env.register(MockAdmin, ());
+    let agent_key = SigningKey::from_bytes(&[7u8; 32]);
+    let pk = BytesN::from_array(&env, &agent_key.verifying_key().to_bytes());
+    client.initialize(&admin, &pk);
+
+    assert_eq!(client.admin(), Some(admin.clone()));
+    assert_eq!(client.agent_pubkey(), Some(pk));
+
+    // After agent key rotation
+    let new_agent_key = SigningKey::from_bytes(&[11u8; 32]);
+    let new_pk = BytesN::from_array(&env, &new_agent_key.verifying_key().to_bytes());
+    client.rotate_agent_key(&new_pk);
+
+    assert_eq!(client.admin(), Some(admin));
+    assert_eq!(client.agent_pubkey(), Some(new_pk));
+}
+
+#[test]
 fn lifecycle_initialize_once_then_status() {
     let h = Harness::new();
     // Second initialize must fail even under mock auth.
@@ -643,4 +672,106 @@ fn revoke_policy_is_instant_default_deny() {
     h.env.mock_all_auths();
     h.revoke_policy();
     h.transfer_expect_blocked(&recv, 5);
+}
+
+#[test]
+fn test_add_and_remove_recipient_patch() {
+    let mut h = Harness::new();
+    let recv1 = h.recv.clone();
+    let recv2 = h.other.clone();
+    let recv3 = Address::generate(&h.env);
+
+    h.install_policy(&h.base_policy()); // base policy has recv1
+    h.set_time(1_000);
+
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // Initial state check
+    let pol = client.policy().unwrap();
+    assert_eq!(pol.recipients.len(), 1);
+    assert_eq!(pol.recipients.get(0).unwrap(), recv1);
+
+    // recv2 is blocked initially
+    h.transfer_expect_blocked(&recv2, 10);
+
+    // Patch: add recv2
+    h.env.mock_all_auths();
+    client.add_recipient(&recv2);
+
+    let pol_updated = client.policy().unwrap();
+    assert_eq!(pol_updated.recipients.len(), 2);
+    assert_eq!(pol_updated.recipients.get(0).unwrap(), recv1);
+    assert_eq!(pol_updated.recipients.get(1).unwrap(), recv2);
+
+    // Now recv2 transfer succeeds
+    h.transfer(&recv2, 10);
+
+    // Patch duplicate: add recv2 again (idempotent, no duplicates created)
+    h.env.mock_all_auths();
+    let rev_before = client.status().policy_revision;
+    client.add_recipient(&recv2);
+    let pol_dup = client.policy().unwrap();
+    assert_eq!(pol_dup.recipients.len(), 2);
+    assert_eq!(client.status().policy_revision, rev_before + 1);
+
+    // Patch: remove recv1
+    h.env.mock_all_auths();
+    client.remove_recipient(&recv1);
+
+    let pol_after_remove = client.policy().unwrap();
+    assert_eq!(pol_after_remove.recipients.len(), 1);
+    assert_eq!(pol_after_remove.recipients.get(0).unwrap(), recv2);
+
+    // recv1 is now blocked
+    h.transfer_expect_blocked(&recv1, 10);
+    // recv2 still succeeds
+    h.transfer(&recv2, 10);
+
+    // Patch non-existent recipient removal (idempotent)
+    h.env.mock_all_auths();
+    client.remove_recipient(&recv3);
+    let pol_nonexist = client.policy().unwrap();
+    assert_eq!(pol_nonexist.recipients.len(), 1);
+
+    // Patch: remove remaining recipient recv2 -> empty list
+    h.env.mock_all_auths();
+    client.remove_recipient(&recv2);
+    let pol_empty = client.policy().unwrap();
+    assert_eq!(pol_empty.recipients.len(), 0);
+
+    // With empty recipients list and allow_any_recipient=false, all transfers blocked
+    h.transfer_expect_blocked(&recv2, 10);
+}
+
+#[test]
+fn test_policy_patch_without_policy_panics_and_leaves_state_unchanged() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let new_recv = Address::generate(&h.env);
+
+    // Prior to set_policy, policy is None
+    assert!(client.policy().is_none());
+
+    // Calling add_recipient must panic with NoPolicy
+    let res_add = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.add_recipient(&new_recv);
+    }));
+    assert!(res_add.is_err(), "add_recipient without policy must fail");
+    assert!(
+        client.policy().is_none(),
+        "policy must remain None after failed patch"
+    );
+
+    // Calling remove_recipient must panic with NoPolicy
+    let res_remove = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.remove_recipient(&new_recv);
+    }));
+    assert!(
+        res_remove.is_err(),
+        "remove_recipient without policy must fail"
+    );
+    assert!(
+        client.policy().is_none(),
+        "policy must remain None after failed patch"
+    );
 }

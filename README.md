@@ -160,6 +160,23 @@ Other validation rules (SPEC §8): negative caps, `window_cap > 0` with `window_
 duplicate assets/recipients/protocol contracts, empty per-protocol fn lists, or the
 self-address in `assets`/`protocols` all fail with `InvalidConfig`.
 
+### `add_recipient`
+```rust
+pub fn add_recipient(env: Env, recipient: Address)
+```
+Admin-only (`require_auth(Admin)`). Appends `recipient` to the recipient allowlist of the
+current policy if not already present. Validates the updated policy configuration before
+atomically saving it and incrementing the policy revision. Fails with `NoPolicy` if no
+policy is set.
+
+### `remove_recipient`
+```rust
+pub fn remove_recipient(env: Env, recipient: Address)
+```
+Admin-only (`require_auth(Admin)`). Removes `recipient` from the recipient allowlist of the
+current policy. Validates the updated policy configuration before atomically saving it
+and incrementing the policy revision. Fails with `NoPolicy` if no policy is set.
+
 ### `revoke_policy`
 ```rust
 pub fn revoke_policy(env: Env)
@@ -212,6 +229,18 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
   --network testnet --source guard_admin --send=yes -- unfreeze
 # → ✅ Transaction submitted successfully!  tx=dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5
 ```
+
+### `admin` (read)
+```rust
+pub fn admin(env: Env) -> Option<Address>
+```
+No auth. Returns the registered policy admin address, or `None` if not initialized.
+
+### `agent_pubkey` (read)
+```rust
+pub fn agent_pubkey(env: Env) -> Option<BytesN<32>>
+```
+No auth. Returns the registered agent Ed25519 public key (32 bytes), or `None` if not initialized.
 
 ### `policy` (read)
 ```rust

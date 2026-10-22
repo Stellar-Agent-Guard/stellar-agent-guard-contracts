@@ -304,6 +304,12 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 pub fn set_policy(env: Env, config: PolicyConfig)
     // require_auth(Admin). Validates config (§8). Replaces Policy and resets
     // Window (fresh window on every policy change — documented, admin-attested).
+pub fn add_recipient(env: Env, recipient: Address)
+    // require_auth(Admin). Appends recipient to Policy.recipients if not already present.
+    // Validates config (§8) before saving.
+pub fn remove_recipient(env: Env, recipient: Address)
+    // require_auth(Admin). Removes recipient from Policy.recipients if present.
+    // Validates config (§8) before saving.
 pub fn revoke_policy(env: Env)
     // require_auth(Admin). Removes Policy and Window -> default-deny immediately.
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
@@ -319,6 +325,8 @@ pub fn freeze(env: Env)      // require_auth(Admin); sets AdminFrozen = true
 pub fn unfreeze(env: Env)    // require_auth(Admin); clears AdminFrozen, LastHeartbeat = now
 
 // ── Read / advisory (no auth — safe reads only, nothing confidential) ─────
+pub fn admin(env: Env) -> Option<Address>              // registered admin address
+pub fn agent_pubkey(env: Env) -> Option<BytesN<32>>    // registered agent Ed25519 public key
 pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
 pub fn status(env: Env) -> Status                     // frozen? admin_frozen? last_heartbeat? now?
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult

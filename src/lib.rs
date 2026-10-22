@@ -300,6 +300,42 @@ impl PolicyEngine {
         emit_agent_rotated(&env, &admin);
     }
 
+    /// Adds a recipient to the recipient allowlist of the current policy.
+    pub fn add_recipient(env: Env, recipient: Address) {
+        let admin = Self::admin_or_panic(&env);
+        let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+            panic_with_error!(&env, Error::NoPolicy);
+        };
+        if !contains_addr(&cfg.recipients, &recipient) {
+            cfg.recipients.push_back(recipient);
+        }
+        validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+        persist_set(&env, &DataKey::Policy, &cfg);
+        increment_revision(&env);
+        emit_policy_set(&env, &admin);
+    }
+
+    /// Removes a recipient from the recipient allowlist of the current policy.
+    pub fn remove_recipient(env: Env, recipient: Address) {
+        let admin = Self::admin_or_panic(&env);
+        let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+            panic_with_error!(&env, Error::NoPolicy);
+        };
+        let mut new_recipients = soroban_sdk::Vec::new(&env);
+        for i in 0..cfg.recipients.len() {
+            if let Some(addr) = cfg.recipients.get(i) {
+                if addr != recipient {
+                    new_recipients.push_back(addr);
+                }
+            }
+        }
+        cfg.recipients = new_recipients;
+        validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+        persist_set(&env, &DataKey::Policy, &cfg);
+        increment_revision(&env);
+        emit_policy_set(&env, &admin);
+    }
+
     // ── Dead-man switch / freeze (SPEC §5) ───────────────────────────────
 
     /// Records a heartbeat. Routes through `__check_auth` (self-call): the
@@ -338,6 +374,16 @@ impl PolicyEngine {
     }
 
     // ── Read / advisory (no auth — safe reads only, nothing confidential) ─
+
+    #[allow(clippy::must_use_candidate)] // public read surface
+    pub fn admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    #[allow(clippy::must_use_candidate)] // public read surface
+    pub fn agent_pubkey(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&DataKey::AgentPubkey)
+    }
 
     #[allow(clippy::must_use_candidate)] // public read surface
     pub fn policy(env: Env) -> Option<PolicyConfig> {
