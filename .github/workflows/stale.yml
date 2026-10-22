@@ -26,4 +26,3 @@ jobs:
           remove-stale-when-updated: true
           exempt-pr-labels: 'complexity: large'
           operations-per-run: 30
-

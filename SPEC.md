@@ -6,10 +6,6 @@ smart-wallet policy contract, every public signature with auth-placement reasoni
 model (per-transaction cap, genuinely rolling window cap, recipient + protocol/function
 allowlists, pause, dead-man switch), and the exact enforcement scope.
 
-Documentation mapping: this specification is the **normative** source of truth for contract behavior.
-For corresponding explanatory guides, tutorials, and concept walkthroughs on the GitBook documentation
-site, see the [SPEC ↔ GitBook Cross-Reference Map](docs/README.md#spec--gitbook-cross-reference-map).
-
 Sibling context: this project builds on the research and reasoning of `agent-spend-policy` (a
 related but distinct project). Mechanism conclusions are shared; code, policy math (rolling, not
 fixed-bucket), and the product split (contracts / SDK / dashboard) are this project's own.
@@ -139,7 +135,7 @@ TTL on every write; see §9.5).
 | `Window` | `WindowState` | persistent | rolling spend ledger for asset transfers (global + per-recipient) |
 | `LastHeartbeat` | `u64` | persistent | unix seconds of last agent heartbeat (0 = never) |
 | `AdminFrozen` | `bool` | persistent | admin-initiated freeze flag |
-| `PolicyRevision` | `u64` | persistent | policy sequence number; incremented on every `set_policy`/`revoke_policy` and on a `pause()`/`resume()` that actually flips `paused` (issues #289/#290), stamped into `policy_set`/`policy_revoked`/`paused`/`resumed`/`auth_checked` events (§9, issue #38) |
+| `PolicyRevision` | `u64` | persistent | policy sequence number; incremented on every `set_policy`/`revoke_policy`, stamped into `policy_set`/`policy_revoked`/`auth_checked` events (§9, issue #38) |
 
 ```rust
 #[contracttype]
@@ -462,15 +458,6 @@ Note the dead-man auto-freeze (`#2`) applies even to `heartbeat` from the regist
 heartbeat arriving after the grace window expired cannot revive the account — revival is the
 admin's `unfreeze` (§7). This is the precise freeze/reversal boundary. The dead-man gate is evaluated against the pre-transaction heartbeat for every context in the transaction, including the heartbeat self-call.
 
-**One pause flag, two entry points (issues #289/#290).** Rule #4 reads `paused` from the
-stored `PolicyConfig` — there is no second pause flag anywhere in storage. The flag can be
-flipped two ways: an admin `set_policy` carrying `paused: true|false` (a policy edit; §7 —
-the window and the DMS clock are preserved), or the dedicated `pause()` / `resume()` entry
-points (§7), which flip the flag **in place** on the stored config without rewriting the rest
-of the policy, without touching the rolling window, and without touching the DMS clock. The
-emergency admin brake remains `AdminFrozen` (rule #1): `freeze` binds even a policyless
-account, while `paused` exists only while a policy is installed.
-
 ### 4.1 Gate cost order (measured)
 
 After the row 0 context bound, the decision table's policy gates remain ordered **semantically
@@ -577,7 +564,8 @@ gate can continue to deny authorization.
   - **No API change:** `unfreeze`'s signature, storage writes, and authorization are unchanged;
     this is purely additive event data (see §9).
 - **Executable specification.** `dms_timeline_edge_matrix` (`src/integration_tests.rs`) is the
-  table-driven walk of rule #2 andis normative for its edges: the first install arms the clock at `LastHeartbeat = now` (a later policy edit leaves the window and the clock untouched — issues #289/#290; `reset_window`/`unfreeze` are the explicit levers), the 80% warn band is reached while spend is still admissible (`> grace`,
+  table-driven walk of rule #2 and is normative for its edges: install arms the clock at
+  `LastHeartbeat = now`, the 80% warn band is reached while spend is still admissible (`> grace`,
   not `>= grace`), expiry blocks the transfer *and* the heartbeat, a blocked heartbeat leaves the
   clock untouched, and `unfreeze` re-arms it so the new window expires on its own terms. It also
   pins the two degenerate encodings: `dms_grace_secs == 0` (switch disabled — no amount of silence
@@ -595,11 +583,11 @@ The guard enforces several account-level and per-context gates (§4). When an ac
 | Gate / Reason | Cleared by `unfreeze`? | Cleared by `set_policy`? | Cleared by time / neither? |
 |---|---|---|---|
 | **Admin freeze** (`AdminFrozen`, rule #1) | **Yes** (`AdminFrozen = false`) | **No** (leaves `AdminFrozen` unchanged) | No |
-| **Dead-man switch** (`HeartbeatExpired`, rule #2) | **Yes** (stamps `LastHeartbeat = now`) | **Only on first install** (`set_policy` stamps `LastHeartbeat = now` and starts fresh grace when no policy is stored — including after `revoke_policy`; a policy *edit* leaves the clock untouched, issue #289) | No (time progression can never unfreeze silence) |
+| **Dead-man switch** (`HeartbeatExpired`, rule #2) | **Yes** (stamps `LastHeartbeat = now`) | **Yes** (stamps `LastHeartbeat = now` and starts fresh grace) | No (time progression can never unfreeze silence) |
 | **No policy** (`NoPolicy`, rule #3) | **No** | **Yes** (installs a valid policy) | No |
-| **Paused** (`Paused`, rule #4) | **No** | **Yes** (installs a policy with `paused: false`; or call `resume()` (§7), which flips the flag in place without touching the window) | No |
+| **Paused** (`Paused`, rule #4) | **No** | **Yes** (installs a policy with `paused: false`) | No |
 | **Outside active window** (`OutsideActiveWindow`, rule #5) | **No** | **Yes** (installs a policy with renewed `active_until` or `0`) | Before `active_from`: cleared naturally when ledger time advances into `[active_from, active_until]`. After `active_until`: **neither** time nor `unfreeze` can clear it; only `set_policy` revives the account. |
-| **Window cap exceeded** (`WindowCapExceeded`, rule #7d) | **No** | **Only explicitly** — `set_policy` preserves the window across edits (issue #289); the admin-attested zeroing is `reset_window()` (§7) | **Yes** (rolling window entries expire naturally as time advances past `window_secs`) |
+| **Window cap exceeded** (`WindowCapExceeded`, rule #7d) | **No** | **Yes** (resets window ledger to empty) | **Yes** (rolling window entries expire naturally as time advances past `window_secs`) |
 | **Context classification rules** (unlisted asset/recipient, per-tx cap, protocol/function) | **No** | **Yes** (if policy configuration updates allowlists or caps) | No |
 
 **Key asymmetry — dead-man switch vs. active window:**
@@ -824,8 +812,6 @@ Rules applied (in order; the denylist is checked before the allowlist/escape hat
 3. **Per-tx cap:** resolve the effective per-tx cap for the transfer's asset — the matching
    `asset_caps` entry's `per_tx_cap` when non-zero, otherwise the global `per_tx_cap`. If the
    effective cap is non-zero, `amount <= effective_per_tx_cap` or block `PerTxCapExceeded`.
-   The comparison is exclusive-of-blocking (i.e. the cap value itself is permitted:
-   `amount == effective_per_tx_cap` is admitted; only `amount > effective_per_tx_cap` is blocked).
 4. **Rolling window (§3.1):**
    - Global window: if `window_cap != 0`, prune expired entries, then
      `total + amount <= window_cap` or block `WindowCapExceeded`.
@@ -954,7 +940,7 @@ To close the CheckResult/Error duality gap, every contract `Error` variant maps 
 
 | Error Code | Error Variant | Reason Symbol (`CheckResult::Blocked`) | Reachable via `check()`? | Rationale for Unreachable Direction |
 |---|---|---|---|---|
-| 1 | `Unauthorized` | `unauthorized` | No | **Reserved, never emitted** (issue #292): a bad agent signature is rejected by `ed25519_verify`'s host trap (`InvokeError::Abort`) before any policy state is read, and admin ops enforce `require_auth(Admin)` at the host level, so no code path returns #1. `Unauthorized` stays in the ABI error enum (code 1) so the published table and off-chain `REASON_CODES` mappings remain wire-stable. |
+| 1 | `Unauthorized` | `unauthorized` | No | Auth-path only: `ed25519_verify` traps the host frame (`InvokeError::Abort`) on invalid signature, and admin ops enforce `require_auth(Admin)`. `Unauthorized` is retained in the ABI error enum for protocol completeness. |
 | 2 | `AlreadyInitialized` | `already_initialized` | No | Admin lifecycle op: initialize is run once during deployment setup, not a check parameter. |
 | 3 | `NotInitialized` | `not_initialized` | Yes | Pre-activation guard check. |
 | 4 | `InvalidConfig` | `invalid_config` | No | Admin op: `set_policy` validation error; policies are not passed into `check()`. |
@@ -982,27 +968,13 @@ To close the CheckResult/Error duality gap, every contract `Error` variant maps 
 
 // ── Policy management (admin only) ────────────────────────────────────────
 pub fn set_policy(env: Env, config: PolicyConfig)
-    // require_auth(Admin). Validates config (§8). Replaces Policy. The
-    // rolling window and the dead-man-switch clock are PRESERVED across
-    // edits of an installed policy (issue #289): pausing or tightening a
-    // policy no longer hands the agent a fresh budget or a fresh grace
-    // period. A first install (no policy stored — including an install
-    // after revoke_policy) seeds an empty Window and stamps
-    // LastHeartbeat = now (a fresh policy gets full grace). The explicit
-    // window zeroing is reset_window (below).
-pub fn reset_window(env: Env)
-    // require_auth(Admin). Removes the Window entry — the explicit,
-    // admin-attested zeroing set_policy no longer performs implicitly
-    // (issue #289). Idempotent (an absent/empty window is a no-op that
-    // still records the admin action); does not touch Policy,
-    // PolicyRevision, or LastHeartbeat. Emits window_reset { by }.
+    // require_auth(Admin). Validates config (§8). Replaces Policy and resets
+    // Window (fresh window on every policy change — documented, admin-attested).
 pub fn revoke_policy(env: Env)
     // require_auth(Admin). Removes Policy and Window -> default-deny immediately.
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
     // require_auth(Admin). Re-binds AgentPubkey. Admin never gains fund-moving
-    // power; it can only replace the key the account will authenticate. For the
-    // operational recovery runbook (lost/compromised keys and DMS unfreeze
-    // interaction), see docs/key-rotation.md.
+    // power; it can only replace the key the account will authenticate.
 pub fn propose_admin_rotation(env: Env, new_admin: Address)
     // require_auth(Admin). Stores PendingAdmin; the current admin stays
     // authoritative until confirmation. Self-proposal -> InvalidConfig.
@@ -1014,18 +986,6 @@ pub fn confirm_admin_rotation(env: Env)
 pub fn cancel_admin_rotation(env: Env)
     // require_auth(Admin). Clears PendingAdmin. No pending rotation ->
     // NoPendingAdmin.
-pub fn pause(env: Env)
-    // require_auth(Admin). Flips the stored PolicyConfig.paused to true IN
-    // PLACE (issue #290): the rolling window, the DMS clock, and every other
-    // field are untouched. Idempotent (pausing a paused account is not an
-    // error; the event still records the admin action). NoPolicy when no
-    // policy is installed. Emits paused { by, revision }; PolicyRevision
-    // advances only when the flag actually flips, so same revision <=> same
-    // effective policy (§9).
-pub fn resume(env: Env)
-    // require_auth(Admin). Mirror of pause: sets paused = false in place,
-    // again preserving the window — resuming restores admissibility, not
-    // budget. Same idempotency/NoPolicy rules. Emits resumed { by, revision }.
 
 // ── Dead-man switch (see §5) ──────────────────────────────────────────────
 pub fn heartbeat(env: Env)
@@ -1137,9 +1097,6 @@ pub struct CheckDetail {
 
 #[contracterror] #[repr(u32)]
 pub enum Error {            // values stable; see tests/fixtures
-    // #1 `Unauthorized` is RESERVED and never emitted (issue #292): bad agent
-    // signatures die in the ed25519_verify host trap (§4.0/§10.2) and admin
-    // ops fail at require_auth — see §7.1 row 1. Do not add a check returning it.
     Unauthorized = 1, AlreadyInitialized = 2, NotInitialized = 3,
     InvalidConfig = 4, InvalidAmount = 5,
     NoPendingAdmin = 6,
@@ -1370,19 +1327,14 @@ filtering by the SDK listener.
 | `frozen` | (none) | `by: Address` | admin freeze |
 | `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
 | `policy_set` / `policy_revoked` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced | admin policy changes |
-| `paused` / `resumed` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced; the counter advances only when the call actually flips `paused`, so a redundant double-pause emits the event with an unchanged revision | admin `pause()` / `resume()` (issues #289/#290) |
-| `window_reset` | (none) | `by: Address` — the admin that explicitly zeroed the rolling window (`set_policy` preserves it across edits, issue #289) | admin `reset_window()` (issue #289) |
 | `agent_rotated` | (none) | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
 | `event_window_merged` | `ledger_kind: Symbol` (`global_spend`, `recipient_spend`, `protocol_calls`) | `(merged_ts: u64, merged_value: i128)` â€” retained newer timestamp and merged spend amount or call count | successful admission engages the 8192-entry backstop |
 
 **Policy revision join key (issue #38).** `PolicyRevision` is a persistent
 instance-stored counter (`DataKey::PolicyRevision`, §3) incremented by every
-`set_policy` and `revoke_policy`, and by a `pause()` / `resume()` that
-actually flips the `paused` flag (a redundant pause leaves the counter
-untouched; issues #289/#290) — starting at 1 after the first `set_policy`
+`set_policy` and `revoke_policy` — starting at 1 after the first `set_policy`
 and never reset by a revoke. `status()` exposes it as `policy_revision`, and
-the `policy_set`, `policy_revoked`, `paused`, `resumed`, and `auth_checked`
-events stamp it as
+the `policy_set`, `policy_revoked`, and `auth_checked` events stamp it as
 additive `revision` data. Telemetry consumers can therefore join "which policy
 was in force when this transfer was admitted" on the counter instead of
 wall-clock joins, which are wrong the instant an admin makes two `set_policy`
@@ -1704,27 +1656,3 @@ window invariant, auth-context parsing, signature verification, freeze/reversal,
 deny. Gates: `cargo test` green, `cargo clippy --all-targets --all-features` clean with
 `warnings`/`clippy::all`/`clippy::pedantic` deny, `cargo fmt --check` clean, CI (`ci` job) green
 on `main`.
-
-### 11.1 Testnet-proof criteria and fallback rationale
-
-Per [`CONTRIBUTING.md` Coding Standard 6](CONTRIBUTING.md#coding-standards) and [`tests/fixtures/README.md`](tests/fixtures/README.md):
-
-1. **User-visible enforcement changes (testnet proof entry required):**
-   - Alterations to the decision table (SPEC §§4, 6) affecting what `__check_auth` admits or blocks, or changing error codes/events emitted on allow or deny.
-   - Storage-layout, footprint, or key-schema changes affecting on-chain persistence, footprint, or contract upgrade/migration compatibility observable by callers.
-   - Adding, modifying, or removing policy/guard rules or authorization checks.
-
-2. **Changes not user-visible (no testnet proof entry required):**
-   - Pure internal gas/CPU/memory optimizations that preserve identical admit/deny decisions, storage layout, and events.
-   - Documentation, comments, or specification formatting updates.
-   - Refactorings of internal helpers, test harnesses, or test-only assertions.
-
-3. **Evidence bar & responsibility:**
-   - A valid proof entry requires an on-chain testnet transaction hash (`tx hash`) and the emitted event output (`topics: [event_auth_checked, <outcome>, <reason>]`), structured per [`tests/fixtures/README.md`](tests/fixtures/README.md) and mirrored in [`tests/fixtures/index.json`](tests/fixtures/index.json).
-   - The PR contributor proposing the change is responsible for capturing and recording the testnet proof.
-
-4. **Impractical testnet scenarios (fallback path):**
-   - If an enforcement change is impractical to demonstrate on live public testnet (e.g. extreme ledger-sequence/timestamp edge cases, complex multi-ledger rollbacks, or host resource exhaustion):
-     - The change must provide a deterministic unit/integration test in the Soroban test environment ([`src/integration_tests.rs`](src/integration_tests.rs)) covering the exact enforcement path.
-     - The PR description and proof documentation must include a written rationale explaining why testnet demonstration is impractical and how the deterministic test suite validates the invariant.
-

@@ -1,7 +1,7 @@
 # Verifiable Off-Chain Policy Attestation
 
-**Issue:** #151  
-**Status:** Design exploration — no code until decision recorded  
+**Issue:** #151
+**Status:** Design exploration — no code until decision recorded
 **Linked:** SPEC §1.1 (CAP-71 note), hash-read issue (prerequisite)
 
 ---
