@@ -1,6 +1,6 @@
 # Summary
 
-* [About the documentation site](README.md)
+* [Documentation Guide & SPEC Cross-Reference](README.md)
 * [Introduction](introduction.md)
 * [Installation](installation.md)
 * [Concepts](concepts/)

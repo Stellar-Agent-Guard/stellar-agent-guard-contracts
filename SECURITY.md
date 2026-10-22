@@ -232,8 +232,8 @@ verbatim live capture and the rejection classes — is
 [`docs/functions/check-auth.md`](docs/functions/check-auth.md#what-an-operator-sees-when-this-rejects-issue-425).
 The reason-symbol vocabulary is [docs/reason-glossary.md](docs/reason-glossary.md);
 the reversal procedure for a frozen account — including the two-gate case where
-`unfreeze` alone is not enough — is SPEC §5.2 and the incident variant of
-[`docs/key-rotation.md`](docs/key-rotation.md#incident-variant-suspected-agent-key-leak).
+`unfreeze` alone is not enough — is SPEC §5.2 and the recovery runbook / incident
+variant of [`docs/key-rotation.md`](docs/key-rotation.md#incident-variant-suspected-agent-key-leak).
 `tools/agent-tx preflight --secret …` is the enforced pre-broadcast path (exit
 `0` admitted, `1` blocked, `2` indeterminate) and it never submits.
 

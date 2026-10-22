@@ -6,24 +6,38 @@ We welcome contributions. Here's how to get started.
 
 ## Development setup
 
+The canonical version of this section — with the full annotated gate — is
+[CONTRIBUTING.md](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/CONTRIBUTING.md#development-setup).
+These are the commands CI runs, in CI's order:
+
 ```bash
 # Clone the repo
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
-# Run tests (33 unit + integration tests, no network needed)
-cargo test
-
-# Lint (clippy all + pedantic are denied via [lints.clippy])
-cargo clippy --all-targets --all-features
-
 # Format check
 cargo fmt --check
+
+# Lint. `-D warnings` is what makes this a gate (CI fails on warnings)
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Run tests (224 unit + integration tests, no network needed)
+cargo test
+
+# Public API docs, warnings denied
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
 # Build the contract WASM (Soroban 27 targets wasm32v1-none)
 cargo build --release --target wasm32v1-none
 
-# Build the agent-tx submission helper
+# README claim audit + docs link check
+scripts/verify-readme.sh
+scripts/verify-docs-reachability.sh
+
+# tools/agent-tx is a separate cargo project: fmt, clippy, test, build
+cargo fmt --manifest-path tools/agent-tx/Cargo.toml --check
+cargo clippy --manifest-path tools/agent-tx/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path tools/agent-tx/Cargo.toml
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
 
@@ -39,7 +53,24 @@ cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 
 5. **Doc comments on every public function** stating what it authorizes or changes, and which storage keys it touches.
 
-6. **Testnet-proof pattern:** behavior that changes what `__check_auth` admits or blocks should add a unit/integration test **and**, where it is a user-visible enforcement change, be recorded in the testnet proof plan (`tests/fixtures/README.md` **and** its machine-readable twin `tests/fixtures/index.json` — the two are cross-checked by `tests/fixtures_index.rs`).
+6. **Testnet-proof pattern:** behavior that changes what `__check_auth` admits or blocks should add a unit/integration test **and**, where it is a user-visible enforcement change, be recorded in the testnet proof plan ([`tests/fixtures/README.md`](../tests/fixtures/README.md) **and** its machine-readable twin [`tests/fixtures/index.json`](../tests/fixtures/index.json) — the two are cross-checked by [`tests/fixtures_index.rs`](../tests/fixtures_index.rs)).
+
+   - **User-visible enforcement changes (proof entry required):**
+     - *Decision-table changes:* modifying what `__check_auth` admits or blocks, or changing error codes, event topics, or diagnostic data emitted on allow or deny.
+     - *Storage-layout & key-schema changes:* modifying storage keys, types, footprint, or TTL management (these probably require an entry because they alter on-chain state persistence, footprint, or contract upgrade/migration compatibility observable by callers).
+     - *Policy/guard rules:* adding, modifying, or removing policy constraints, guards, or authorization paths.
+   - **Changes not user-visible (no proof entry required):**
+     - *Gas/CPU/memory optimizations:* pure internal performance tuning where admit/block outcomes, storage layouts, and emitted events remain identical.
+     - *Documentation & formatting:* comments, documentation, and formatting updates.
+     - *Internal refactorings:* restructuring internal helper functions or test-only harness code with zero external behavioral change or storage impact.
+   - **Evidence bar & responsibility:**
+     - A proof entry requires an on-chain testnet transaction hash (`tx hash`) plus captured event/diagnostic output (`topics: [event_auth_checked, <outcome>, <reason>]`), matching the exact format defined in [`tests/fixtures/README.md`](../tests/fixtures/README.md) and recorded in `tests/fixtures/index.json`.
+     - The PR author proposing the change is responsible for capturing and recording the testnet proof entry (using `tools/agent-tx` or standard Soroban CLI against testnet). When live testnet credentials or deployment fixtures are maintainer-gated during release/verification, the author provides the reproducible simulation script and rationale in the PR, and maintainers record the live hashes upon verification.
+   - **Impractical on testnet (fallback rationale):**
+     - If an enforcement-affecting change is impractical or non-deterministic to reproduce on live public testnet (e.g. extreme timestamp/ledger boundaries, race conditions, or host resource-exhaustion edge cases):
+       1. Provide a comprehensive deterministic unit or host-routed integration test ([`src/integration_tests.rs`](../src/integration_tests.rs)) exercising the exact enforcement path in the Soroban test environment (`Env`).
+       2. Include a clear written rationale in the PR description and proof plan documentation detailing why live testnet reproduction is impractical and how the unit/integration tests conclusively verify the invariant.
+   - See [`tests/fixtures/README.md`](../tests/fixtures/README.md) and [`SPEC.md` §11](../SPEC.md#11-testnet-proof-plan-scenarios-18-five-proven-three-planned) for scenario definitions and fixture schemas.
 
 7. **Host-routed integration tests:** When testing policy enforcement, write tests that exercise the real Soroban host authorization pipeline in `src/integration_tests.rs` rather than testing under blanket mock auth. Tests asserting enforcement must use `Harness::enforce()` or `GuardScenario` (`set_auths`) so `__check_auth` is genuinely exercised. See [Writing host-routed integration tests](#writing-host-routed-integration-tests) below.
 
@@ -334,8 +365,15 @@ Run the following verification checks in order before submitting your pull reque
 
 ## Pull request process
 
-1. Open the PR against `main`. The `ci` status check is required to merge (branch protection).
-2. One reviewer approval required (branch protection).
+1. Open the PR against `main`. The `ci` status check is required by the
+   `main-protection` ruleset, which is recorded in-repo in
+   [`.github/rulesets/main-protection.json`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/.github/rulesets/main-protection.json)
+   and described in
+   [`.github/BRANCH_PROTECTION.md`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/.github/BRANCH_PROTECTION.md).
+   The job key must stay named exactly `ci`; renaming it leaves every PR waiting
+   for a check that is never reported.
+2. One approving review required; a new push dismisses it, so re-request review
+   after pushing.
 3. Describe the *why* in the PR body: what was broken/wrong, what the fix does, and — for enforcement changes — how it was verified (tests, and testnet evidence where applicable).
 
 ## Project structure

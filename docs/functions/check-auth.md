@@ -63,7 +63,7 @@ For other calls, the arguments are not interpretable — see [Enforcement Scope]
 
 | Error | Code | Meaning |
 |---|---|---|
-| `Unauthorized` | 1 | Signature verification failed (host trap) |
+| `Unauthorized` | 1 | **Reserved — never emitted** (issue #292): a bad signature dies in the `ed25519_verify` host trap (`InvokeError::Abort`) before any policy state is read |
 | `NotInitialized` | 3 | No agent key registered |
 | `NoPolicy` | 12 | No policy installed (default-deny) |
 | `AdminFrozen` | 10 | Admin freeze active |
