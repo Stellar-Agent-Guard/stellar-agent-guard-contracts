@@ -11,6 +11,9 @@ description = "Preflight, sign, and submit Soroban txs for the stellar-agent-gua
 # re-simulate (real __check_auth enforcement) -> optionally submit. See README.md.
 
 [dependencies]
+# Base-32 / CRC16-XModem / StrKey codec, shared with `examples/agent_pubkey.rs`
+# so key parsing has exactly one implementation (issue #379). Dependency-free.
+agent-strkey = { path = "../agent-strkey" }
 stellar-xdr = { version = "27", features = ["base64", "std"] }
 ed25519-dalek = "2"
 sha2 = "0.10"

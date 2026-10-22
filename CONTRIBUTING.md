@@ -60,6 +60,14 @@ cargo fmt --manifest-path tools/agent-tx/Cargo.toml --check
 cargo clippy --manifest-path tools/agent-tx/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path tools/agent-tx/Cargo.toml
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
+
+# 10. tools/agent-strkey is the third cargo project: the dependency-free
+#     base-32 / CRC16-XModem / StrKey codec that both tools/agent-tx and
+#     examples/agent_pubkey.rs parse keys with (issue #379). Step 9 does not
+#     run its tests, so they run here.
+cargo fmt --manifest-path tools/agent-strkey/Cargo.toml --check
+cargo clippy --manifest-path tools/agent-strkey/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path tools/agent-strkey/Cargo.toml
 ```
 
 Two CI jobs sit outside the `ci` job and are not merge requirements. Run the
@@ -392,6 +400,9 @@ examples/
                      #   (heartbeat, pre-flight, blocked-reason handling, DMS)
 tools/
   agent-tx/          # Sign+submit helper for the custom-account address. See agent-tx/README.md for install, usage, secret handling, and what it is for.
+  agent-strkey/      # Dependency-free base-32 / CRC16-XModem / StrKey codec shared
+                     #   by agent-tx and examples/agent_pubkey.rs, so keys are
+                     #   parsed by exactly one implementation (issue #379).
 tests/fixtures/      # Real testnet evidence (tx hashes, contract IDs, events)
 tests/decision_table.rs  # Drift gate: SPEC §4 ↔ decision-table.json ↔ engine
 decision-table.json  # Machine-readable source of truth for the SPEC §4 table
