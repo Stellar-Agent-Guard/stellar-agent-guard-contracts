@@ -3367,6 +3367,115 @@ fn self_address_rejected_in_every_list() {
     assert!(client.policy().is_some());
 }
 
+// ── Rejected `set_policy` is fail-closed (issue #366) ───────────────────
+//
+// SPEC §8's fail-closed claim: `validate_config` runs before any write, so a
+// rejected `set_policy` leaves the installed policy — and the rolling window
+// — exactly as they were. The guarantee is only observable by re-reading that
+// state after the rejection, and no test did so at the contract level before:
+// the existing §8 tests all start from an uninstalled policy or assert the
+// error alone.
+
+#[test]
+fn rejected_set_policy_preserves_installed_policy_and_window() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // A known-good policy: 100 per rolling window, 80 per tx, one recipient.
+    let mut good = h.base_policy();
+    good.per_tx_cap = 80;
+    good.window_cap = 100;
+    h.install_policy(&good);
+    assert!(client.policy().is_some_and(|p| p == good));
+
+    // Spend part of the budget first, so the window holds real state that a
+    // rejected edit must neither reset nor advance.
+    h.set_time(1_000);
+    h.transfer(&recv, 30);
+    // The transfer left the env in enforcing mode; `set_policy` needs the
+    // admin's authorization, so restore blanket mocking for the rejections
+    // below (documented in this module's header).
+    h.env.mock_all_auths();
+
+    let policy_before = client.policy().expect("policy installed");
+    let status_before = h.status();
+    assert_eq!(status_before.window_remaining, Some(70));
+    let window_before = h.stored_window().expect("the transfer wrote the ledger");
+
+    // Two different §8 violations, so the check is not tied to one branch: a
+    // duplicate recipient (duplicate-address rule) and a self-address in
+    // `assets` (self-address rule). Each candidate also drops `per_tx_cap` to
+    // 1, so the follow-up transfer below would be blocked if either rejected
+    // config had actually been installed.
+    let mut duplicate_recipient = good.clone();
+    duplicate_recipient.recipients = soroban_sdk::vec![&h.env, recv.clone(), recv.clone()];
+    duplicate_recipient.per_tx_cap = 1;
+
+    let mut self_asset = good.clone();
+    self_asset.assets = soroban_sdk::vec![&h.env, h.asset.clone(), h.guard.clone()];
+    self_asset.per_tx_cap = 1;
+
+    // Prove the two candidates really fail *different* §8 rules, so neither
+    // rejection is an accident of one shared branch.
+    assert_eq!(
+        client.validate_policy(&duplicate_recipient),
+        ValidationOutcome::Invalid(PolicyRuleId::DuplicateAddressInList)
+    );
+    assert_eq!(
+        client.validate_policy(&self_asset),
+        ValidationOutcome::Invalid(PolicyRuleId::SelfAddressInList)
+    );
+
+    for (label, candidate) in [
+        ("duplicate recipient", duplicate_recipient),
+        ("self-address in assets", self_asset),
+    ] {
+        // `try_set_policy` is generated even though `set_policy` returns `()`;
+        // `Err(Ok(..))` is the contract error raised by `panic_with_error!`,
+        // `Err(Err(..))` would be a host-level failure.
+        match client.try_set_policy(&candidate) {
+            Err(Ok(err)) => assert_eq!(
+                GuardError::try_from(err).expect("known contract error code"),
+                GuardError::InvalidConfig,
+                "`{label}` must fail set_policy with InvalidConfig"
+            ),
+            Ok(_) => panic!("`{label}` must not be accepted by set_policy"),
+            Err(Err(host)) => {
+                panic!("`{label}` must fail as a contract error, not a host failure: {host:?}")
+            }
+        }
+
+        // The previously installed policy is still there, byte for byte.
+        assert!(
+            client.policy().is_some_and(|p| p == policy_before),
+            "`{label}` must leave the previously installed policy unchanged"
+        );
+        // Nor did the rejected write touch the rolling window ledger, which
+        // the status snapshot reads back as the same remaining headroom.
+        assert_eq!(
+            h.stored_window(),
+            Some(window_before.clone()),
+            "`{label}` must leave the rolling window ledger unchanged"
+        );
+        assert_eq!(
+            h.status(),
+            status_before,
+            "`{label}` must leave the status snapshot (incl. window_remaining) unchanged"
+        );
+    }
+
+    // The good policy still governs the next transfer: 70 fits the remaining
+    // budget and is far above the rejected candidates' `per_tx_cap` of 1, so
+    // its acceptance proves neither rejected config took effect.
+    h.transfer(&recv, 70);
+    assert_eq!(h.status().window_remaining, Some(0));
+
+    // And the rejected writes did not reset spend accounting: the same window
+    // still rejects the next unit.
+    h.transfer_expect_blocked(&recv, 1);
+}
+
 #[test]
 fn expired_at_install_policy_results_in_outside_active_window() {
     let mut h = Harness::new();
