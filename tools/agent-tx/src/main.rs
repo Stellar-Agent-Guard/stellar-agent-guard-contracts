@@ -590,8 +590,8 @@ fn scval_str(v: &ScVal) -> String {
         ScVal::I32(n) => n.to_string(),
         ScVal::U64(n) => n.to_string(),
         ScVal::I64(n) => n.to_string(),
-        ScVal::U128(p) => p.hi.to_string() + &p.lo.to_string(),
-        ScVal::I128(p) => p.hi.to_string() + &p.lo.to_string(),
+        ScVal::U128(p) => ((u128::from(p.hi) << 64) | u128::from(p.lo)).to_string(),
+        ScVal::I128(p) => ((i128::from(p.hi) << 64) | i128::from(p.lo)).to_string(),
         ScVal::Symbol(s) => s.to_string(),
         ScVal::String(s) => s.to_string(),
         ScVal::Address(a) => match a {
@@ -1806,6 +1806,63 @@ mod tests {
 
     use crate::base32::{base32_decode, base32_encode, B32};
     use crate::strkey::{decode_strkey, VER_SECRET};
+
+    #[test]
+    fn scval_str_renders_u128_words_as_one_decimal_integer() {
+        let cases = [
+            (0, 0, "0"),
+            (0, 42, "42"),
+            (0, u64::MAX, "18446744073709551615"),
+            (1, 0, "18446744073709551616"),
+            (1, 42, "18446744073709551658"),
+            (
+                u64::MAX,
+                u64::MAX,
+                "340282366920938463463374607431768211455",
+            ),
+        ];
+        for (hi, lo, expected) in cases {
+            assert_eq!(scval_str(&ScVal::U128(UInt128Parts { hi, lo })), expected);
+        }
+    }
+
+    #[test]
+    fn scval_str_renders_i128_words_with_the_correct_sign() {
+        let cases = [
+            (0, 0, "0"),
+            (0, 42, "42"),
+            (0, u64::MAX, "18446744073709551615"),
+            (1, 0, "18446744073709551616"),
+            (-1, u64::MAX, "-1"),
+            (-1, u64::MAX - 41, "-42"),
+            (-1, 0, "-18446744073709551616"),
+            (i64::MIN, 0, "-170141183460469231731687303715884105728"),
+            (
+                i64::MAX,
+                u64::MAX,
+                "170141183460469231731687303715884105727",
+            ),
+        ];
+        for (hi, lo, expected) in cases {
+            assert_eq!(scval_str(&ScVal::I128(Int128Parts { hi, lo })), expected);
+        }
+    }
+
+    #[test]
+    fn scval_str_preserves_i64_and_u64_decimal_rendering() {
+        for (value, expected) in [(0, "0"), (42, "42"), (u64::MAX, "18446744073709551615")] {
+            assert_eq!(scval_str(&ScVal::U64(value)), expected);
+        }
+        for (value, expected) in [
+            (0, "0"),
+            (42, "42"),
+            (-42, "-42"),
+            (i64::MIN, "-9223372036854775808"),
+            (i64::MAX, "9223372036854775807"),
+        ] {
+            assert_eq!(scval_str(&ScVal::I64(value)), expected);
+        }
+    }
 
     #[test]
     fn known_secret_decodes_to_seed() {
