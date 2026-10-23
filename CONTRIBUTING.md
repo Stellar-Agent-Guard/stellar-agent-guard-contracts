@@ -366,6 +366,18 @@ layer and must not silently diverge.
    and — for enforcement changes — how it was verified (tests, and testnet
    evidence where applicable).
 
+## Required security review on the enforcement path
+
+`.github/CODEOWNERS` assigns the enforcement path — `src/` (`engine.rs`,
+`window.rs`, `lib.rs`, `types.rs`), `.github/workflows/`, and `SECURITY.md` — to
+the maintainer (`@aigbagbobila`). These paths require an approving review from a
+security-literate reviewer before merge; this is automatic via CODEOWNERS, not
+reviewer memory (CONTRIBUTING's opening warning).
+
+Enabling the ruleset so this review is required to merge is a repo-settings
+change for the maintainer and is tracked in the PR for this change. It is out of
+scope for a contributor PR to flip repository settings.
+
 ## Keeping your PR mergeable
 
 This repo has a security-sensitive backlog and several PRs touching `engine.rs` in parallel; merge conflicts pile up fast. Keep your branch cheap to rebase:

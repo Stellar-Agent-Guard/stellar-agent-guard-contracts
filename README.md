@@ -84,6 +84,22 @@ non-custodial, no proxy wrappers, tested end-to-end on testnet.
 > not deploy to mainnet without an independent audit. See [SECURITY.md](SECURITY.md).
 >
 > For future contract versions, review the policy on [Enforcement-Equivalent Upgrades](#enforcement-equivalent-upgrade-policy).
+>
+## Maintainers
+
+Security review: `@aigbagbobila`
+
+Changes to the enforcement path — `src/engine.rs`, `src/window.rs`, `src/lib.rs`,
+`src/types.rs`, the rest of `src/`, `.github/workflows/`, and `SECURITY.md` — are
+owned by the maintainer and require one approving review from a security-literate
+reviewer before merge. This is enforced automatically via
+[`.github/CODEOWNERS`](.github/CODEOWNERS); it is not left to reviewer memory.
+
+A README typo and a policy-semantics change do not get the same review: anything
+under `src/` or touching the CI/security files routes to the maintainer.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full review and contribution
+process.
 
 ## Enforcement scope — read this before relying on the caps
 
