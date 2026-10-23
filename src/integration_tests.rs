@@ -91,6 +91,7 @@
 //! | | `Harness::base_policy()` | Returns a standard baseline policy with `MockAsset` and allowed recipient `h.recv`. |
 //! | | `h.install_policy(&cfg)` | Installs policy in mock mode. |
 //! | | `h.set_policy_enforcing(&cfg)` | Updates policy when already in enforcing mode. |
+//! | | `Harness::new_enforced_auth()` | Fresh registration under *real* host auth: `initialize` runs with an explicit admin entry and no `mock_all_auths()` call. |
 //! | **Invocations** | `h.transfer_invocation(from, to, amount)` | Constructs `SorobanAuthorizedInvocation` for `MockAsset::transfer`. |
 //! | | `h.heartbeat_invocation()` | Constructs invocation for `heartbeat()`. |
 //! | | `h.invocation(contract, fn, args)` | Low-level invocation builder for arbitrary contracts/methods. |
@@ -524,11 +525,12 @@ impl Harness {
         let other = Address::generate(&env);
 
         // soroban-sdk 27 test env defaults to *enforcing* auth: `require_auth`
-        // only passes with explicit entries. Admin setup ops (initialize,
-        // set_policy, ...) run under blanket mocking; `enforce()` flips the env
-        // back into enforcing mode with a hand-signed entry for the guarded
-        // flow. `mock_all_auths` is the documented default intent of the
-        // harness (see header comment).
+        // only passes with explicit entries. The default harness intentionally
+        // uses blanket mocking for the rest of the suite because the majority of
+        // tests care about policy behavior, not the auth bootstrap path; this is
+        // the documented exception for the suite, not an accidental omission.
+        // A dedicated test can choose explicit `set_auths` entries to verify the
+        // real `require_auth` flow when admin/agent semantics matter.
         env.mock_all_auths();
         let client = PolicyEngineClient::new(&env, &guard);
         let pk = agent.verifying_key().to_bytes();
@@ -545,6 +547,50 @@ impl Harness {
             guard_nonce: 1,
             admin_nonce: 1,
         }
+    }
+
+    /// Fresh registration under real host auth: initialize and the first policy
+    /// set both require explicit admin entries, with no blanket `mock_all_auths`
+    /// call in this harness.
+    fn new_enforced_auth() -> Self {
+        let env = Env::default();
+        let agent = SigningKey::from_bytes(&[7u8; 32]);
+        let admin = env.register(MockAdmin, ());
+        let asset = env.register(MockAsset, ());
+        let guard = env.register(PolicyEngine, ());
+        let recv = Address::generate(&env);
+        let other = Address::generate(&env);
+
+        let mut h = Harness {
+            env,
+            guard,
+            admin,
+            asset,
+            agent,
+            recv,
+            other,
+            guard_nonce: 1,
+            admin_nonce: 1,
+        };
+
+        let pk = h.agent.verifying_key().to_bytes();
+        let init_root = h.invocation(
+            &h.guard,
+            "initialize",
+            std::vec![
+                h.admin.clone().into_val(&h.env),
+                BytesN::from_array(&h.env, &pk).into_val(&h.env),
+            ],
+        );
+        let init_entry = {
+            let h = &mut h;
+            h.admin_entry(&init_root)
+        };
+        h.env.set_auths(&[init_entry]);
+        PolicyEngineClient::new(&h.env, &h.guard)
+            .initialize(&h.admin, &BytesN::from_array(&h.env, &pk));
+
+        h
     }
 
     /// Base policy: asset = `MockAsset`, one allowed recipient, no caps.
@@ -1167,6 +1213,91 @@ impl Harness {
             )
         })
     }
+}
+
+// ── Full lifecycle under real host auth (issue #438) ──────────────────────
+//
+// The rest of this suite mocks auth on purpose (see the harness header):
+// most tests care about policy *behaviour*, not about how the account is
+// authorized, and hand-signing every admin call would bury that intent.
+//
+// The blanket mock hides a whole class of regressions, though: a
+// `require_auth` that no longer matches the recorded admin, an auth entry
+// built against the wrong invocation tree, a signature over the wrong
+// payload. None of them can show up while `mock_all_auths()` short-circuits
+// every authorization.
+//
+// The test below closes that gap for the registration path. It runs the
+// whole lifecycle — `initialize`, `set_policy`, and an agent-signed
+// transfer — under *real* host auth, with explicit `set_auths` entries and
+// no `mock_all_auths()` call anywhere in the flow.
+
+/// A fresh registration must be usable end to end under real host auth: the
+/// admin authorizes `initialize` and `set_policy`, the agent authorizes a
+/// guarded transfer, and the installed policy decides it.
+#[test]
+fn full_lifecycle_runs_under_real_host_auth() {
+    // 1. Registration under a real admin auth entry.
+    let mut h = Harness::new_enforced_auth();
+    let (admin, pending) = h.stored_admins();
+    assert_eq!(
+        admin,
+        Some(h.admin.clone()),
+        "initialize must store the admin that authorized it"
+    );
+    assert_eq!(
+        pending, None,
+        "no admin rotation is pending after initialize"
+    );
+    assert!(
+        !h.status().has_policy,
+        "a fresh registration has no policy yet"
+    );
+
+    // 2. Policy install under a real admin auth entry.
+    let mut p = h.base_policy();
+    p.per_tx_cap = 50;
+    h.set_policy_enforcing(&p);
+    let status = h.status();
+    assert!(status.has_policy, "set_policy must install the policy");
+    assert_eq!(
+        status.policy_revision, 1,
+        "the first policy install is revision 1"
+    );
+
+    // 3. An agent-signed transfer under the installed policy is allowed.
+    let recv = h.recv.clone();
+    h.transfer(&recv, 20);
+    assert!(
+        h.emitted_allowed_auth(),
+        "the guarded transfer must be decided by the policy, not mocked away"
+    );
+
+    // 4. The same policy blocks an over-cap transfer in the same lifecycle.
+    let reason = h.transfer_blocked_reason(&recv, 51);
+    assert!(
+        reason.contains("per_tx_cap_exceeded"),
+        "an over-cap transfer must be blocked with the cap reason, got {reason}"
+    );
+
+    // 5. The admin authorization is enforced, not merely present: an entry
+    //    belonging to a different account must not be able to set a policy.
+    let impostor = h.env.register(MockAdmin, ());
+    let root = h.set_policy_invocation(&p);
+    let entry = h.non_admin_entry(&impostor, &root);
+    h.enforce(entry);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(
+        res.is_err(),
+        "a non-admin entry must not be able to install a policy"
+    );
+    assert_eq!(
+        h.status().policy_revision,
+        1,
+        "the rejected install must leave the installed policy untouched"
+    );
 }
 
 // ── GuardScenario: declarative scenario builder (issue #63) ──────────────
@@ -5918,4 +6049,150 @@ fn admin_gating_cancel_admin_rotation_rejects_non_admin() {
     // Fail-closed: pending admin rotation is not cancelled.
     let (_, pending) = h.stored_admins();
     assert_eq!(pending, Some(new_admin));
+}
+
+// ── Admin functions before `initialize` (issue #364) ─────────────────────
+//
+// `admin_or_panic` (src/lib.rs) is the single gate in front of every admin
+// write: with no admin stored it panics `NotInitialized`, so a guard that was
+// registered but never initialized cannot accept a policy, rotate its key, or
+// flip the freeze switch. Default-deny depends on every state path failing
+// closed — the administrative ones included — but this `NotInitialized` arm
+// had no coverage: `initialize`'s double-call rejection was tested, the
+// pre-init rejection of every other admin function was not.
+//
+// These assertions use the generated `try_*` client methods rather than
+// `catch_unwind`. `try_*` is generated for unit-returning contract functions
+// too, and it distinguishes a contract error (`Err(Ok(..))`, the
+// `panic_with_error!` path this test targets) from a host-level failure
+// (`Err(Err(..))`), so the exact error code is asserted instead of just "it
+// panicked".
+
+/// The contract error carried by a generated `try_*` call, or a panic naming
+/// how the call failed to be one.
+fn try_contract_error<T, E>(
+    res: Result<Result<T, E>, Result<soroban_sdk::Error, InvokeError>>,
+) -> GuardError
+where
+    T: std::fmt::Debug,
+    E: std::fmt::Debug,
+{
+    match res {
+        Err(Ok(err)) => GuardError::try_from(err).expect("unknown contract error code"),
+        Ok(ok) => panic!("expected a contract error, but the call succeeded: {ok:?}"),
+        Err(Err(host)) => panic!("expected a contract error, but the host failed: {host:?}"),
+    }
+}
+
+#[test]
+fn admin_functions_reject_with_not_initialized_before_initialize() {
+    let h = Harness::new();
+    // A freshly registered guard: no `initialize` call was ever made, so no
+    // admin address is stored and there is no key or policy state either.
+    let guard = h.env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&h.env, &guard);
+
+    let status_before = client.status();
+    assert!(!status_before.has_policy, "a fresh guard has no policy");
+    assert_eq!(status_before.policy_revision, 0);
+    assert!(!status_before.admin_frozen);
+    assert_eq!(status_before.last_heartbeat, 0);
+
+    // Raw state the `status` snapshot does not expose (the bound agent key and
+    // the rolling ledger), read as the contract so it sees the stored bytes.
+    let stored_agent_key = || {
+        h.env.as_contract(&guard, || {
+            h.env
+                .storage()
+                .instance()
+                .get::<DataKey, BytesN<32>>(&DataKey::AgentPubkey)
+        })
+    };
+    let stored_window = || {
+        h.env.as_contract(&guard, || {
+            h.env
+                .storage()
+                .persistent()
+                .get::<DataKey, WindowState>(&DataKey::Window)
+        })
+    };
+    assert!(stored_agent_key().is_none());
+    assert!(stored_window().is_none());
+
+    // After each rejection the whole observable state must be byte-identical
+    // to the pre-call snapshot: no policy, no agent key, no window, no
+    // revision/freeze/heartbeat movement, and no lifecycle event (a rejected
+    // admin call emits nothing; the event log still holds its own invocation).
+    let assert_unchanged = |label: &str| {
+        assert!(
+            h.env.events().all().events().is_empty(),
+            "`{label}` before initialize must not emit an event"
+        );
+        assert_eq!(
+            client.status(),
+            status_before,
+            "`{label}` before initialize must leave the status snapshot untouched"
+        );
+        assert!(
+            client.policy().is_none(),
+            "`{label}` before initialize must not install a policy"
+        );
+        assert!(
+            stored_agent_key().is_none(),
+            "`{label}` before initialize must not bind an agent key"
+        );
+        assert!(
+            stored_window().is_none(),
+            "`{label}` before initialize must not create a window"
+        );
+    };
+
+    // Every admin entrypoint, driven against the uninitialized account. The
+    // candidate policy and key are valid on their own, so the only thing that
+    // can reject them here is the missing admin.
+    assert_eq!(
+        try_contract_error(client.try_set_policy(&h.base_policy())),
+        GuardError::NotInitialized,
+        "set_policy before initialize must fail closed with NotInitialized"
+    );
+    assert_unchanged("set_policy");
+
+    assert_eq!(
+        try_contract_error(client.try_revoke_policy()),
+        GuardError::NotInitialized,
+        "revoke_policy before initialize must fail closed with NotInitialized"
+    );
+    assert_unchanged("revoke_policy");
+
+    let new_pubkey = BytesN::from_array(&h.env, &[9u8; 32]);
+    assert_eq!(
+        try_contract_error(client.try_rotate_agent_key(&new_pubkey)),
+        GuardError::NotInitialized,
+        "rotate_agent_key before initialize must fail closed with NotInitialized"
+    );
+    assert_unchanged("rotate_agent_key");
+
+    assert_eq!(
+        try_contract_error(client.try_freeze()),
+        GuardError::NotInitialized,
+        "freeze before initialize must fail closed with NotInitialized"
+    );
+    assert_unchanged("freeze");
+
+    assert_eq!(
+        try_contract_error(client.try_unfreeze()),
+        GuardError::NotInitialized,
+        "unfreeze before initialize must fail closed with NotInitialized"
+    );
+    assert_unchanged("unfreeze");
+
+    // Sanity: once the same account is initialized the identical call is
+    // accepted, so the rejections above came from the missing admin and not
+    // from a broken harness or an invalid candidate policy.
+    h.env.mock_all_auths();
+    let pk = h.agent.verifying_key().to_bytes();
+    client.initialize(&h.admin, &BytesN::from_array(&h.env, &pk));
+    client.set_policy(&h.base_policy());
+    assert!(client.policy().is_some());
+    assert!(client.status().has_policy);
 }

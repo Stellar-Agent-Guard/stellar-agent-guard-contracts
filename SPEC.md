@@ -91,9 +91,10 @@ Therefore the scope is:
 native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the
 calls whose arguments the Soroban auth context exposes for inspection. For other Soroban
 contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy
-engine still enforces window and pause state, but per-call amount/recipient limits are not yet
-enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not
-implied as already covered.**
+engine still enforces account-level gates — admin freeze, dead-man switch, pause, and the
+active window (`active_from` / `active_until`) — but per-call amount/recipient limits and
+rolling-window spend accounting are not applied to non-SAC calls; extending fine-grained
+enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered.**
 
 *Canonical statement: the paragraph above is the single source of truth for the scope
 wording. The README and `docs/enforcement-scope.md` carry short excerpts that link back

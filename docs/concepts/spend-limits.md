@@ -96,4 +96,4 @@ If `window_cap > 0`, then `window_secs` must also be > 0 (validated by `set_poli
 
 ## Scope
 
-Both caps apply **only to SAC token transfers** (`transfer` / `transfer_from`). For other Soroban contract calls, the policy engine still enforces window and pause state, but per-call amount limits are not applied. See [Enforcement Scope](../enforcement-scope.md) for details.
+Both caps apply **only to SAC token transfers** (`transfer` / `transfer_from`). For other Soroban contract calls, the policy engine still enforces account-level gates — admin freeze, dead-man switch, pause, and the active window (`active_from` / `active_until`) — but per-call amount limits and rolling-window spend accounting are not applied. See [Enforcement Scope](../enforcement-scope.md) for details.
