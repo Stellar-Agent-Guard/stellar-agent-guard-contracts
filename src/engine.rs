@@ -1046,6 +1046,47 @@ mod tests {
     }
 
     #[test]
+    fn contract_address_recipient_allowlist_admits_listed_and_blocks_unlisted() {
+        // The recipient allowlist accepts any `Address`, including a contract
+        // (the common case when an agent pays a protocol or router). `addr(_, n)`
+        // is itself a contract-address fixture, so this pins the contract path
+        // rather than only `Address::generate` accounts.
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let listed_contract = addr(&env, 42);
+        let unlisted_contract = addr(&env, 43);
+        let mut p = base_policy(&env);
+        p.recipients = vec![&env, listed_contract.clone()];
+        let mut l = Ledger::empty(&env);
+
+        let admitted = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 42, 5)],
+        );
+        assert!(matches!(admitted.first().unwrap(), Decision::Allowed));
+
+        let blocked = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 43, 5)],
+        );
+        assert!(matches!(
+            blocked.first().unwrap(),
+            Decision::Blocked(Error::RecipientNotAllowed)
+        ));
+        assert_ne!(listed_contract, unlisted_contract);
+    }
+
+    #[test]
     fn empty_blocked_recipients_list_is_no_op() {
         let env = Env::default();
         let sa = self_addr(&env);
