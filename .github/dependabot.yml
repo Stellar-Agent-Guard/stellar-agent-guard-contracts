@@ -1,3 +1,57 @@
+# Dependabot version updates (issue #72).
+#
+# Two ecosystems, two independent PR streams, so crate bumps and workflow pin
+# bumps never land in the same pull request:
+#
+#   * `cargo`          - the contract crate (root manifest) and the
+#                        tools/agent-tx helper (its own Cargo.toml + lockfile).
+#   * `github-actions` - the SHA-pinned workflow actions. See CONTRIBUTING.md
+#                        "GitHub Actions pinning": every `uses:` keeps a full
+#                        commit SHA plus a version comment, and Dependabot is
+#                        the only sanctioned way to move a SHA (it updates the
+#                        pin and the comment together).
+#
+# Cargo groups are evaluated top-to-bottom and a dependency lands in the FIRST
+# group it matches:
+#
+#   1. `soroban-sdk-majors` - soroban-sdk *major* bumps only. Major SDK bumps
+#      can break the contract ABI / auth interface, so they are isolated in
+#      their own PR and re-verified against SPEC §1.1 and
+#      tests/fixtures/index.json before merge (never batched with anything).
+#   2. `soroban-sdk`        - soroban-sdk minor/patch bumps, kept apart from
+#      the rest of the crate graph for the same review reason.
+#   3. `cargo-minor-patch`  - everything else, minor and patch only. Major
+#      bumps of any other crate stay ungrouped (one PR per crate) for the same
+#      reason.
+#
+# Every dependabot PR must pass the full `ci` job before merge - branch
+# protection already enforces this; see CONTRIBUTING.md.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directories:
+      - "/"
+      - "/tools/agent-tx"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    target-branch: "main"
+    open-pull-requests-limit: 5
+    groups:
+      soroban-sdk-majors:
+        patterns:
+          - "soroban-sdk"
+        update-types:
+          - "major"
+      soroban-sdk:
+        patterns:
+          - "soroban-sdk"
+        update-types:
+          - "minor"
+          - "patch"
+      cargo-minor-patch:
+        patterns:
+          - "*"
 # Dependabot keeps the RUSTSEC surface fresh and Actions pins current.
 # Weekly cadence; PRs are capped so the security-sensitive review queue
 # stays triageable. Every PR must still pass the full `ci` gate
@@ -41,6 +95,12 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    target-branch: "main"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
       time: "06:00"
       timezone: "UTC"
     target-branch: "main"

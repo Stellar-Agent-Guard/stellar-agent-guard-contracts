@@ -388,6 +388,9 @@ pub fn decide(
 ) -> alloc::vec::Vec<Decision> {
     let mut verdicts = alloc::vec::Vec::new();
 
+    // ── Account-level gates (SPEC §4, rules 1-5; first match wins) ───────
+    // Admin freeze outranks a missing policy: a frozen account reports
+    // `AdminFrozen` even when its policy was revoked or never installed.
     if contexts.len() as usize > crate::types::MAX_AUTH_CONTEXTS {
         verdicts.push(Decision::Blocked(Error::TooManyAuthContexts));
         return verdicts;
@@ -1799,6 +1802,22 @@ mod tests {
     }
 
     #[test]
+    fn admin_frozen_wins_before_no_policy() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, transfer_ctx(&env, 1, 2, 1)];
+
+        let frozen = AccountState {
+            admin_frozen: true,
+            last_heartbeat: 0,
+        };
+        assert!(matches!(
+            decide(&env, &sa, None, &frozen, &mut l, 1000, ctx.clone())
+                .first()
+                .unwrap(),
+            Decision::Blocked(Error::AdminFrozen)
+        ));
     fn bundled_heartbeat_with_spend_evaluated_against_pre_transaction_heartbeat() {
         // Issue #318: A bundle of [heartbeat, transfer] is evaluated against
         // the pre-transaction heartbeat. If the account is expired, both contexts

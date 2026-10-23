@@ -17,8 +17,17 @@ jobs:
     timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
+      # Every action below is pinned to a full 40-char commit SHA so a
+      # rewritten tag cannot swap the code CI runs. Bump SHAs only through
+      # Dependabot `github-actions` PRs — never by hand (see CONTRIBUTING.md).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/checkout@v7
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: wasm32v1-none
+          components: clippy, rustfmt
       # The toolchain version is read from rust-toolchain.toml, never repeated
       # here: one pin, one place. `dtolnay/rust-toolchain@stable` would install
       # a moving compiler and silently override the file, which is exactly the
@@ -37,7 +46,7 @@ jobs:
           rustc --version
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry

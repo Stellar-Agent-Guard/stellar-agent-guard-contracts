@@ -761,6 +761,78 @@ mod policy_engine_type {
             }
         }
 
+    /// Preflight / simulate a transfer (`check`): permissionless pre-flight
+    /// of the asset-transfer decision path.
+    ///
+    /// Search aliases for SDK discoverability: "preflight", "simulate",
+    /// `simulate_transfer`, `simulate-transfer`. These are documentation
+    /// aliases only — the on-chain ABI is frozen as `check` (and
+    /// `check_detailed`); there is no `simulate_transfer` entrypoint.
+    ///
+    /// Lets agents/SDKs simulate a transfer before signing. A submitted call
+    /// may refresh persistent TTLs; simulation does not persist those rent
+    /// bumps. Emits the same `auth_checked` event as an in-path decision.
+    ///
+    /// # Example
+    ///
+    /// Mirrors the live Phase-1 testnet invocation (permissionless read,
+    /// simulation only; this account is DMS-frozen, so the honest answer
+    /// today is blocked):
+    ///
+    /// ```text
+    /// stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
+    ///   --network testnet --source-account guard_admin --send=no -- \
+    ///   check --asset CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7 \
+    ///   --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX --amount 50
+    /// # → {"Blocked":"heartbeat_expired"}
+    /// ```
+    #[allow(clippy::must_use_candidate)] // public read surface
+    pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult {
+        Self::check_detailed(env, asset, to, amount).result
+    }
+
+    /// Preflight / simulate a transfer with headroom (`check_detailed`):
+    /// pre-flight decision plus current cap headroom for the targeted asset.
+    /// Part of the `check` preflight / simulate alias family (documentation
+    /// aliases only; the ABI is frozen — there is no `simulate_transfer`
+    /// entrypoint).
+    ///
+    /// This path does not change spend accounting: it mutates a local ledger
+    /// copy and emits exactly the same `auth_checked` event as `check`. A
+    /// submitted call may refresh persistent TTLs; simulation does not persist
+    /// those rent bumps.
+    ///
+    /// # Panics
+    ///
+    /// This function surfaces `DecisionInvariantViolation` if the policy
+    /// engine returns no verdict for the single submitted preflight context.
+    #[allow(clippy::must_use_candidate)] // public read surface
+    pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail {
+        let cfg = persist_get::<PolicyConfig>(&env, &DataKey::Policy);
+        let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
+        let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let now = env.ledger().timestamp();
+        let self_addr = env.current_contract_address();
+        let mut ledger = load_ledger(&env);
+
+        // A missing policy is decided by `decide` itself (SPEC §4 ordering:
+        // admin freeze outranks no-policy), so `None` flows straight through.
+        if let Some(cfg) = cfg.as_ref() {
+            if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
+                ledger.prune(now, cfg.window_secs);
+            }
+        }
+        let (remaining_window, per_tx_cap, effective_window_cap) = cfg
+            .as_ref()
+            .map_or((None, None, None), |cfg| cap_metrics(cfg, &ledger, &to));
+        let Some(snapshot) = AuthSnapshot::load(&env) else {
+            emit_auth(&env, false, Some(Error::NoPolicy), 0);
+            return CheckDetail {
+                result: CheckResult::Blocked(Symbol::new(&env, Error::NoPolicy.reason())),
+                remaining_window: None,
+                per_tx_cap: None,
+                effective_per_tx_cap: None,
+                effective_window_cap: None,
         /// Installs a new policy. A policy *edit* — any `set_policy` while a
         /// policy is already installed — **preserves** the rolling window and
         /// the dead-man-switch clock (issue #289): pausing, tightening, or
@@ -849,6 +921,44 @@ mod policy_engine_type {
             }
         }
 
+        let AuthSnapshot {
+            policy,
+            admin_frozen,
+            last_heartbeat,
+            mut ledger,
+            ..
+        } = snapshot;
+        let now = env.ledger().timestamp();
+        let self_addr = env.current_contract_address();
+
+        if policy.window_cap > 0 || !policy.recipient_window_caps.is_empty() {
+            ledger.prune(now, policy.window_secs);
+        }
+
+        let (remaining_window, per_tx_cap, effective_window_cap) =
+            cap_metrics(&policy, &ledger, &to);
+        let effective_per_tx_cap = per_tx_cap;
+        let call = transfer_context(&env, &asset, &to, amount);
+        let verdicts = decide(
+            &env,
+            &self_addr,
+            cfg.as_ref(),
+            Some(&policy),
+            &AccountState {
+                admin_frozen,
+                last_heartbeat,
+            },
+            &mut ledger,
+            now,
+            vec![&env, call],
+        );
+        let Some(verdict) = verdicts.first() else {
+            panic_with_error!(&env, Error::DecisionInvariantViolation);
+        };
+        let result = match verdict {
+            Decision::Allowed => {
+                emit_auth(&env, true, None, 0);
+                CheckResult::Allowed
         /// Removes the policy and window → immediate default-deny.
         pub fn revoke_policy(env: Env) {
             let admin = Self::admin_or_panic(&env);
@@ -1005,6 +1115,24 @@ mod policy_engine_type {
             emit_unfrozen(&env, &admin, rearmed_dms);
         }
 
+        // 2. Verify the agent's Ed25519 signature over the auth payload. The
+        //    host crypto function traps the frame on a bad signature, so a
+        //    wrong key can never reach policy evaluation.
+        let message: Bytes = signature_payload.into();
+        env.crypto().ed25519_verify(&agent, &message, &signatures);
+
+        // 3. Policy snapshot + gate evaluation over every context.
+        // A missing policy is decided by `decide` itself (SPEC §4 ordering:
+        // admin freeze outranks no-policy), so `None` flows straight through.
+        let cfg = persist_get::<PolicyConfig>(&env, &DataKey::Policy);
+        let frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
+        let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+        // 3. Policy snapshot + gate evaluation over every context. The whole
+        //    storage read set of an authorization happens here, in one place,
+        //    exactly once per key — see the `AuthSnapshot` invariant.
+        let Some(snapshot) = AuthSnapshot::load(&env) else {
+            for i in 0..auth_contexts.len() {
+                emit_auth(&env, false, Some(Error::NoPolicy), i);
         // ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ─
 
         #[allow(clippy::must_use_candidate)] // public read surface
@@ -1036,6 +1164,22 @@ mod policy_engine_type {
             }
         }
 
+        let AuthSnapshot {
+            policy,
+            admin_frozen,
+            last_heartbeat,
+            window_persisted,
+            mut ledger,
+        } = snapshot;
+        let now = env.ledger().timestamp();
+        let self_addr = env.current_contract_address();
+
+        let verdicts = decide(
+            &env,
+            &self_addr,
+            cfg.as_ref(),
+            Some(&policy),
+            &AccountState {
         /// Dry-runs `set_policy` validation against a candidate policy and reports
         /// **which** SPEC §8 rule would reject it (issue #35): `Valid` when every
         /// rule passes, otherwise `Invalid(rule)` naming the first failing rule,
