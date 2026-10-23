@@ -19,3 +19,5 @@ serde_json = "1"
 ureq = "2"
 hex = "0.4"
 dirs = "5"
+# OS randomness for the low half of the guard auth nonce (see `fresh_auth_nonce`).
+getrandom = "0.2"

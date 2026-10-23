@@ -60,6 +60,7 @@ fn base_policy(env: &Env) -> PolicyConfig {
         recipients: vec![env, addr(env, 2)],
         recipient_window_caps: Vec::new(env),
         blocked_recipients: Vec::new(env),
+        asset_caps: Vec::new(env),
         allow_any_recipient: false,
         active_from: 0,
         active_until: 0,
@@ -308,6 +309,8 @@ fn main() {
         ProtocolRule {
             contract: addr(&env, 3),
             fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+
+            paused: false,
         },
     ];
     let mut ledger7f = Ledger::empty(&env);

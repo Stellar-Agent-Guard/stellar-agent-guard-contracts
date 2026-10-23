@@ -5,7 +5,20 @@ edition = "2021"
 description = "Non-custodial Soroban custom-account contract enforcing agent spend policy (per-tx/rolling caps, allowlists, pause, dead-man switch) inside __check_auth — Stellar Agent Guard."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/aigbagbobila/stellar-agent-guard-contracts"
-rust-version = "1.85"
+# Minimum supported Rust version (issue #410).
+#
+# This is the *tested* floor, not an aspiration: the `msrv` job in
+# .github/workflows/ci.yml reads this field, installs exactly that release
+# with the wasm target, and runs clippy + the test suite + the wasm build on
+# it. The floor is set by the dependency graph, not by preference —
+# `soroban-sdk` 27.0.6 declares `rust-version = "1.91.0"` itself. Declaring
+# 1.85 here (as this file did before issue #410) was untestable and would
+# have failed a contributor's very first `cargo build`.
+#
+# Bumping this field is a reviewed change, not a side effect: raise it in the
+# same PR as the dependency that requires it, and update README/docs plus
+# SECURITY.md's "Verified against" section together.
+rust-version = "1.91.0"
 publish = false
 
 [lib]
@@ -34,6 +47,7 @@ sha2 = "0.11"
 # Parses tests/fixtures/index.json in the fixtures drift test (issue #92);
 # dev-only, never linked into the contract.
 serde_json = "1"
+jsonschema = "0.58"
 
 [profile.release]
 opt-level = "z"

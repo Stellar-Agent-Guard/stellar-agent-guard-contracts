@@ -1,5 +1,6 @@
 //! Shared types: policy model, storage keys, errors, and the pure parsed-call
 //! representation that the decision engine operates on.
+#![allow(missing_docs)] // Soroban type/error macros synthesize undocumented conversion metadata.
 
 use soroban_sdk::{contracterror, contracttype, Address, Bytes, Env, Symbol, Vec};
 
@@ -10,14 +11,21 @@ pub const DMS_WARN_THRESHOLD_PERCENT: u64 = 80;
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DmsHealthStatus {
+    /// Grace period is below the warning threshold.
     Ok,
+    /// Grace period is at least 80% elapsed but has not expired.
     Warn,
+    /// Grace period has elapsed.
     Expired,
 }
 
 /// Hard bound on rolling-window entries. Above this, the engine merges the two
 /// oldest entries forward (conservative over-count) — see SPEC §3.1.
 pub const MAX_WINDOW_ENTRIES: usize = 8192;
+
+/// Hard bound on auth contexts evaluated in one authorization (SPEC §4/§6).
+/// Sixty-four admits large DEX batches while bounding worst-case decision work.
+pub const MAX_AUTH_CONTEXTS: usize = 64;
 
 /// Maximum number of asset contracts in a policy (SPEC §8).
 pub const MAX_POLICY_ASSETS: usize = 256;
@@ -29,6 +37,10 @@ pub const MAX_POLICY_PROTOCOLS: usize = 256;
 /// and `recipient_window_caps`. Keeps allowlist scans and per-recipient
 /// storage bounded and predictable (SPEC §3 / §8).
 pub const MAX_RECIPIENT_ENTRIES: usize = 256;
+
+/// Hard bound on the number of entries in `asset_caps`. Keeps per-asset cap
+/// admission and validation scans bounded and predictable (SPEC §3 / §8).
+pub const MAX_ASSET_CAP_ENTRIES: usize = 256;
 
 /// Upper bound on `window_secs` and `dms_grace_secs` (issue #34). `3_650` days
 /// ≈ 10 years: far beyond any legitimate rolling spend window or dead-man
@@ -79,6 +91,14 @@ pub enum PolicyRuleId {
     AssetListTooLong,
     /// `protocols` exceeds `MAX_POLICY_PROTOCOLS`.
     ProtocolListTooLong,
+    /// `per_tx_cap > window_cap` when both are enabled (both > 0; issue #33).
+    PerTxCapExceedsWindowCap,
+    /// `asset_caps` exceeds `MAX_ASSET_CAP_ENTRIES`.
+    AssetCapListTooLong,
+    /// An `asset_caps` entry overrides an asset not present in `assets`.
+    AssetCapUnknownAsset,
+    /// The same asset appears twice in `asset_caps`.
+    DuplicateAssetCap,
 }
 
 /// Result of the `validate_policy` read (issue #35): whether a candidate
@@ -108,9 +128,11 @@ pub struct WindowState {
 }
 
 /// Rolling spend ledger for a single recipient.
+#[allow(missing_docs)] // contracttype synthesizes private conversion metadata
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecipientWindowState {
+    /// Account receiving transfers tracked by this ledger.
     pub recipient: Address,
     /// Cached rolling total (sum of non-expired entries).
     pub total: i128,
@@ -134,12 +156,29 @@ pub struct ProtocolCallEntry {
 }
 
 /// Per-recipient rolling-window cap override.
+#[allow(missing_docs)]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecipientCap {
+    /// Recipient to which this override applies.
     pub recipient: Address,
     /// Rolling cap for this recipient within `window_secs`; 0 = disabled / fall back to global.
     pub cap: i128,
+}
+
+/// Per-asset per-tx cap override.
+///
+/// Absent from `PolicyConfig::asset_caps` means the asset falls back to the
+/// global `per_tx_cap`. An override of 0 disables the per-tx cap for that
+/// asset only (the global window cap still applies).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetCap {
+    pub asset: Address,
+    /// Per-tx cap for this asset; 0 = disabled / fall back to global.
+    pub per_tx_cap: i128,
+    /// If true, the asset is blocked even when it is otherwise allowlisted.
+    pub paused: bool,
 }
 
 /// The policy an admin installs on the account. See SPEC §3/§4.
@@ -164,13 +203,19 @@ pub struct PolicyConfig {
     /// Denied SAC transfer destinations. Checked before the allowlist and
     /// before `allow_any_recipient`; an empty list leaves behavior unchanged.
     pub blocked_recipients: Vec<Address>,
+
+    /// Per-asset per-tx cap overrides; assets not listed here use the global
+    /// `per_tx_cap`. Storage bounded by `MAX_ASSET_CAP_ENTRIES`.
+    pub asset_caps: Vec<AssetCap>,
     /// Escape hatch: skip the recipient allowlist (caps still apply).
     pub allow_any_recipient: bool,
     /// Active window start (unix seconds); 0 = unrestricted.
     pub active_from: u64,
     /// Active window end (unix seconds); 0 = unrestricted.
     pub active_until: u64,
-    /// Admin kill switch.
+    /// Admin kill switch. Flipped in place by the `pause()` / `resume()` admin
+    /// entry points (issue #290), which touch no other field — the rolling
+    /// window and the dead-man-switch clock survive a pause.
     pub paused: bool,
     /// Dead-man switch grace (seconds); 0 = disabled.
     pub dms_grace_secs: u64,
@@ -197,6 +242,7 @@ impl core::fmt::Debug for PolicyConfig {
             .field("recipients", &self.recipients)
             .field("recipient_window_caps", &self.recipient_window_caps)
             .field("blocked_recipients", &self.blocked_recipients)
+            .field("asset_caps", &self.asset_caps)
             .field("allow_any_recipient", &self.allow_any_recipient)
             .field("active_from", &self.active_from)
             .field("active_until", &self.active_until)
@@ -207,12 +253,17 @@ impl core::fmt::Debug for PolicyConfig {
     }
 }
 
+#[allow(missing_docs)]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// A protocol contract and optional function allowlist.
 pub struct ProtocolRule {
+    /// Contract permitted for non-SAC calls.
     pub contract: Address,
     /// `None` = any function; `Some` = per-function allowlist.
     pub fns: Option<Vec<Symbol>>,
+    /// If true, the contract is blocked even when it is otherwise allowlisted.
+    pub paused: bool,
 }
 
 /// A single call the account must authorize, parsed into a form the pure
@@ -246,11 +297,17 @@ pub enum ParsedCall {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
+    /// Whether a policy is currently installed.
     pub has_policy: bool,
+    /// Monotonic revision incremented by policy install/revoke.
     pub policy_revision: u64,
+    /// Whether the administrator has frozen the account.
     pub admin_frozen: bool,
+    /// Whether the configured heartbeat grace has elapsed.
     pub heartbeat_expired: bool,
+    /// Unix timestamp of the last heartbeat, or zero if none.
     pub last_heartbeat: u64,
+    /// Ledger unix timestamp used for this snapshot.
     pub now: u64,
     /// The installed policy's admin kill switch (`cfg.paused`). `false` when
     /// no policy is installed (default-deny has nothing to pause).
@@ -268,10 +325,13 @@ pub struct Status {
     pub outside_active_window: bool,
 }
 
+/// Permissionless policy decision returned by `check`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CheckResult {
+    /// The target transfer passes the current policy snapshot.
     Allowed,
+    /// The transfer is blocked with a stable reason symbol.
     Blocked(Symbol),
 }
 
@@ -327,6 +387,7 @@ impl Error {
             Self::NotInitialized,
             Self::InvalidConfig,
             Self::InvalidAmount,
+            Self::NoPendingAdmin,
             Self::AdminFrozen,
             Self::HeartbeatExpired,
             Self::NoPolicy,
@@ -339,11 +400,13 @@ impl Error {
             Self::WindowCapExceeded,
             Self::ProtocolNotAllowed,
             Self::FunctionNotAllowed,
+            Self::AssetFnNotAllowed,
             Self::UnknownContract,
             Self::SelfFunctionNotAllowed,
             Self::CreateContractNotAllowed,
             Self::ProtocolCallRateExceeded,
             Self::DecisionInvariantViolation,
+            Self::TooManyAuthContexts,
         ];
         all_errors
             .into_iter()
@@ -354,13 +417,20 @@ impl Error {
 /// Advisory result for a targeted asset transfer. All fields are calculated
 /// from the current policy and window snapshot; this type never represents a
 /// storage mutation.
+#[allow(missing_docs)]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Advisory outcome and cap headroom for a targeted transfer check.
 pub struct CheckDetail {
+    /// Policy decision for the requested transfer.
     pub result: CheckResult,
+    /// Remaining global or recipient window allowance, if enabled.
     pub remaining_window: Option<i128>,
+    /// Configured per-transfer cap, if enabled.
     pub per_tx_cap: Option<i128>,
+    /// Effective per-transfer cap for this recipient, if enabled.
     pub effective_per_tx_cap: Option<i128>,
+    /// Effective rolling cap for this recipient, if enabled.
     pub effective_window_cap: Option<i128>,
 }
 
@@ -373,8 +443,12 @@ pub struct CheckDetail {
 pub enum DataKey {
     /// Instance: one-time flag for `initialize`.
     Initialized,
-    /// Instance: policy admin; set once at `initialize`.
+    /// Instance: policy admin; set at `initialize`, rotated via the
+    /// two-step `propose_admin_rotation` / `confirm_admin_rotation` (§7.2).
     Admin,
+    /// Instance: proposed admin awaiting confirmation by
+    /// `confirm_admin_rotation`; absent means no rotation is pending.
+    PendingAdmin,
     /// Instance: the registered agent's Ed25519 public key (32 bytes).
     AgentPubkey,
     /// Persistent: current policy (`None` = default-deny).
@@ -385,40 +459,95 @@ pub enum DataKey {
     LastHeartbeat,
     /// Persistent: admin-initiated freeze flag.
     AdminFrozen,
+    /// Persistent: unix seconds when DMS auto-freeze was explicitly recorded.
+    AutoFrozenAt,
     /// Persistent: incrementing counter for policy changes.
     PolicyRevision,
 }
 
+/// Stable contract errors and decision reasons exposed by the ABI.
+///
+/// # Discriminant Stability & Frozen Codes
+///
+/// Error discriminants are permanently frozen across mainnet/testnet releases because
+/// off-chain SDKs, indexers, and telemetry decode errors using these exact numeric codes
+/// (`Error(Contract, #N)`).
+///
+/// Variants are partitioned into three numeric groups:
+/// - Generic / lifecycle (`1..=9`, next free: `7`)
+/// - Account-level gates (`10..=19`, next free: `15`)
+/// - Per-call decisions (`20..=39`, next free: `34`)
+///
+/// Always follow the 'append, never insert' convention when adding variants. For the
+/// full end-to-end contributor workflow (touching the enum, reason mappings, decision table,
+/// SPEC §4/§6/§7, event vocabulary, and tests), see the checklist in `docs/contributing.md`
+/// (`#how-to-add-a-new-error-variant-end-to-end`) and `CONTRIBUTING.md`.
+#[allow(missing_docs)] // individual ABI variants are described below
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
     // Generic / lifecycle (1..=9)
+    /// **Reserved — never emitted** (issue #292). A bad agent signature is
+    /// rejected by `env.crypto().ed25519_verify`, which traps the host frame
+    /// (`InvokeError::Abort`) *before* any policy state is read, and every
+    /// admin write path enforces `require_auth(Admin)` at the host level;
+    /// neither produces a contract error this enum could return. The variant
+    /// (and code 1) is kept so the published ABI error table and off-chain
+    /// `REASON_CODES` mappings stay wire-stable — do not add a check that
+    /// returns it. Pinned by `bad_agent_signature_traps_without_unauthorized_error`
+    /// and documented in SPEC §7.1 / §10.2.
     Unauthorized = 1,
+    /// Initialization has already been completed.
     AlreadyInitialized = 2,
+    /// Required contract state has not been initialized.
     NotInitialized = 3,
+    /// Policy configuration violates a validation rule.
     InvalidConfig = 4,
+    /// Requested transfer amount is invalid.
     InvalidAmount = 5,
+    /// No admin rotation is pending (`confirm_admin_rotation` /
+    /// `cancel_admin_rotation` with no `PendingAdmin` stored).
+    NoPendingAdmin = 6,
     // Account-level gates (10..=19)
+    /// Admin emergency freeze is active.
     AdminFrozen = 10,
+    /// Agent heartbeat grace period has elapsed.
     HeartbeatExpired = 11,
+    /// No policy is installed (default-deny).
     NoPolicy = 12,
+    /// Policy is administratively paused.
     Paused = 13,
+    /// Current ledger time is outside the configured active interval.
     OutsideActiveWindow = 14,
-    // Per-call decisions (20..=30)
+    // Per-call decisions (20..=32)
+    /// Transfer asset is absent from the asset allowlist.
     AssetNotAllowed = 20,
+    /// Transfer destination is absent from the recipient allowlist.
     RecipientNotAllowed = 21,
+    /// Transfer exceeds its per-call cap.
     PerTxCapExceeded = 22,
+    /// Transfer exceeds a rolling-window cap.
     WindowCapExceeded = 23,
+    /// Called protocol contract is not allowlisted.
     ProtocolNotAllowed = 24,
+    /// Called function is not allowlisted for its protocol.
     FunctionNotAllowed = 25,
+    /// A call invokes a non-transfer function on an allowlisted asset.
+    AssetFnNotAllowed = 32,
     UnknownContract = 26,
+    /// Account self-call is not permitted by the fixed self-call policy.
     SelfFunctionNotAllowed = 27,
+    /// Account-authorized contract creation is disabled.
     CreateContractNotAllowed = 28,
+    /// Transfer destination is explicitly blocked.
     RecipientBlocked = 29,
+    /// Rolling protocol-call count would exceed its configured limit.
     ProtocolCallRateExceeded = 30,
-    // Internal enforcement invariant (31)
+    /// An internal decision-engine invariant failed.
     DecisionInvariantViolation = 31,
+    /// One authorization contains more contexts than the engine evaluates.
+    TooManyAuthContexts = 33,
 }
 
 impl Error {
@@ -431,6 +560,7 @@ impl Error {
             Self::NotInitialized => "not_initialized",
             Self::InvalidConfig => "invalid_config",
             Self::InvalidAmount => "invalid_amount",
+            Self::NoPendingAdmin => "no_pending_admin",
             Self::AdminFrozen => "admin_frozen",
             Self::HeartbeatExpired => "heartbeat_expired",
             Self::NoPolicy => "no_policy",
@@ -443,11 +573,269 @@ impl Error {
             Self::WindowCapExceeded => "window_cap_exceeded",
             Self::ProtocolNotAllowed => "protocol_not_allowed",
             Self::FunctionNotAllowed => "function_not_allowed",
+            Self::AssetFnNotAllowed => "asset_fn_not_allowed",
             Self::UnknownContract => "unknown_contract",
             Self::SelfFunctionNotAllowed => "self_function_not_allowed",
             Self::CreateContractNotAllowed => "create_contract_not_allowed",
             Self::ProtocolCallRateExceeded => "protocol_call_rate_exceeded",
             Self::DecisionInvariantViolation => "decision_invariant_violation",
+            Self::TooManyAuthContexts => "too_many_auth_contexts",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that each `Error` variant's numeric discriminant strictly matches
+    /// the value documented in SPEC §7 (and §7.1 error code mapping table).
+    ///
+    /// # Parity Obligation with SDK (`reasons.ts`)
+    ///
+    /// Soroban contract errors surface to the SDK and telemetry as numeric codes
+    /// (e.g. `Error(Contract, #12)` for `NoPolicy`). Off-chain decoders — specifically
+    /// `stellar-agent-guard-sdk` (see `src/reasons.ts` and `src/errors.ts`) — rely on these
+    /// numeric discriminants being completely stable.
+    ///
+    /// Renumbering any code silently corrupts error decoding across all consumers.
+    /// If an error code must change or a new variant is introduced:
+    /// 1. Update the error table and Error enum in SPEC §7 / §7.1.
+    /// 2. Update the SDK's `reasons.ts` (`REASON_CODES` / `REASON_BY_CODE` mapping).
+    /// 3. Update `tests/fixtures/auth-checked-vocabulary.json`.
+    /// 4. Update this test to assert the new or modified discriminant.
+    ///
+    /// For the complete contributor checklist and verification commands, see
+    /// `docs/contributing.md#how-to-add-a-new-error-variant-end-to-end` and `CONTRIBUTING.md`.
+    #[test]
+    fn error_code_discriminant_stability_spec_7() {
+        let all_errors = [
+            Error::Unauthorized,
+            Error::AlreadyInitialized,
+            Error::NotInitialized,
+            Error::InvalidConfig,
+            Error::InvalidAmount,
+            Error::NoPendingAdmin,
+            Error::AdminFrozen,
+            Error::HeartbeatExpired,
+            Error::NoPolicy,
+            Error::Paused,
+            Error::OutsideActiveWindow,
+            Error::AssetNotAllowed,
+            Error::RecipientNotAllowed,
+            Error::PerTxCapExceeded,
+            Error::WindowCapExceeded,
+            Error::ProtocolNotAllowed,
+            Error::FunctionNotAllowed,
+            Error::AssetFnNotAllowed,
+            Error::UnknownContract,
+            Error::SelfFunctionNotAllowed,
+            Error::CreateContractNotAllowed,
+            Error::RecipientBlocked,
+            Error::ProtocolCallRateExceeded,
+            Error::DecisionInvariantViolation,
+            Error::TooManyAuthContexts,
+        ];
+
+        // An exhaustive match asserting each variant's exact discriminant against SPEC §7.
+        // If a new variant is added, rustc will fail with E0004 (non-exhaustive patterns).
+        // If a variant is renumbered, the assertion inside the match arm will fail.
+        for err in all_errors {
+            let (expected_code, expected_reason) = match err {
+                Error::Unauthorized => (1, "unauthorized"),
+                Error::AlreadyInitialized => (2, "already_initialized"),
+                Error::NotInitialized => (3, "not_initialized"),
+                Error::InvalidConfig => (4, "invalid_config"),
+                Error::InvalidAmount => (5, "invalid_amount"),
+                Error::AdminFrozen => (10, "admin_frozen"),
+                Error::HeartbeatExpired => (11, "heartbeat_expired"),
+                Error::NoPolicy => (12, "no_policy"),
+                Error::Paused => (13, "paused"),
+                Error::OutsideActiveWindow => (14, "outside_active_window"),
+                Error::AssetNotAllowed => (20, "asset_not_allowed"),
+                Error::RecipientNotAllowed => (21, "recipient_not_allowed"),
+                Error::PerTxCapExceeded => (22, "per_tx_cap_exceeded"),
+                Error::WindowCapExceeded => (23, "window_cap_exceeded"),
+                Error::ProtocolNotAllowed => (24, "protocol_not_allowed"),
+                Error::FunctionNotAllowed => (25, "function_not_allowed"),
+                Error::UnknownContract => (26, "unknown_contract"),
+                Error::SelfFunctionNotAllowed => (27, "self_function_not_allowed"),
+                Error::CreateContractNotAllowed => (28, "create_contract_not_allowed"),
+                Error::RecipientBlocked => (29, "recipient_blocked"),
+                Error::NoPendingAdmin => (6, "no_pending_admin"),
+                Error::ProtocolCallRateExceeded => (30, "protocol_call_rate_exceeded"),
+                Error::DecisionInvariantViolation => (31, "decision_invariant_violation"),
+                Error::AssetFnNotAllowed => (32, "asset_fn_not_allowed"),
+                Error::TooManyAuthContexts => (33, "too_many_auth_contexts"),
+            };
+
+            assert_eq!(
+                err as u32, expected_code,
+                "Error::{:?} discriminant ({}) does not match SPEC §7 code ({}). Update SPEC §7 and SDK reasons.ts together if intentional.",
+                err,
+                err as u32,
+                expected_code
+            );
+            assert_eq!(
+                err.reason(),
+                expected_reason,
+                "Error::{:?} reason symbol ({}) does not match SPEC §7 symbol ({}). Update SPEC §7 and SDK reasons.ts together if intentional.",
+                err,
+                err.reason(),
+                expected_reason
+            );
+        }
+    }
+
+    #[test]
+    fn error_codes_are_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for err in [
+            Error::Unauthorized,
+            Error::AlreadyInitialized,
+            Error::NotInitialized,
+            Error::InvalidConfig,
+            Error::InvalidAmount,
+            Error::NoPendingAdmin,
+            Error::AdminFrozen,
+            Error::HeartbeatExpired,
+            Error::NoPolicy,
+            Error::Paused,
+            Error::OutsideActiveWindow,
+            Error::AssetNotAllowed,
+            Error::RecipientNotAllowed,
+            Error::PerTxCapExceeded,
+            Error::WindowCapExceeded,
+            Error::ProtocolNotAllowed,
+            Error::FunctionNotAllowed,
+            Error::AssetFnNotAllowed,
+            Error::UnknownContract,
+            Error::SelfFunctionNotAllowed,
+            Error::CreateContractNotAllowed,
+            Error::RecipientBlocked,
+            Error::ProtocolCallRateExceeded,
+            Error::DecisionInvariantViolation,
+            Error::TooManyAuthContexts,
+        ] {
+            let code = err as u32;
+            assert!(
+                seen.insert(code),
+                "duplicate error code {code} detected for {err:?}"
+            );
+        }
+    }
+
+    // ── agent-tx storage-key fixture (issue #383) ────────────────────────
+
+    /// The fixture `tools/agent-tx` checks its footprint keys against. It is a
+    /// separate cargo project that cannot link this `no_std` contract crate,
+    /// so the key encodings cross the boundary as a generated file.
+    const AGENT_TX_KEYS_FILE: &str = "tools/agent-tx/guard-storage-keys.json";
+
+    /// Storage tier of each `DataKey` variant, as documented on the enum. The
+    /// match is exhaustive on purpose: a new variant fails to compile here
+    /// until its tier is declared, it is added to [`every_data_key`], and the
+    /// fixture is regenerated.
+    fn data_key_storage(key: &DataKey) -> &'static str {
+        match key {
+            DataKey::Initialized
+            | DataKey::Admin
+            | DataKey::PendingAdmin
+            | DataKey::AgentPubkey => "instance",
+            DataKey::Policy
+            | DataKey::Window
+            | DataKey::LastHeartbeat
+            | DataKey::AdminFrozen
+            | DataKey::AutoFrozenAt
+            | DataKey::PolicyRevision => "persistent",
+        }
+    }
+
+    fn every_data_key() -> [DataKey; 10] {
+        [
+            DataKey::Initialized,
+            DataKey::Admin,
+            DataKey::PendingAdmin,
+            DataKey::AgentPubkey,
+            DataKey::Policy,
+            DataKey::Window,
+            DataKey::LastHeartbeat,
+            DataKey::AdminFrozen,
+            DataKey::AutoFrozenAt,
+            DataKey::PolicyRevision,
+        ]
+    }
+
+    /// Renders every `DataKey` with its variant name and exact `ScVal` XDR, as
+    /// produced by the host conversion `persist_get`/`persist_set` use. The name
+    /// is read back out of the encoding rather than typed by hand, so a rename
+    /// changes both columns at once.
+    fn render_agent_tx_storage_keys() -> std::string::String {
+        use core::fmt::Write as _;
+        use soroban_sdk::xdr::{Limits, ScVal, WriteXdr};
+        use soroban_sdk::{IntoVal, TryFromVal, Val};
+        use std::string::String;
+
+        let env = Env::default();
+        let mut out = String::from(
+            "{\n  \"_generated_by\": \"src/types.rs tests::agent_tx_storage_keys_fixture_is_current \
+             (regenerate: UPDATE_SNAPSHOTS=1 cargo test --lib agent_tx_storage_keys)\",\n  \
+             \"keys\": [\n",
+        );
+        let keys = every_data_key();
+        for (i, key) in keys.iter().enumerate() {
+            let val: Val = key.clone().into_val(&env);
+            let scval = ScVal::try_from_val(&env, &val)
+                .unwrap_or_else(|err| panic!("DataKey {key:?} does not convert to ScVal: {err:?}"));
+            let ScVal::Vec(Some(parts)) = &scval else {
+                panic!("DataKey {key:?} is not encoded as an ScVec: {scval:?}");
+            };
+            let [ScVal::Symbol(name)] = parts.as_slice() else {
+                panic!("DataKey {key:?} is not a unit variant [Symbol]: {scval:?}");
+            };
+            let name = name
+                .to_utf8_string()
+                .unwrap_or_else(|err| panic!("DataKey {key:?} symbol is not utf8: {err:?}"));
+            let xdr = scval
+                .to_xdr(Limits::none())
+                .unwrap_or_else(|err| panic!("DataKey {key:?} does not encode to XDR: {err:?}"));
+            let hex: String = xdr.iter().fold(String::new(), |mut s, b| {
+                let _ = write!(s, "{b:02x}");
+                s
+            });
+            let comma = if i + 1 == keys.len() { "" } else { "," };
+            let _ = writeln!(
+                out,
+                "    {{ \"variant\": \"{name}\", \"storage\": \"{}\", \"scval_xdr_hex\": \"{hex}\" }}{comma}",
+                data_key_storage(key)
+            );
+        }
+        out.push_str("  ]\n}\n");
+        out
+    }
+
+    /// `agent-tx` declares the guard's storage keys in every transaction
+    /// footprint; a stale encoding there makes it declare keys that do not
+    /// exist and fail with an opaque fee or auth error. This fails the
+    /// contract's own suite the moment a `DataKey` change leaves the fixture
+    /// behind; agent-tx's suite then checks its keys against the fixture.
+    #[test]
+    fn agent_tx_storage_keys_fixture_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(AGENT_TX_KEYS_FILE);
+        let actual = render_agent_tx_storage_keys();
+        if std::env::var("UPDATE_SNAPSHOTS").is_ok() {
+            std::fs::write(&path, &actual)
+                .unwrap_or_else(|err| panic!("cannot write {}: {err}", path.display()));
+            return;
+        }
+        let committed = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+        assert_eq!(
+            actual, committed,
+            "DataKey changed but {AGENT_TX_KEYS_FILE} was not regenerated.\n\
+             Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --lib agent_tx_storage_keys`,\n\
+             then run `cargo test --manifest-path tools/agent-tx/Cargo.toml` and update\n\
+             agent-tx's `GuardKey` until it passes."
+        );
     }
 }

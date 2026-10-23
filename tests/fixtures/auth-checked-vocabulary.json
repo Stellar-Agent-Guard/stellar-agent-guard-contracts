@@ -16,6 +16,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -39,6 +47,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -64,6 +80,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -87,6 +111,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -112,6 +144,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -136,6 +176,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -146,6 +194,38 @@
         ]
       },
       "spec_ref": "§6.2; §7.1"
+    },
+    {
+      "code": 6,
+      "error_variant": "NoPendingAdmin",
+      "symbol": "no_pending_admin",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "no_pending_admin"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§7.2"
     },
     {
       "code": 10,
@@ -159,6 +239,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -184,6 +272,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -207,6 +303,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -232,6 +336,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -255,6 +367,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -280,6 +400,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -303,6 +431,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -328,6 +464,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -351,6 +495,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -376,6 +528,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -399,6 +559,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -424,6 +592,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -447,6 +623,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -472,6 +656,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -495,6 +687,14 @@
       "data": {
         "type": "Map",
         "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
           {
             "name": "context_index",
             "type": "u32"
@@ -520,6 +720,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -544,6 +752,14 @@
         "type": "Map",
         "fields": [
           {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
             "name": "context_index",
             "type": "u32"
           },
@@ -554,6 +770,70 @@
         ]
       },
       "spec_ref": "§6.3"
+    },
+    {
+      "code": 32,
+      "error_variant": "AssetFnNotAllowed",
+      "symbol": "asset_fn_not_allowed",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "asset_fn_not_allowed"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§6.3"
+    },
+    {
+      "code": 33,
+      "error_variant": "TooManyAuthContexts",
+      "symbol": "too_many_auth_contexts",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "too_many_auth_contexts"
+      ],
+      "data": {
+        "type": "Map",
+        "fields": [
+          {
+            "name": "contract",
+            "type": "Option<Address>"
+          },
+          {
+            "name": "fn_name",
+            "type": "Option<Symbol>"
+          },
+          {
+            "name": "context_index",
+            "type": "u32"
+          },
+          {
+            "name": "revision",
+            "type": "u64"
+          }
+        ]
+      },
+      "spec_ref": "§4, §6, §7.1"
     }
   ]
 }
