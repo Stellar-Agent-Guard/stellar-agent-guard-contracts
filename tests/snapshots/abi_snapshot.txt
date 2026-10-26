@@ -32,6 +32,9 @@
 ## Functions
 pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 pub fn set_policy(env: Env, config: PolicyConfig)
+pub fn reset_window(env: Env)
+pub fn pause(env: Env)
+pub fn resume(env: Env)
 pub fn revoke_policy(env: Env)
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
 pub fn propose_admin_rotation(env: Env, new_admin: Address)

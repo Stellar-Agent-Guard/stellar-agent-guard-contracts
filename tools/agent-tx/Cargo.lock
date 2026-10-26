@@ -14,6 +14,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "ed25519-dalek",
+ "getrandom",
  "hex",
  "serde",
  "serde_json",

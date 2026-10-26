@@ -40,15 +40,39 @@ The admin can:
 - Revoke the policy (`revoke_policy`)
 - Freeze the account (`freeze`)
 - Unfreeze the account (`unfreeze`)
+- Pause/resume the policy's kill switch in place (`pause` / `resume`)
+- Explicitly zero the rolling spend window (`reset_window`)
 - Rotate the agent key (`rotate_agent_key`)
 
 The admin **cannot** move funds. Fund movement requires the agent's Ed25519 signature through `__check_auth`, which enforces the policy. The admin is a policy authority, not a fund authority.
 
-## Why does `set_policy` reset the rolling window?
+## Does `set_policy` reset the rolling window?
 
-A fresh policy gets a fresh window by design. This prevents an old window's accumulated spend from carrying over into a new policy's cap. If you change the window cap from 1000 to 500, you don't want the old 800 in spend to immediately block you — the new policy starts with a clean slate.
+No — not since [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289).
+A policy *edit* (any `set_policy` while a policy is installed) **preserves the rolling
+window and the dead-man-switch clock**: pausing or tightening a policy no longer hands the
+agent a fresh budget or a fresh grace period. Accumulated spend keeps counting against the
+new cap.
 
-This is an explicit admin-attested action: by calling `set_policy`, the admin is saying "I trust this new policy from this moment."
+Only a *first* install (no policy stored — including an install after `revoke_policy`)
+starts from an empty window with a freshly armed DMS clock: a genuinely new policy gets a
+fresh window.
+
+When a fresh budget really is the intent, the admin says so explicitly with
+`reset_window()` — an admin-attested, idempotent call that zeroes the window and emits an
+`event_window_reset` for the audit trail. See [set-policy](functions/set-policy.md) and
+SPEC §5.1/§7.
+
+## How do `pause` and `freeze` differ?
+
+They are two different levers:
+
+- `pause()` / `resume()` (issue #290) flip the *policy's* `paused` flag in place. The
+  rolling window and the DMS clock are untouched. They bind only while a policy is
+  installed. This is the routine halt/restart.
+- `freeze()` / `unfreeze()` set the account-level `AdminFrozen` brake, which binds even a
+  policyless account — the emergency lever. Note `unfreeze` also re-arms the
+  dead-man-switch clock, while `resume` touches nothing but the flag.
 
 ## Why can't the agent heartbeat after the grace expires?
 

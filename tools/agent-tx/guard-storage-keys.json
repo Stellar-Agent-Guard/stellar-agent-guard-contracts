@@ -1,0 +1,15 @@
+{
+  "_generated_by": "src/types.rs tests::agent_tx_storage_keys_fixture_is_current (regenerate: UPDATE_SNAPSHOTS=1 cargo test --lib agent_tx_storage_keys)",
+  "keys": [
+    { "variant": "Initialized", "storage": "instance", "scval_xdr_hex": "0000001000000001000000010000000f0000000b496e697469616c697a656400" },
+    { "variant": "Admin", "storage": "instance", "scval_xdr_hex": "0000001000000001000000010000000f0000000541646d696e000000" },
+    { "variant": "PendingAdmin", "storage": "instance", "scval_xdr_hex": "0000001000000001000000010000000f0000000c50656e64696e6741646d696e" },
+    { "variant": "AgentPubkey", "storage": "instance", "scval_xdr_hex": "0000001000000001000000010000000f0000000b4167656e745075626b657900" },
+    { "variant": "Policy", "storage": "persistent", "scval_xdr_hex": "0000001000000001000000010000000f00000006506f6c6963790000" },
+    { "variant": "Window", "storage": "persistent", "scval_xdr_hex": "0000001000000001000000010000000f0000000657696e646f770000" },
+    { "variant": "LastHeartbeat", "storage": "persistent", "scval_xdr_hex": "0000001000000001000000010000000f0000000d4c617374486561727462656174000000" },
+    { "variant": "AdminFrozen", "storage": "persistent", "scval_xdr_hex": "0000001000000001000000010000000f0000000b41646d696e46726f7a656e00" },
+    { "variant": "AutoFrozenAt", "storage": "persistent", "scval_xdr_hex": "0000001000000001000000010000000f0000000c4175746f46726f7a656e4174" },
+    { "variant": "PolicyRevision", "storage": "persistent", "scval_xdr_hex": "0000001000000001000000010000000f0000000e506f6c6963795265766973696f6e0000" }
+  ]
+}

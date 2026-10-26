@@ -31,9 +31,11 @@ stellar contract invoke --id GUARD_CONTRACT_ID --network testnet \
   --source-account guard_admin --send=yes -- set_policy --config '<PASTE JSON>'
 ```
 
-A fresh `set_policy` resets the rolling window and starts the dead-man-switch clock at
-install time (full grace). Invalid configs are rejected with `InvalidConfig` and leave
-the existing policy unchanged (fail-closed, SPEC §8).
+A *first* `set_policy` (no policy stored — including after `revoke_policy`) starts an
+empty rolling window and arms the dead-man-switch clock at install time (full grace). A
+policy *edit* preserves both the window and the clock (issue #289); use `reset_window()`
+for an explicit, admin-attested window reset. Invalid configs are rejected with
+`InvalidConfig` and leave the existing policy unchanged (fail-closed, SPEC §8).
 
 ## The presets
 

@@ -115,6 +115,32 @@ Both are cleared by `unfreeze()`, which also restarts the heartbeat clock — th
 field in `event_unfrozen` reports when that restart actually happened (i.e. the DMS was expired
 at unfreeze time).
 
+## pause / resume — the policy-level lever
+
+```rust
+pub fn pause(env: Env)    // admin only — sets PolicyConfig.paused = true in place
+pub fn resume(env: Env)   // admin only — sets PolicyConfig.paused = false in place
+```
+
+Issue #290. `pause` / `resume` are the **policy-level** halt/restart: they flip the stored
+policy's `paused` flag in place — the rolling window, the dead-man-switch clock, and every
+other field are untouched, so pausing mid-incident and resuming never hands the agent a
+fresh budget or a fresh grace period. It is the same field the §4 rule #4 gate reads
+(`PolicyConfig.paused`); there is no second pause flag in storage.
+
+Both are admin-only (`require_auth(Admin)`), idempotent (pausing a paused account — or
+resuming a running one — is not an error; the event still records the action), and require
+an installed policy (`NoPolicy` otherwise). They emit `EventPaused` / `EventResumed`
+carrying `by` and `revision`; `PolicyRevision` advances only when the call actually flips
+the flag. `resume` restores admissibility, not budget: it does not refund what was spent
+while paused.
+
+**Which lever?** Reach for `pause` / `resume` for routine, policy-level halts — they bind
+only while a policy is installed and preserve spend accounting. Reach for `freeze` /
+`unfreeze` in an emergency: `freeze` sets the account-level `AdminFrozen` brake that binds
+even a policyless account, and `unfreeze` (unlike `resume`) re-arms the dead-man-switch
+clock.
+
 ## Storage keys touched
 
 | Function | Key | Type | Action |
@@ -122,6 +148,8 @@ at unfreeze time).
 | `freeze` | `AdminFrozen` | `bool` | Set to `true` |
 | `unfreeze` | `AdminFrozen` | `bool` | Set to `false` |
 | `unfreeze` | `LastHeartbeat` | `u64` | Set to now |
+| `pause` | `Policy` | `PolicyConfig` | Write (`paused = true` in place; nothing else changes) |
+| `resume` | `Policy` | `PolicyConfig` | Write (`paused = false` in place; nothing else changes) |
 
 ## See also
 

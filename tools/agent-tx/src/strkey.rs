@@ -19,18 +19,17 @@
 //! the unaudited-contract reminder, because that is where a wrong-network or
 //! accidental call can move real funds.
 
-use super::{base32_decode, crc16_xmodem, VER_ACCOUNT, VER_CONTRACT};
+use super::{VER_ACCOUNT, VER_CONTRACT};
+use crate::base32::{base32_decode, crc16_xmodem, B32};
 
 /// Version byte of an account secret seed (`S...`).
-const VER_SECRET: u8 = 0x90;
+pub(crate) const VER_SECRET: u8 = 0x90;
 /// A 32-byte payload with version byte and CRC16 checksum, base-32 encoded:
 /// `ceil(35 * 8 / 5) == 56` characters, with no `=` padding.
 const STRKEY_LEN: usize = 56;
-/// RFC 4648 base-32 alphabet, which is what Stellar's StrKey uses.
-const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 fn in_alphabet(c: char) -> bool {
-    c.is_ascii() && !c.is_ascii_lowercase() && ALPHABET.contains(&(c.to_ascii_uppercase() as u8))
+    c.is_ascii() && !c.is_ascii_lowercase() && B32.contains(&(c.to_ascii_uppercase() as u8))
 }
 
 /// Which kind of key a flag expects.
@@ -75,7 +74,7 @@ impl KeyKind {
 /// base-32 over `version || payload || crc`, so it carries the top 5 bits of
 /// the version byte.
 fn prefix_for(version: u8) -> char {
-    char::from(ALPHABET[usize::from(version >> 3)])
+    char::from(B32[usize::from(version >> 3)])
 }
 
 fn version_name(version: u8) -> String {
