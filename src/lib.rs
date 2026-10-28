@@ -1242,12 +1242,6 @@ mod policy_engine_type {
         /// window ledger. An allowed transfer is staged before the next item is
         /// evaluated, so the returned verdicts match the all-or-nothing admission
         /// rules used by `__check_auth`. The local ledger is discarded afterwards.
-        ///
-        /// # Panics
-        ///
-        /// This function can panic only if its internal decision list contains
-        /// more than `u32::MAX` entries. Soroban vectors are u32-indexed, so a
-        /// valid input batch cannot trigger this condition.
         #[allow(clippy::must_use_candidate)]
         pub fn check_batch(
             env: Env,
@@ -1265,9 +1259,10 @@ mod policy_engine_type {
             }
             let Some(snapshot) = AuthSnapshot::load(&env) else {
                 let mut verdicts = Vec::new(&env);
-                for (i, context) in contexts.iter().enumerate() {
-                    let index = u32::try_from(i).unwrap();
+                let mut index: u32 = 0;
+                for context in contexts.iter() {
                     emit_auth(&env, false, Some(Error::NoPolicy), Some(&context), index);
+                    index = index.saturating_add(1);
                     verdicts.push_back(CheckResult::Blocked(Symbol::new(
                         &env,
                         Error::NoPolicy.reason(),
@@ -1302,8 +1297,8 @@ mod policy_engine_type {
             );
             let mut verdicts = Vec::new(&env);
             let mut admissible = true;
-            for (i, decision) in decisions.iter().enumerate() {
-                let index = u32::try_from(i).unwrap();
+            let mut index: u32 = 0;
+            for decision in decisions.iter() {
                 let context = contexts.get(index);
                 let result = match decision {
                     Decision::Allowed => {
@@ -1317,6 +1312,7 @@ mod policy_engine_type {
                     }
                 };
                 verdicts.push_back(result);
+                index = index.saturating_add(1);
             }
 
             BatchCheckResult {
