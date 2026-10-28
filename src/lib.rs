@@ -1298,7 +1298,7 @@ mod policy_engine_type {
             let mut verdicts = Vec::new(&env);
             let mut admissible = true;
             let mut index: u32 = 0;
-            for decision in decisions.iter() {
+            for decision in &decisions {
                 let context = contexts.get(index);
                 let result = match decision {
                     Decision::Allowed => {
