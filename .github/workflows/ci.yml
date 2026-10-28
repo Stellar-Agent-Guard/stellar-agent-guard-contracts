@@ -130,7 +130,7 @@ jobs:
 
       - name: Preserve fuzz crash reproducers
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: policy-config-fuzz-artifacts
           path: fuzz/artifacts/policy_config_deserialization/
