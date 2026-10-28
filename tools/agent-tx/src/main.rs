@@ -202,6 +202,27 @@ fn secret_to_seed(secret: &str) -> [u8; 32] {
     }
 }
 
+/// Read the agent secret seed from a file path.
+///
+/// Pass `"-"` to read from stdin. The returned string is trimmed of trailing
+/// whitespace so that a `echo "S..." > secret.txt` workflow works without
+/// having to strip the newline manually. The file or stdin must contain a
+/// valid StrKey secret seed (`S...`); validation is left to the caller.
+fn read_secret_from_file(path: &str) -> Result<String, String> {
+    let raw = if path == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("failed to read agent secret from stdin: {e}"))?;
+        buf
+    } else {
+        std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read agent secret from file '{path}': {e}"))?
+    };
+    Ok(raw.trim_end().to_string())
+}
+
 fn account_strkey(pubkey: &[u8; 32]) -> String {
     strkey_encode(VER_ACCOUNT, pubkey)
 }
@@ -3015,6 +3036,146 @@ mod tests {
     }
 
     #[test]
+    fn agent_secret_file_loads_secret_from_file() {
+        let path = format!(
+            "/tmp/agent_tx_test_secret_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(12345)
+        );
+        std::fs::write(&path, format!("{VALID_SECRET}\n")).expect("write temp secret file");
+
+        let mock = MockRpc::start();
+        let args = argv(&[
+            "heartbeat",
+            "--guard",
+            VALID_GUARD,
+            "--agent-secret-file",
+            &path,
+            "--rpc-url",
+            &mock.url,
+            "--network-passphrase",
+            "Local Test Network",
+        ]);
+        let (cmd, rest) = args.split_first().expect("subcommand");
+        let result = parse_request(cmd, rest);
+        let _ = std::fs::remove_file(&path);
+        let req = result.expect("--agent-secret-file accepted");
+        assert_eq!(req.secret.as_deref(), Some(VALID_SECRET));
+    }
+
+    #[test]
+    fn agent_secret_file_precedence_over_bare_agent_secret() {
+        // --agent-secret-file wins when both are supplied. The raw secret on
+        // the argv is a wrong key type, so the test would fail if the file
+        // path were not used.
+        let path = format!(
+            "/tmp/agent_tx_test_secret_prec_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(12345)
+        );
+        std::fs::write(&path, format!("{VALID_SECRET}\n")).expect("write temp secret file");
+
+        let mock = MockRpc::start();
+        let args = argv(&[
+            "heartbeat",
+            "--guard",
+            VALID_GUARD,
+            // This raw value would fail StrKey validation on its own.
+            "--agent-secret",
+            VALID_GUARD, // wrong key type — should be overridden by the file
+            "--agent-secret-file",
+            &path,
+            "--rpc-url",
+            &mock.url,
+            "--network-passphrase",
+            "Local Test Network",
+        ]);
+        let (cmd, rest) = args.split_first().expect("subcommand");
+        let result = parse_request(cmd, rest);
+        let _ = std::fs::remove_file(&path);
+        let req = result.expect("--agent-secret-file overrides --agent-secret");
+        assert_eq!(req.secret.as_deref(), Some(VALID_SECRET));
+    }
+
+    #[test]
+    fn agent_secret_file_missing_path_is_error() {
+        let mock = MockRpc::start();
+        let args = argv(&[
+            "heartbeat",
+            "--guard",
+            VALID_GUARD,
+            "--agent-secret-file",
+            "/nonexistent/path/secret.txt",
+            "--rpc-url",
+            &mock.url,
+            "--network-passphrase",
+            "Local Test Network",
+        ]);
+        let (cmd, rest) = args.split_first().expect("subcommand");
+        let err = parse_request(cmd, rest).expect_err("missing file accepted");
+        assert!(
+            err.contains("failed to read agent secret from file"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bare_agent_secret_on_argv_does_not_fail_but_is_recorded() {
+        // Passing --agent-secret with a raw seed on the command line is still
+        // accepted (backward compatibility); the warning is emitted to stderr.
+        // This test ensures parse_request itself succeeds and the secret is
+        // populated correctly — the warning side-effect is on stderr so we
+        // cannot assert it here without capturing stderr.
+        let mock = MockRpc::start();
+        let args = argv(&[
+            "heartbeat",
+            "--guard",
+            VALID_GUARD,
+            "--agent-secret",
+            VALID_SECRET,
+            "--rpc-url",
+            &mock.url,
+            "--network-passphrase",
+            "Local Test Network",
+        ]);
+        let (cmd, rest) = args.split_first().expect("subcommand");
+        let req = parse_request(cmd, rest).expect("raw --agent-secret accepted");
+        assert_eq!(req.secret.as_deref(), Some(VALID_SECRET));
+    }
+
+    #[test]
+    fn agent_secret_file_flag_appears_in_heartbeat_help() {
+        let help = subcommand_help("heartbeat");
+        assert!(
+            help.contains("--agent-secret-file"),
+            "heartbeat help must document --agent-secret-file: {help}"
+        );
+        assert!(
+            help.contains("AGENT_SECRET"),
+            "heartbeat help must document AGENT_SECRET env var: {help}"
+        );
+    }
+
+    #[test]
+    fn agent_secret_file_flag_appears_in_transfer_help() {
+        for sub in ["transfer", "transfer-from"] {
+            let help = subcommand_help(sub);
+            assert!(
+                help.contains("--agent-secret-file"),
+                "{sub} help must document --agent-secret-file: {help}"
+            );
+            assert!(
+                help.contains("AGENT_SECRET"),
+                "{sub} help must document AGENT_SECRET env var: {help}"
+            );
+        }
+    }
+
+    #[test]
     fn help_and_usage_cover_all_subcommands() {
         let tool = tool_help();
         assert!(tool.contains("Usage:"));
@@ -3595,6 +3756,7 @@ fn valid_flags_for_subcommand(cmd: &str) -> &'static [&'static str] {
             "--amount",
             "--secret",
             "--agent-secret",
+            "--agent-secret-file",
             "--network",
             "--rpc-url",
             "--rpc-timeout",
@@ -3611,6 +3773,7 @@ fn valid_flags_for_subcommand(cmd: &str) -> &'static [&'static str] {
             "--to",
             "--amount",
             "--agent-secret",
+            "--agent-secret-file",
             "--secret",
             "--network",
             "--rpc-url",
@@ -3629,6 +3792,7 @@ fn valid_flags_for_subcommand(cmd: &str) -> &'static [&'static str] {
             "--to",
             "--amount",
             "--agent-secret",
+            "--agent-secret-file",
             "--secret",
             "--network",
             "--rpc-url",
@@ -3642,6 +3806,7 @@ fn valid_flags_for_subcommand(cmd: &str) -> &'static [&'static str] {
         "heartbeat" => &[
             "--guard",
             "--agent-secret",
+            "--agent-secret-file",
             "--secret",
             "--network",
             "--rpc-url",
@@ -3809,6 +3974,13 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
     let mut amount = None;
     let mut secret = None;
     let mut secret_field = String::new();
+    // Path supplied via --agent-secret-file (or "-" for stdin). Takes
+    // precedence over --agent-secret when both are given.
+    let mut secret_file: Option<String> = None;
+    // Whether the caller passed the raw secret directly on the command line
+    // via --agent-secret (not from a file or the env). Used to emit the
+    // deprecation warning once, after all flags are parsed.
+    let mut raw_secret_on_argv = false;
     let mut network = None;
     let mut rpc_url = None;
     let mut passphrase = None;
@@ -3870,7 +4042,22 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
             }
             "--agent-secret" | "--secret" => {
                 secret_field = flag.clone();
-                secret = Some(cli.value_expected(&flag, "secret seed 'S...'")?);
+                let val = cli.value_expected(&flag, "secret seed 'S...'")?;
+                // If the value is "-" treat it as stdin (same as --agent-secret-file -).
+                if val == "-" {
+                    secret_file = Some(val);
+                } else {
+                    // Raw secret on the command line — set the deprecation flag.
+                    // The warning is printed after all flags are parsed so it
+                    // always appears before any error message about a bad value.
+                    raw_secret_on_argv = true;
+                    secret = Some(val);
+                }
+            }
+            "--agent-secret-file" => {
+                secret_field = flag.clone();
+                secret_file =
+                    Some(cli.value_expected("--agent-secret-file", "file path or '-' for stdin")?);
             }
             "--network" => {
                 network = Some(cli.value_expected("--network", "testnet | futurenet | mainnet")?)
@@ -3906,6 +4093,28 @@ fn parse_request(cmd: &str, argv: &[String]) -> Result<Request, String> {
         &resolve_guard(guard.as_deref())?,
     )?;
 
+    // Secret resolution order (highest to lowest precedence):
+    //   1. --agent-secret-file <path>  (or --agent-secret - / --secret -)
+    //   2. --agent-secret <seed>       (raw value on argv — emits a warning)
+    //   3. AGENT_SECRET env var        (recommended for automation)
+    //
+    // The warning for (2) is emitted here, before any network I/O, so the
+    // operator sees it regardless of whether the secret is valid.
+    if raw_secret_on_argv {
+        eprintln!(
+            "warning: passing the secret key via --agent-secret exposes it in the process \
+             table (argv) and shell history; prefer AGENT_SECRET env var or \
+             --agent-secret-file <path>"
+        );
+    }
+    // --agent-secret-file overrides a bare --agent-secret when both are given.
+    if let Some(ref path) = secret_file {
+        let from_file = read_secret_from_file(path)?;
+        if secret_field.is_empty() {
+            secret_field = "--agent-secret-file".to_string();
+        }
+        secret = Some(from_file);
+    }
     let secret = secret.or_else(|| std::env::var("AGENT_SECRET").ok());
     if secret_field.is_empty() && secret.is_some() {
         secret_field = "--agent-secret (or AGENT_SECRET)".to_string();
@@ -4040,6 +4249,7 @@ fn subcommand_help(cmd: &str) -> String {
              \n\
              Options:\n\
              \x20 --secret <S...>             Agent secret seed (S...) for signed simulation auth\n\
+             \x20 --agent-secret-file <path>  Read secret seed from a file; use '-' for stdin (secure)\n\
              \x20 --network <preset>          Network preset: testnet | futurenet | mainnet (default: testnet)\n\
              \x20 --rpc-url <url>             Custom RPC endpoint URL\n\
              \x20 --network-passphrase <pass> Custom network passphrase\n\
@@ -4049,7 +4259,7 @@ fn subcommand_help(cmd: &str) -> String {
              \x20 -h, --help                  Print this help message\n".to_string()
         }
         "transfer" => {
-            "Usage: agent-tx transfer --guard <C...> --token <C...> --to <G|C...> --amount <N> --agent-secret <S...> [options]\n\
+            "Usage: agent-tx transfer --guard <C...> --token <C...> --to <G|C...> --amount <N> [options]\n\
              \n\
              Sign and submit a transfer from the guard contract to the recipient.\n\
              \n\
@@ -4058,7 +4268,11 @@ fn subcommand_help(cmd: &str) -> String {
              \x20 --token <C...>              Token contract address (C...); synonym: --asset\n\
              \x20 --to <G|C...>               Recipient account ID (G...) or contract ID (C...)\n\
              \x20 --amount <N>                Amount to transfer (integer i128 in whole units/stroops)\n\
-             \x20 --agent-secret <S...>       Registered agent's secret seed (S...); or set AGENT_SECRET env var\n\
+             \n\
+             Secret (one of the following is required):\n\
+             \x20 AGENT_SECRET env var        Recommended: secret is not visible in ps or shell history\n\
+             \x20 --agent-secret-file <path>  Read secret seed from a file; use '-' for stdin (secure)\n\
+             \x20 --agent-secret <S...>       Secret seed on the command line (warns: visible in ps output)\n\
              \n\
              Options:\n\
              \x20 --network <preset>          Network preset: testnet | futurenet | mainnet (default: testnet)\n\
@@ -4070,7 +4284,7 @@ fn subcommand_help(cmd: &str) -> String {
              \x20 -h, --help                  Print this help message\n".to_string()
         }
         "transfer-from" => {
-            "Usage: agent-tx transfer-from --guard <C...> --token <C...> --from <G|C...> --to <G|C...> --amount <N> --agent-secret <S...> [options]\n\
+            "Usage: agent-tx transfer-from --guard <C...> --token <C...> --from <G|C...> --to <G|C...> --amount <N> [options]\n\
              \n\
              Sign and submit a transfer_from authorized by the guard account.\n\
              \n\
@@ -4080,7 +4294,11 @@ fn subcommand_help(cmd: &str) -> String {
              \x20 --from <G|C...>             Source account (G...) or contract (C...) debited by allowance\n\
              \x20 --to <G|C...>               Recipient account ID (G...) or contract ID (C...)\n\
              \x20 --amount <N>                Amount to transfer (integer i128 in whole units/stroops)\n\
-             \x20 --agent-secret <S...>       Registered agent's secret seed (S...); or set AGENT_SECRET env var\n\
+             \n\
+             Secret (one of the following is required):\n\
+             \x20 AGENT_SECRET env var        Recommended: secret is not visible in ps or shell history\n\
+             \x20 --agent-secret-file <path>  Read secret seed from a file; use '-' for stdin (secure)\n\
+             \x20 --agent-secret <S...>       Secret seed on the command line (warns: visible in ps output)\n\
              \n\
              Options:\n\
              \x20 --network <preset>          Network preset: testnet | futurenet | mainnet (default: testnet)\n\
@@ -4092,13 +4310,17 @@ fn subcommand_help(cmd: &str) -> String {
              \x20 -h, --help                  Print this help message\n".to_string()
         }
         "heartbeat" => {
-            "Usage: agent-tx heartbeat --guard <C...> --agent-secret <S...> [options]\n\
+            "Usage: agent-tx heartbeat --guard <C...> [options]\n\
              \n\
              Send a heartbeat transaction to keep the guard's dead man's switch (DMS) from expiring.\n\
              \n\
              Required arguments:\n\
              \x20 --guard <C...>              Guard contract address (C...) or registered alias\n\
-             \x20 --agent-secret <S...>       Registered agent's secret seed (S...); or set AGENT_SECRET env var\n\
+             \n\
+             Secret (one of the following is required):\n\
+             \x20 AGENT_SECRET env var        Recommended: secret is not visible in ps or shell history\n\
+             \x20 --agent-secret-file <path>  Read secret seed from a file; use '-' for stdin (secure)\n\
+             \x20 --agent-secret <S...>       Secret seed on the command line (warns: visible in ps output)\n\
              \n\
              Options:\n\
              \x20 --network <preset>          Network preset: testnet | futurenet | mainnet (default: testnet)\n\
