@@ -19,7 +19,10 @@
 //! convention:
 //!
 //! - base32 decoding follows RFC 4648 (no padding), and the trailing two
-//!   bytes are the strkey CRC16-XModem checksum.
+//!   bytes are the strkey CRC16-XModem checksum. The decode is the
+//!   `agent-strkey` crate's: the same implementation `tools/agent-tx` parses
+//!   its flags with, so there is one place a key-handling bug can live and
+//!   one place it gets fixed (issue #379).
 //! - The strkey layout (version byte `0x90` + 32-byte seed + CRC16-XModem
 //!   checksum) is [SEP-0023][sep23]: `STRKEY_PRIVKEY` base value `18 << 3` with
 //!   the `STRKEY_ALG_ED25519` selector `0` — the same layout `stellar keys` and
@@ -58,12 +61,13 @@
 //!    memory and offers no HSM or hardware-backed protection. For anything
 //!    beyond testnet keys, derive the pubkey in the same secure environment
 //!    that holds the secret.
-//! 3. **Checksum validation.** This example checks the strkey version byte and
-//!    length, but does **not** verify the CRC16-XModem checksum. A mistyped
-//!    secret still derives *a* valid-looking 32-byte pubkey — the mismatch only
-//!    shows up later as the runtime auth failure described in (1). Use
-//!    `stellar keys show` (which does validate the checksum) when a wrong
-//!    secret must be caught up front.
+//! 3. **Checksum validation is format validation, nothing more.** The shared
+//!    codec (`agent-strkey`) checks the version byte, the 56-character length
+//!    and the CRC16-XModem checksum, so a *mistyped* secret is rejected here
+//!    instead of silently deriving some other key. That is all it proves: a
+//!    different but well-formed secret also derives a valid-looking 32-byte
+//!    pubkey, and that mix-up only shows up later as the runtime auth failure
+//!    described in (1).
 //! 4. **Key custody and rotation.** Nothing here registers, stores, or rotates
 //!    the key. Registration happens in `initialize`; rotation goes through
 //!    `rotate_agent_key`, which emits the old/new fingerprints (SPEC §9) that
@@ -86,41 +90,25 @@
 //! If you are auditing the trust chain, read those three together with this
 //! example: derivation here, key binding enforced there.
 
+use agent_strkey::strkey::{decode_strkey, VER_SECRET};
 use ed25519_dalek::SigningKey;
 use std::io::Read;
 
-const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-
-fn base32_decode(input: &str) -> Option<Vec<u8>> {
-    let mut acc: u32 = 0;
-    let mut bits: u32 = 0;
-    let mut out = Vec::new();
-    for c in input.bytes() {
-        if c == b'=' {
-            break;
-        }
-        let v = u32::try_from(ALPHABET.iter().position(|&a| a == c)?).ok()?;
-        acc = (acc << 5) | v;
-        bits += 5;
-        while bits >= 8 {
-            bits -= 8;
-            out.push(u8::try_from((acc >> bits) & 0xff).ok()?);
-        }
-        // Drop the bits already emitted as bytes so the stale high bits can
-        // never re-enter the next byte on the following shift.
-        acc &= (1u32 << bits) - 1;
-    }
-    Some(out)
-}
-
 fn main() {
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input).expect("stdin");
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .expect("reading the secret from stdin");
     let secret = input.trim();
-    let raw = base32_decode(secret).expect("invalid base32 strkey");
-    assert_eq!(raw.len(), 35, "strkey must decode to 35 bytes");
-    assert_eq!(raw[0], 0x90, "not a strkey secret key (version byte)");
-    let seed: [u8; 32] = raw[1..33].try_into().expect("seed length");
+    // Alphabet, length, version byte and CRC16-XModem checksum, all checked by
+    // the codec the submission tool uses too.
+    let (version, seed) = decode_strkey(secret).unwrap_or_else(|reason| {
+        panic!("invalid secret seed: {reason}; expected a 56-character StrKey secret seed (S...)")
+    });
+    assert_eq!(
+        version, VER_SECRET,
+        "not a StrKey secret seed (expected leading character 'S', version byte 0x90)"
+    );
     let signing = SigningKey::from_bytes(&seed);
     for b in signing.verifying_key().to_bytes() {
         print!("{b:02x}");

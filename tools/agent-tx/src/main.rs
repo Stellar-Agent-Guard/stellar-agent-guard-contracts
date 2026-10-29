@@ -39,11 +39,14 @@
 //! resolved from a named preset, *before* the first RPC request — see
 //! `strkey.rs` and `network.rs`, the two helpers that hold those rules.
 
-mod base32;
 mod network;
 mod strkey;
 
-use base32::strkey_encode;
+// The base-32 / CRC16-XModem / StrKey codec is a separate dependency-free
+// crate so this tool and `examples/agent_pubkey.rs` parse keys with the same
+// implementation (issue #379). `strkey` above is only the CLI's field-level
+// validation policy on top of it.
+use agent_strkey::strkey::{account_strkey, contract_strkey, decode_strkey, VER_SECRET};
 use ed25519_dalek::{Signer, SigningKey};
 use network::{Endpoint, Network};
 use sha2::{Digest, Sha256};
@@ -191,15 +194,12 @@ impl RunOutcome {
     }
 }
 
-// ── StrKey version bytes (base32 + CRC16-XModem codec lives in crate::base32) ─
-
-const VER_ACCOUNT: u8 = 6 << 3; // 0x30 -> G...
-const VER_CONTRACT: u8 = 2 << 3; // 0x12 -> C...
+// ── StrKey version bytes (codec lives in the `agent-strkey` crate) ─
 
 /// Decode a strkey secret (version 0x90 + 32-byte seed + checksum) to the seed.
 fn secret_to_seed(secret: &str) -> [u8; 32] {
-    match strkey::decode_strkey(secret) {
-        Ok((ver, seed)) if ver == strkey::VER_SECRET => seed,
+    match decode_strkey(secret) {
+        Ok((ver, seed)) if ver == VER_SECRET => seed,
         Ok(_) => exit_with("not an account secret seed (expected leading character 'S')".into()),
         Err(err) => exit_with(format!(
             "invalid secret seed: {err}; expected a 56-character StrKey secret seed (S...)"
@@ -2108,9 +2108,6 @@ fn resolve_guard(guard_arg: Option<&str>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::base32::{base32_decode, base32_encode, B32};
-    use crate::strkey::{decode_strkey, VER_SECRET};
 
     #[test]
     fn known_secret_decodes_to_seed() {
