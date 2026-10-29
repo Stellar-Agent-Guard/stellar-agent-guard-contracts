@@ -57,6 +57,8 @@ fn policy(env: &Env, paused: bool, outside_window: bool, dms_expired: bool) -> P
             ProtocolRule {
                 contract: address(env, PROTOCOL_ADDRESS),
                 fns: Some(vec![env, Symbol::new(env, "swap")]),
+
+                paused: false,
             },
         ],
         recipients: vec![env, address(env, RECIPIENT_ADDRESS)],

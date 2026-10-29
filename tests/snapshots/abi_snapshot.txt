@@ -32,6 +32,9 @@
 ## Functions
 pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 pub fn set_policy(env: Env, config: PolicyConfig)
+pub fn reset_window(env: Env)
+pub fn pause(env: Env)
+pub fn resume(env: Env)
 pub fn revoke_policy(env: Env)
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
 pub fn propose_admin_rotation(env: Env, new_admin: Address)
@@ -48,6 +51,7 @@ pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus
 pub fn status(env: Env) -> Status
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
+pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
 fn __check_auth(env: Env, signature_payload: soroban_sdk::crypto::Hash<32>, signatures: Self::Signature, auth_contexts: soroban_sdk::Vec<Context>) -> Result<(), Error>
 
 ## Contract types
@@ -98,6 +102,7 @@ struct RecipientCap
 struct AssetCap
   asset: Address
   per_tx_cap: i128
+  paused: bool
 struct PolicyConfig
   per_tx_cap: i128
   window_secs: u64
@@ -117,6 +122,7 @@ struct PolicyConfig
 struct ProtocolRule
   contract: Address
   fns: Option<Vec<Symbol>>
+  paused: bool
 struct Status
   has_policy: bool
   policy_revision: u64
@@ -136,6 +142,12 @@ struct CheckDetail
   per_tx_cap: Option<i128>
   effective_per_tx_cap: Option<i128>
   effective_window_cap: Option<i128>
+struct BatchTransfer
+  to: Address
+  amount: i128
+struct BatchCheckResult
+  verdicts: Vec<CheckResult>
+  admissible: bool
 enum DataKey
   Initialized
   Admin
@@ -177,3 +189,4 @@ struct RecipientLedger
 29 RecipientBlocked recipient_blocked
 30 ProtocolCallRateExceeded protocol_call_rate_exceeded
 31 DecisionInvariantViolation decision_invariant_violation
+33 TooManyAuthContexts too_many_auth_contexts

@@ -72,6 +72,7 @@ fn policy_from_json(env: &Env, value: &Value) -> PolicyConfig {
         protocols.push_back(ProtocolRule {
             contract: Address::from_str(env, text(protocol, "contract")),
             fns,
+            paused: false,
         });
     }
 
@@ -111,9 +112,9 @@ fn policy_from_json(env: &Env, value: &Value) -> PolicyConfig {
 
 fn decode_hex(value: &str) -> std::vec::Vec<u8> {
     assert_eq!(value.len() % 2, 0, "XDR hex must have an even length");
-    value
-        .as_bytes()
-        .chunks_exact(2)
+    let (pairs, _) = value.as_bytes().as_chunks::<2>();
+    pairs
+        .iter()
         .map(|pair| {
             let digits = core::str::from_utf8(pair).expect("hex is ASCII");
             u8::from_str_radix(digits, 16).expect("XDR hex contains only hex digits")

@@ -86,6 +86,7 @@ fn sample_policy(env: &Env) -> PolicyConfig {
     protocols.push_back(ProtocolRule {
         contract: Address::generate(env),
         fns: Some(fns),
+        paused: false,
     });
     let mut assets = SdkVec::new(env);
     assets.push_back(Address::generate(env));
@@ -100,6 +101,7 @@ fn sample_policy(env: &Env) -> PolicyConfig {
     asset_caps.push_back(AssetCap {
         asset: Address::generate(env),
         per_tx_cap: 250i128,
+        paused: false,
     });
     let mut recipients = SdkVec::new(env);
     // A real account (G…) strkey from the Phase-1 fixture policy so the
@@ -202,14 +204,14 @@ fn vec_fields_are_scvec_and_addresses_use_the_documented_scaddress_shapes() {
 }
 
 #[test]
-fn protocol_rule_is_a_two_entry_sorted_map_and_some_fns_is_a_vec_of_symbols() {
+fn protocol_rule_is_a_three_entry_sorted_map_and_some_fns_is_a_vec_of_symbols() {
     let env = Env::default();
     let entries = map_entries(&to_scval(&env, sample_policy(&env)));
     let rule = first_vec_item(field(&entries, "protocols"), "protocols");
 
     let rule_entries = map_entries(&rule);
     let rule_keys: Vec<String> = rule_entries.iter().map(|(k, _)| k.clone()).collect();
-    assert_eq!(rule_keys, vec!["contract", "fns"]);
+    assert_eq!(rule_keys, vec!["contract", "fns", "paused"]);
 
     // Some(vec!["swap"]) -> ScVal::Vec of ScVal::Symbol
     match field(&rule_entries, "fns") {
@@ -233,6 +235,7 @@ fn none_fns_encodes_as_void() {
     protocols_none.push_back(ProtocolRule {
         contract: Address::generate(&env),
         fns: None,
+        paused: false,
     });
     policy.protocols = protocols_none;
 

@@ -309,6 +309,8 @@ fn main() {
         ProtocolRule {
             contract: addr(&env, 3),
             fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+
+            paused: false,
         },
     ];
     let mut ledger7f = Ledger::empty(&env);
@@ -369,6 +371,26 @@ fn main() {
             &alive(),
             &mut ledger_baseline,
             1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 5)],
+        )
+    });
+
+    // ─── 8192 Stale Entries Prune Cost + Authorization ───
+    let mut p_heavy = base_policy(&env);
+    p_heavy.window_cap = 100_000;
+    p_heavy.window_secs = 1000;
+    let mut ledger_heavy = Ledger::empty(&env);
+    for i in 0..8192 {
+        ledger_heavy.admit(i, 1);
+    }
+    measure_decide(&env, "Prune 8192 stale entries + authorization", || {
+        decide(
+            &env,
+            &self_addr,
+            Some(&p_heavy),
+            &alive(),
+            &mut ledger_heavy,
+            100_000, // far in future, making all 8192 entries stale
             vec![&env, transfer_ctx(&env, 1, 2, 5)],
         )
     });

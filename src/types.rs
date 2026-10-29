@@ -23,6 +23,10 @@ pub enum DmsHealthStatus {
 /// oldest entries forward (conservative over-count) — see SPEC §3.1.
 pub const MAX_WINDOW_ENTRIES: usize = 8192;
 
+/// Hard bound on auth contexts evaluated in one authorization (SPEC §4/§6).
+/// Sixty-four admits large DEX batches while bounding worst-case decision work.
+pub const MAX_AUTH_CONTEXTS: usize = 64;
+
 /// Maximum number of asset contracts in a policy (SPEC §8).
 pub const MAX_POLICY_ASSETS: usize = 256;
 
@@ -173,6 +177,8 @@ pub struct AssetCap {
     pub asset: Address,
     /// Per-tx cap for this asset; 0 = disabled / fall back to global.
     pub per_tx_cap: i128,
+    /// If true, the asset is blocked even when it is otherwise allowlisted.
+    pub paused: bool,
 }
 
 /// The policy an admin installs on the account. See SPEC §3/§4.
@@ -207,7 +213,9 @@ pub struct PolicyConfig {
     pub active_from: u64,
     /// Active window end (unix seconds); 0 = unrestricted.
     pub active_until: u64,
-    /// Admin kill switch.
+    /// Admin kill switch. Flipped in place by the `pause()` / `resume()` admin
+    /// entry points (issue #290), which touch no other field — the rolling
+    /// window and the dead-man-switch clock survive a pause.
     pub paused: bool,
     /// Dead-man switch grace (seconds); 0 = disabled.
     pub dms_grace_secs: u64,
@@ -254,6 +262,8 @@ pub struct ProtocolRule {
     pub contract: Address,
     /// `None` = any function; `Some` = per-function allowlist.
     pub fns: Option<Vec<Symbol>>,
+    /// If true, the contract is blocked even when it is otherwise allowlisted.
+    pub paused: bool,
 }
 
 /// A single call the account must authorize, parsed into a form the pure
@@ -396,6 +406,7 @@ impl Error {
             Self::CreateContractNotAllowed,
             Self::ProtocolCallRateExceeded,
             Self::DecisionInvariantViolation,
+            Self::TooManyAuthContexts,
         ];
         all_errors
             .into_iter()
@@ -421,6 +432,22 @@ pub struct CheckDetail {
     pub effective_per_tx_cap: Option<i128>,
     /// Effective rolling cap for this recipient, if enabled.
     pub effective_window_cap: Option<i128>,
+}
+
+/// One transfer evaluated by [`PolicyEngine::check_batch`](crate::PolicyEngine::check_batch).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchTransfer {
+    pub to: Address,
+    pub amount: i128,
+}
+
+/// Per-transfer verdicts and the all-or-nothing result of a batch pre-flight.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchCheckResult {
+    pub verdicts: Vec<CheckResult>,
+    pub admissible: bool,
 }
 
 // Storage layout (SPEC §3). `Initialized`/`Admin`/`AgentPubkey` live in
@@ -455,13 +482,37 @@ pub enum DataKey {
 }
 
 /// Stable contract errors and decision reasons exposed by the ABI.
+///
+/// # Discriminant Stability & Frozen Codes
+///
+/// Error discriminants are permanently frozen across mainnet/testnet releases because
+/// off-chain SDKs, indexers, and telemetry decode errors using these exact numeric codes
+/// (`Error(Contract, #N)`).
+///
+/// Variants are partitioned into three numeric groups:
+/// - Generic / lifecycle (`1..=9`, next free: `7`)
+/// - Account-level gates (`10..=19`, next free: `15`)
+/// - Per-call decisions (`20..=39`, next free: `34`)
+///
+/// Always follow the 'append, never insert' convention when adding variants. For the
+/// full end-to-end contributor workflow (touching the enum, reason mappings, decision table,
+/// SPEC §4/§6/§7, event vocabulary, and tests), see the checklist in `docs/contributing.md`
+/// (`#how-to-add-a-new-error-variant-end-to-end`) and `CONTRIBUTING.md`.
 #[allow(missing_docs)] // individual ABI variants are described below
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
     // Generic / lifecycle (1..=9)
-    /// Required signer did not authorize the operation.
+    /// **Reserved — never emitted** (issue #292). A bad agent signature is
+    /// rejected by `env.crypto().ed25519_verify`, which traps the host frame
+    /// (`InvokeError::Abort`) *before* any policy state is read, and every
+    /// admin write path enforces `require_auth(Admin)` at the host level;
+    /// neither produces a contract error this enum could return. The variant
+    /// (and code 1) is kept so the published ABI error table and off-chain
+    /// `REASON_CODES` mappings stay wire-stable — do not add a check that
+    /// returns it. Pinned by `bad_agent_signature_traps_without_unauthorized_error`
+    /// and documented in SPEC §7.1 / §10.2.
     Unauthorized = 1,
     /// Initialization has already been completed.
     AlreadyInitialized = 2,
@@ -511,6 +562,8 @@ pub enum Error {
     ProtocolCallRateExceeded = 30,
     /// An internal decision-engine invariant failed.
     DecisionInvariantViolation = 31,
+    /// One authorization contains more contexts than the engine evaluates.
+    TooManyAuthContexts = 33,
 }
 
 impl Error {
@@ -542,6 +595,7 @@ impl Error {
             Self::CreateContractNotAllowed => "create_contract_not_allowed",
             Self::ProtocolCallRateExceeded => "protocol_call_rate_exceeded",
             Self::DecisionInvariantViolation => "decision_invariant_violation",
+            Self::TooManyAuthContexts => "too_many_auth_contexts",
         }
     }
 }
@@ -566,6 +620,9 @@ mod tests {
     /// 2. Update the SDK's `reasons.ts` (`REASON_CODES` / `REASON_BY_CODE` mapping).
     /// 3. Update `tests/fixtures/auth-checked-vocabulary.json`.
     /// 4. Update this test to assert the new or modified discriminant.
+    ///
+    /// For the complete contributor checklist and verification commands, see
+    /// `docs/contributing.md#how-to-add-a-new-error-variant-end-to-end` and `CONTRIBUTING.md`.
     #[test]
     fn error_code_discriminant_stability_spec_7() {
         let all_errors = [
@@ -593,6 +650,7 @@ mod tests {
             Error::RecipientBlocked,
             Error::ProtocolCallRateExceeded,
             Error::DecisionInvariantViolation,
+            Error::TooManyAuthContexts,
         ];
 
         // An exhaustive match asserting each variant's exact discriminant against SPEC §7.
@@ -624,6 +682,7 @@ mod tests {
                 Error::ProtocolCallRateExceeded => (30, "protocol_call_rate_exceeded"),
                 Error::DecisionInvariantViolation => (31, "decision_invariant_violation"),
                 Error::AssetFnNotAllowed => (32, "asset_fn_not_allowed"),
+                Error::TooManyAuthContexts => (33, "too_many_auth_contexts"),
             };
 
             assert_eq!(
@@ -672,6 +731,7 @@ mod tests {
             Error::RecipientBlocked,
             Error::ProtocolCallRateExceeded,
             Error::DecisionInvariantViolation,
+            Error::TooManyAuthContexts,
         ] {
             let code = err as u32;
             assert!(
@@ -679,5 +739,119 @@ mod tests {
                 "duplicate error code {code} detected for {err:?}"
             );
         }
+    }
+
+    // ── agent-tx storage-key fixture (issue #383) ────────────────────────
+
+    /// The fixture `tools/agent-tx` checks its footprint keys against. It is a
+    /// separate cargo project that cannot link this `no_std` contract crate,
+    /// so the key encodings cross the boundary as a generated file.
+    const AGENT_TX_KEYS_FILE: &str = "tools/agent-tx/guard-storage-keys.json";
+
+    /// Storage tier of each `DataKey` variant, as documented on the enum. The
+    /// match is exhaustive on purpose: a new variant fails to compile here
+    /// until its tier is declared, it is added to [`every_data_key`], and the
+    /// fixture is regenerated.
+    fn data_key_storage(key: &DataKey) -> &'static str {
+        match key {
+            DataKey::Initialized
+            | DataKey::Admin
+            | DataKey::PendingAdmin
+            | DataKey::AgentPubkey => "instance",
+            DataKey::Policy
+            | DataKey::Window
+            | DataKey::LastHeartbeat
+            | DataKey::AdminFrozen
+            | DataKey::AutoFrozenAt
+            | DataKey::PolicyRevision => "persistent",
+        }
+    }
+
+    fn every_data_key() -> [DataKey; 10] {
+        [
+            DataKey::Initialized,
+            DataKey::Admin,
+            DataKey::PendingAdmin,
+            DataKey::AgentPubkey,
+            DataKey::Policy,
+            DataKey::Window,
+            DataKey::LastHeartbeat,
+            DataKey::AdminFrozen,
+            DataKey::AutoFrozenAt,
+            DataKey::PolicyRevision,
+        ]
+    }
+
+    /// Renders every `DataKey` with its variant name and exact `ScVal` XDR, as
+    /// produced by the host conversion `persist_get`/`persist_set` use. The name
+    /// is read back out of the encoding rather than typed by hand, so a rename
+    /// changes both columns at once.
+    fn render_agent_tx_storage_keys() -> std::string::String {
+        use core::fmt::Write as _;
+        use soroban_sdk::xdr::{Limits, ScVal, WriteXdr};
+        use soroban_sdk::{IntoVal, TryFromVal, Val};
+        use std::string::String;
+
+        let env = Env::default();
+        let mut out = String::from(
+            "{\n  \"_generated_by\": \"src/types.rs tests::agent_tx_storage_keys_fixture_is_current \
+             (regenerate: UPDATE_SNAPSHOTS=1 cargo test --lib agent_tx_storage_keys)\",\n  \
+             \"keys\": [\n",
+        );
+        let keys = every_data_key();
+        for (i, key) in keys.iter().enumerate() {
+            let val: Val = key.clone().into_val(&env);
+            let scval = ScVal::try_from_val(&env, &val)
+                .unwrap_or_else(|err| panic!("DataKey {key:?} does not convert to ScVal: {err:?}"));
+            let ScVal::Vec(Some(parts)) = &scval else {
+                panic!("DataKey {key:?} is not encoded as an ScVec: {scval:?}");
+            };
+            let [ScVal::Symbol(name)] = parts.as_slice() else {
+                panic!("DataKey {key:?} is not a unit variant [Symbol]: {scval:?}");
+            };
+            let name = name
+                .to_utf8_string()
+                .unwrap_or_else(|err| panic!("DataKey {key:?} symbol is not utf8: {err:?}"));
+            let xdr = scval
+                .to_xdr(Limits::none())
+                .unwrap_or_else(|err| panic!("DataKey {key:?} does not encode to XDR: {err:?}"));
+            let hex: String = xdr.iter().fold(String::new(), |mut s, b| {
+                let _ = write!(s, "{b:02x}");
+                s
+            });
+            let comma = if i + 1 == keys.len() { "" } else { "," };
+            let _ = writeln!(
+                out,
+                "    {{ \"variant\": \"{name}\", \"storage\": \"{}\", \"scval_xdr_hex\": \"{hex}\" }}{comma}",
+                data_key_storage(key)
+            );
+        }
+        out.push_str("  ]\n}\n");
+        out
+    }
+
+    /// `agent-tx` declares the guard's storage keys in every transaction
+    /// footprint; a stale encoding there makes it declare keys that do not
+    /// exist and fail with an opaque fee or auth error. This fails the
+    /// contract's own suite the moment a `DataKey` change leaves the fixture
+    /// behind; agent-tx's suite then checks its keys against the fixture.
+    #[test]
+    fn agent_tx_storage_keys_fixture_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(AGENT_TX_KEYS_FILE);
+        let actual = render_agent_tx_storage_keys();
+        if std::env::var("UPDATE_SNAPSHOTS").is_ok() {
+            std::fs::write(&path, &actual)
+                .unwrap_or_else(|err| panic!("cannot write {}: {err}", path.display()));
+            return;
+        }
+        let committed = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+        assert_eq!(
+            actual, committed,
+            "DataKey changed but {AGENT_TX_KEYS_FILE} was not regenerated.\n\
+             Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --lib agent_tx_storage_keys`,\n\
+             then run `cargo test --manifest-path tools/agent-tx/Cargo.toml` and update\n\
+             agent-tx's `GuardKey` until it passes."
+        );
     }
 }

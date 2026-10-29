@@ -21,17 +21,19 @@ vocabulary. For each reason this table gives the seat-specific read:
 > incident noise. SDK middleware that turns the agent column into
 > user-facing messages must reproduce this constraint verbatim.
 
-> **Vocabulary note.** The enum in `src/types.rs` has 23 variants; this table
+> **Vocabulary note.** The enum in `src/types.rs` has 25 variants; this table
 > covers every current policy-decision reason. `decision_invariant_violation`
 > is an internal guard for impossible verdict data and is surfaced as a stable
 > contract error if triggered.
 > Blocked reasons from *rejected* frames live in the client-side event log /
 > diagnostics, not in persisted ledger events (SPEC §9, issue #37) — the
 > auditor column assumes that evidence source.
+>
+> When adding a new denial reason to this table, follow the [end-to-end checklist](contributing.md#how-to-add-a-new-error-variant-end-to-end).
 
 | reason symbol | code | what was attempted | agent guidance | operator action | auditor note | SPEC ref |
 |---|---|---|---|---|---|---|
-| `unauthorized` | 1 | A transaction signed by a key that does not match the registered `AgentPubkey`, or an admin call not authenticated as the admin. | Stop: signing key or host payload does not match registration. Re-derive, verify nonce/expiry, escalate. Never try alternate keys to force a pass. | Re-register the intended key via `rotate_agent_key`, or re-provision credentials. If intermittent, inspect node time and reserved-nonce handling. | Records a key/signature mismatch at the account; investigate any recurrence. | §7 (`__check_auth` step 1) |
+| `unauthorized` | 1 | **Reserved — never emitted** (issue #292). A wrong signing key fails in the host's `ed25519_verify` trap (`InvokeError::Abort`) before any policy state is read, and unauthenticated admin calls fail at `require_auth` — neither produces contract error #1. | Stop: the observable failure for a wrong key is a host abort (`failed ED25519 verification`), not a block reason. Re-derive, verify nonce/expiry, escalate. Never try alternate keys to force a pass. | Re-register the intended key via `rotate_agent_key`, or re-provision credentials. If intermittent, inspect node time and reserved-nonce handling. | Wrong-key attempts surface as host aborts, not `auth_checked` events; investigate any recurrence. | §4.0 step 2, §7.1, §10.2 |
 | `already_initialized` | 2 | `initialize` called a second time (admin path). | Not agent-facing; if tooling surfaces it, treat as an idempotency note, not an error. | None; the account is already initialized. | Documents a double-init attempt (usually benign automation). | §7 |
 | `not_initialized` | 3 | A call before `initialize` ran. | Not agent-facing. | Run `initialize` with the admin and the registered agent key. | Marks the pre-activation window where all calls were default-denied. | §7 |
 | `invalid_config` | 4 | `set_policy` given a config that fails §8 validation. | Not agent-facing (admin op refused). | Correct the config per §8 (e.g. `window_cap != 0` requires `window_secs != 0`; no self-address in `assets`/`protocols`; no duplicate addresses) and re-apply. | The proposed policy was refused; the on-chain policy is unchanged (fail-closed). | §8 |
@@ -55,6 +57,7 @@ vocabulary. For each reason this table gives the seat-specific read:
 | `recipient_blocked` | 29 | SAC transfer to an explicitly blocked recipient. | Do not retry to disguise the destination; stop and escalate. | Remove the denylist entry only if policy intent changed. | The explicit recipient denylist blocked this destination. | §6.2 |
 | `protocol_call_rate_exceeded` | 30 | An allowlisted protocol call exceeds its rolling-window call limit. | Wait for calls in the rolling window to expire; do not route around the configured protocol limit. | Raise `protocol_calls_per_window` only if justified by policy. | Records the configured auth-context protocol call limit enforcing the rate bound. | §3, §6.3, §7 |
 | `decision_invariant_violation` | 31 | Internal verdict data was inconsistent (empty result for a submitted preflight call, invalid context index, or a blocked result without a reason). | Stop and escalate; do not retry around the contract error. | Report the contract version and transaction details to maintainers. | Signals an enforcement implementation invariant failure; preserve the failed transaction diagnostics. | §7 |
+| `too_many_auth_contexts` | 33 | One authorization contains more than the fixed 64-context engine bound. | Do not split or reroute the batch to evade the bound; reduce the intended authorization only if its policy meaning is unchanged, otherwise escalate. | Review the router batch size and transaction design; the contract limit is fixed, not policy-configurable. | The engine rejected the whole authorization before parsing contexts or staging window admissions. | §4, §6, §7.1 |
 
 ## Consumers
 
