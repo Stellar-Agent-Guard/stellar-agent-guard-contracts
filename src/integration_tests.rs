@@ -179,6 +179,11 @@
 //!   material.
 //! - `MockDeployer` exercises host contract creation routing (`CreateContractV2HostFn`).
 //!
+//! Recipient allowlist coverage (SPEC §6.2): a contract address is a valid
+//! `recipients` entry, not only a `G...` account. Paying a protocol or router is
+//! the common agent case; value sent to a contract leaves the guard's direct
+//! accounting, which is why the enforcement scope is documented alongside it.
+//!
 //! Protocol allowlist coverage (SPEC §6.3): `ProtocolRule.fns` has three
 //! states — `None` (any fn on that contract), `Some(list)` with a match, and
 //! `Some(list)` without a match. The tests below pin each state plus the
