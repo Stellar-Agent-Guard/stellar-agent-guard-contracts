@@ -40,6 +40,7 @@
 //! `strkey.rs` and `network.rs`, the two helpers that hold those rules.
 
 mod base32;
+mod diagnostics;
 mod network;
 mod strkey;
 
@@ -180,13 +181,7 @@ impl RunOutcome {
             | Self::EmptyHash(_)
             | Self::TransactionTimeout { .. } => 1,
             Self::TransactionSuccess { .. } => 0,
-            Self::TransactionFailure { .. } => {
-                if expect_blocked {
-                    0
-                } else {
-                    1
-                }
-            }
+            Self::TransactionFailure { .. } => 1,
         }
     }
 }
@@ -653,7 +648,10 @@ fn print_events(events: &serde_json::Value, reporter: &Reporter) {
     };
     for ev in arr {
         if let Some(b64) = ev["xdr"].as_str().or_else(|| ev.as_str()) {
-            let de: DiagnosticEvent = xdr(b64);
+            let Ok(de) = DiagnosticEvent::from_xdr_base64(b64, Limits::none()) else {
+                println!("  event [invalid diagnostic XDR; ignored]");
+                continue;
+            };
             let contract = match &de.event.contract_id {
                 Some(ContractId(Hash(id))) => contract_strkey(id),
                 None => "host".into(),
@@ -889,35 +887,15 @@ fn simulation_error_message(simulation: &serde_json::Value) -> Option<String> {
 fn simulation_events(simulation: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
     simulation["events"]
         .as_array()
+        .filter(|events| !events.is_empty())
         .or_else(|| simulation["error"]["data"]["events"].as_array())
 }
 
-fn is_guard_auth_checked_block(simulation: &serde_json::Value, guard: &ScAddress) -> bool {
-    let Some(events) = simulation_events(simulation) else {
-        return false;
-    };
-    events.iter().any(|event| {
-        let Some(b64) = event["xdr"].as_str().or_else(|| event.as_str()) else {
-            return false;
-        };
-        let Ok(decoded) = DiagnosticEvent::from_xdr_base64(b64, Limits::none()) else {
-            return false;
-        };
-        let contract_matches = match guard {
-            ScAddress::Contract(id) => decoded.event.contract_id.as_ref() == Some(id),
-            _ => false,
-        };
-        if !contract_matches {
-            return false;
-        }
-        let ContractEventBody::V0(body) = &decoded.event.body;
-        let has_topic = |expected: &str| {
-            body.topics.iter().any(|topic| {
-                matches!(topic, ScVal::Symbol(symbol) if symbol.0.as_slice() == expected.as_bytes())
-            })
-        };
-        has_topic("event_auth_checked") && has_topic("blocked")
-    })
+fn guard_auth_checked_block_reason(
+    simulation: &serde_json::Value,
+    guard: &ScAddress,
+) -> Option<&'static str> {
+    diagnostics::block_reason(simulation_events(simulation)?, guard)
 }
 
 // ── Footprint helpers ────────────────────────────────────────────────────
@@ -2190,7 +2168,7 @@ mod tests {
             simulation_error_message(&simulation).as_deref(),
             Some("tx_insufficient_fee")
         );
-        assert!(!is_guard_auth_checked_block(&simulation, &guard));
+        assert!(guard_auth_checked_block_reason(&simulation, &guard).is_none());
     }
 
     fn guard_block_event_xdr(guard: &ScAddress) -> String {
@@ -2224,10 +2202,10 @@ mod tests {
             "error": "HostError: auth_checked: per_tx_cap_exceeded",
             "events": [{ "xdr": guard_block_event_xdr(&guard) }]
         });
-        assert!(is_guard_auth_checked_block(&simulation, &guard));
+        assert!(guard_auth_checked_block_reason(&simulation, &guard).is_some());
 
         let other_guard: ScAddress = VALID_TOKEN.parse().unwrap();
-        assert!(!is_guard_auth_checked_block(&simulation, &other_guard));
+        assert!(guard_auth_checked_block_reason(&simulation, &other_guard).is_none());
     }
 
     #[test]
