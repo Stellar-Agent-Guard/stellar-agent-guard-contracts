@@ -838,10 +838,12 @@ Rules applied (in order; the denylist is checked before the allowlist/escape hat
      recipient's ledger.
 5. Amount validity: `amount > 0` or block `InvalidAmount`.
 
-An asset contract listed in `assets` invoked with any other function (e.g. `mint`, `burn`,
-`set_admin`, `clawback` — none of which the account should ever call as authorizer) is blocked
-(`AssetFnNotAllowed`). Asset addresses *not* listed in `assets` are blocked
-(`AssetNotAllowed`) — an agent cannot silently move balances on an unregistered SAC. This keeps
+An asset contract listed in `assets` invoked with any other function — in particular the
+administrative and custody-altering functions `mint`, `burn`, `clawback`, `set_admin`, `pause`,
+and `unpause`, none of which the account should ever call as authorizer — is blocked with the
+single dedicated reason `AssetFnNotAllowed` (one code for the whole class, so a compromised agent
+probing token custody is one alertable signal rather than several). The same function names on a
+contract that is *not* listed in `assets` are never parsed as asset calls and stay `UnknownContract` — an agent cannot silently move balances on an unregistered SAC. This keeps
 the "we know what we're enforcing" promise exact.
 
 **Measured worst case: evaluation ≈ 338,315 CPU instructions per context.** Rules 1 and 2 are the only
