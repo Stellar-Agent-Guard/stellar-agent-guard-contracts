@@ -91,9 +91,10 @@ Therefore the scope is:
 native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the
 calls whose arguments the Soroban auth context exposes for inspection. For other Soroban
 contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy
-engine still enforces window and pause state, but per-call amount/recipient limits are not yet
-enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not
-implied as already covered.**
+engine still enforces account-level gates — admin freeze, dead-man switch, pause, and the
+active window (`active_from` / `active_until`) — but per-call amount/recipient limits and
+rolling-window spend accounting are not applied to non-SAC calls; extending fine-grained
+enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered.**
 
 *Canonical statement: the paragraph above is the single source of truth for the scope
 wording. The README and `docs/enforcement-scope.md` carry short excerpts that link back
@@ -1057,9 +1058,11 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // spend accounting, but a submitted call may refresh TTLs under §9.5.
     // Simulation before signing does not persist those rent bumps.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
-  // Same preflight / simulate path, with remaining_window and effective cap metrics.
-  // `remaining_window` reflects the effective cap for the queried recipient
-  // (per-recipient override if configured, otherwise global cap).
+  // Same zero-write pre-flight, with remaining_window and effective cap metrics.
+pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
+  // Zero-write payment-run pre-flight. Evaluates transfers in order, staging each
+  // allowed admission in memory so later items see earlier admissions. Returns one
+  // verdict per item and `admissible: false` if any item is blocked.
 
 // ── Enforcement (host-invoked; not callable by anyone) ────────────────────
 impl CustomAccountInterface for PolicyEngine {
