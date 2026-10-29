@@ -810,10 +810,10 @@ calls whose semantics and arguments are known:
 - `transfer` args: `(from, to, amount)` — the account is `from`; recipient = args[1], amount = args[2].
 - `transfer_from` args: `(from, spender, to, amount)` — the account is `from`; recipient = args[2], amount = args[3].
 
+**Exact arity required; extra args deny -- we do not partially parse.** A call whose argument list does not match the SAC schema exactly (`transfer` = 3, `transfer_from` = 4) is rejected with `UnknownContract` and never reaches the cap/allowlist evaluation. We only enforce what we fully understand; a context carrying extra trailing values is treated as a call we cannot reason about (conservative default-deny).
+
 Note on multi-asset batches: the window total is a unit-less sum across assets until per-asset caps
 land; operators should use single-asset policies for meaningful windows.
-
-**Exact arity required; extra args deny -- we do not partially parse.** A call whose argument list does not match the SAC schema exactly (`transfer` = 3, `transfer_from` = 4) is rejected with `UnknownContract` and never reaches the cap/allowlist evaluation. We only enforce what we fully understand; a context carrying extra trailing values is treated as a call we cannot reason about (conservative default-deny).
 
 Rules applied (in order; the denylist is checked before the allowlist/escape hatch):
 
@@ -1730,4 +1730,3 @@ Per [`CONTRIBUTING.md` Coding Standard 6](CONTRIBUTING.md#coding-standards) and 
    - If an enforcement change is impractical to demonstrate on live public testnet (e.g. extreme ledger-sequence/timestamp edge cases, complex multi-ledger rollbacks, or host resource exhaustion):
      - The change must provide a deterministic unit/integration test in the Soroban test environment ([`src/integration_tests.rs`](src/integration_tests.rs)) covering the exact enforcement path.
      - The PR description and proof documentation must include a written rationale explaining why testnet demonstration is impractical and how the deterministic test suite validates the invariant.
-
