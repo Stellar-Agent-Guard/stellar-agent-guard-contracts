@@ -93,6 +93,8 @@ the **host**, and the host turns an `Err` into three separate artifacts:
 2. a contract error carrying the numeric [`Error`](#error-codes) code from SPEC §7.1,
 3. an `auth_checked` event whose third topic is the **reason symbol**.
 
+For an approval the full event topic list is `[event_auth_checked, allowed, ok]`.
+
 Which of those an operator can observe depends on *where* in the call lifecycle the transaction
 was stopped. There are three surfaces below. Only the first carries the reason legibly and costs
 nothing; the second needs XDR decoding and a paid fee; the third is the first one wrapped in a

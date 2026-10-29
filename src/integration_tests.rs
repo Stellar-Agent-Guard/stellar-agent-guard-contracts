@@ -963,19 +963,14 @@ impl Harness {
         })
     }
 
-    /// Did the guard emit an `auth_checked` event with `result = allowed`?
-    /// `#[contractevent]` prepends the event name to the topic list, so the
-    /// `result` topic (SPEC §9) is at index 1.
+    /// Did the guard emit `auth_checked(allowed, ok)` with the full SPEC §9
+    /// topic layout? `#[contractevent]` prepends the event name.
     fn emitted_allowed_auth(&self) -> bool {
-        let want = ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("allowed")).unwrap());
-        self.env
-            .events()
-            .all()
-            .events()
-            .iter()
-            .any(|e| match &e.body {
-                xdr::ContractEventBody::V0(v0) => v0.topics.get(1) == Some(&want),
-            })
+        has_event_with_topics(
+            &self.env,
+            "event_auth_checked",
+            &["event_auth_checked", "allowed", "ok"],
+        )
     }
 
     /// Run one real, agent-signed transfer authorization and return the host's
@@ -4008,6 +4003,7 @@ fn batch_events_emit_in_order_with_context_index() {
 
     // ctx1: allowed
     assert_eq!(auth_events[0].0.get(1).unwrap(), &want_allowed);
+    assert_eq!(auth_events[0].0.get(2).unwrap(), &symbol_val("ok"));
     assert_eq!(auth_events[0].1, build_map(0, revision));
 
     // ctx2: blocked, PerTxCapExceeded
@@ -4016,6 +4012,7 @@ fn batch_events_emit_in_order_with_context_index() {
 
     // ctx3: allowed (even though the batch fails, decide evaluates all contexts and emits for all)
     assert_eq!(auth_events[2].0.get(1).unwrap(), &want_allowed);
+    assert_eq!(auth_events[2].0.get(2).unwrap(), &symbol_val("ok"));
     assert_eq!(auth_events[2].1, build_map(2, revision));
 }
 

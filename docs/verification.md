@@ -66,7 +66,7 @@ agent-tx transfer --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4C
 # → RESULT: ALLOWED tx=4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8
 ```
 
-**Horizon verification:** `successful: true`, ledger 4566285, created 08:10:12Z. The guard's `event_auth_checked, allowed` event was emitted, and the SAC `transfer` event fired on-chain. Funds moved from the guard account to the allowed recipient.
+**Horizon verification:** `successful: true`, ledger 4566285, created 08:10:12Z. The guard's `event_auth_checked, allowed, ok` event was emitted, and the SAC `transfer` event fired on-chain. Funds moved from the guard account to the allowed recipient.
 
 ---
 
