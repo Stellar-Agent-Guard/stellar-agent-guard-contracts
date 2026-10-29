@@ -287,12 +287,46 @@ fn prune_entries(
     if window_secs == 0 {
         return;
     }
-    while let Some(front) = entries.first() {
-        if front.ts.saturating_add(window_secs) <= now {
+    let Ok(n) = usize::try_from(entries.len()) else {
+        return;
+    };
+    if n == 0 {
+        return;
+    }
+
+    // Entries are ordered by timestamp, so find the expired prefix in
+    // logarithmic time before removing it. This matters when a quiet period
+    // lets many entries expire before the next policy evaluation.
+    let mut low = 0usize;
+    let mut high = n;
+    while low < high {
+        // Saturating arithmetic: the release profile keeps overflow checks, and a
+        // checked add would embed a panic string in the contract WASM.
+        let mid = low.saturating_add(high.saturating_sub(low) / 2);
+        let Ok(index) = u32::try_from(mid) else {
+            return;
+        };
+        if let Some(entry) = entries.get(index) {
+            if entry.ts.saturating_add(window_secs) <= now {
+                low = mid.saturating_add(1);
+            } else {
+                high = mid;
+            }
+        }
+    }
+
+    if low == n {
+        *total = 0;
+        while !entries.is_empty() {
+            entries.pop_front();
+        }
+        return;
+    }
+
+    for _ in 0..low {
+        if let Some(front) = entries.first() {
             *total = total.saturating_sub(front.amount);
             entries.pop_front();
-        } else {
-            break;
         }
     }
 }
