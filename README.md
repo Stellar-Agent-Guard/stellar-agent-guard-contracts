@@ -967,7 +967,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 | Rolling window spend cap | ✅ |
 | Recipient allowlist (SAC transfers) | ✅ |
 | Recipient denylist / blocklist (SAC transfers) | ✅ |
-| Protocol/function allowlist (any call) | ✅ |
+| Protocol/function allowlist (contract + function-name match; amounts/recipients on non-SAC calls are not enforced) | ✅ |
 | Dead-man switch (freeze on missed heartbeat) | ✅ |
 | Admin unfreeze | ✅ |
 | Verified against live testnet (cross-checked) | ✅ |
