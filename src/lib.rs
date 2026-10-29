@@ -35,13 +35,13 @@ use engine::{cap_metrics, contains_addr, decide, effective_per_tx_cap, AccountSt
 use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
 use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
-    IntoVal, Symbol, TryFromVal, Val,
+    IntoVal, Symbol, TryFromVal, Val, Vec,
 };
 pub use types::MAX_AUTH_CONTEXTS;
 pub use types::NO_POLICY_DIGEST;
 pub use types::{
-    AssetCap, CheckDetail, Error, PolicyConfig, ProtocolRule, RecipientCap, RecipientWindowState,
-    ValidationOutcome,
+    AssetCap, BatchCheckResult, BatchTransfer, CheckDetail, Error, PolicyConfig, ProtocolRule,
+    RecipientCap, RecipientWindowState, ValidationOutcome,
 };
 use types::{
     CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_ASSET_CAP_ENTRIES,
@@ -1233,6 +1233,91 @@ mod policy_engine_type {
                 per_tx_cap,
                 effective_per_tx_cap,
                 effective_window_cap,
+            }
+        }
+
+        /// Pre-flight a payment run without writing storage.
+        ///
+        /// Transfers are evaluated in order against a local copy of the rolling
+        /// window ledger. An allowed transfer is staged before the next item is
+        /// evaluated, so the returned verdicts match the all-or-nothing admission
+        /// rules used by `__check_auth`. The local ledger is discarded afterwards.
+        #[allow(clippy::must_use_candidate)]
+        pub fn check_batch(
+            env: Env,
+            asset: Address,
+            transfers: Vec<BatchTransfer>,
+        ) -> BatchCheckResult {
+            let mut contexts = Vec::new(&env);
+            for transfer in transfers.iter() {
+                contexts.push_back(transfer_context(
+                    &env,
+                    &asset,
+                    &transfer.to,
+                    transfer.amount,
+                ));
+            }
+            let Some(snapshot) = AuthSnapshot::load(&env) else {
+                let mut verdicts = Vec::new(&env);
+                let mut index: u32 = 0;
+                for context in contexts.iter() {
+                    emit_auth(&env, false, Some(Error::NoPolicy), Some(&context), index);
+                    index = index.saturating_add(1);
+                    verdicts.push_back(CheckResult::Blocked(Symbol::new(
+                        &env,
+                        Error::NoPolicy.reason(),
+                    )));
+                }
+                return BatchCheckResult {
+                    verdicts,
+                    admissible: false,
+                };
+            };
+
+            let AuthSnapshot {
+                policy,
+                admin_frozen,
+                last_heartbeat,
+                mut ledger,
+                ..
+            } = snapshot;
+            let now = env.ledger().timestamp();
+            let self_addr = env.current_contract_address();
+            let decisions = decide(
+                &env,
+                &self_addr,
+                Some(&policy),
+                &AccountState {
+                    admin_frozen,
+                    last_heartbeat,
+                },
+                &mut ledger,
+                now,
+                contexts.clone(),
+            );
+            let mut verdicts = Vec::new(&env);
+            let mut admissible = true;
+            let mut index: u32 = 0;
+            for decision in &decisions {
+                let context = contexts.get(index);
+                let result = match decision {
+                    Decision::Allowed => {
+                        emit_auth(&env, true, None, context.as_ref(), index);
+                        CheckResult::Allowed
+                    }
+                    Decision::Blocked(error) => {
+                        admissible = false;
+                        emit_auth(&env, false, Some(*error), context.as_ref(), index);
+                        CheckResult::Blocked(Symbol::new(&env, error.reason()))
+                    }
+                };
+                verdicts.push_back(result);
+                index = index.saturating_add(1);
+            }
+
+            BatchCheckResult {
+                verdicts,
+                admissible,
             }
         }
     }

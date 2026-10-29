@@ -235,6 +235,7 @@ exactly the burst-boundary cases a spend guard exists to catch.
 Implementation (exact, lazy, bounded):
 
 - Entries are append-ordered by unix ledger time (`env.ledger().timestamp()`, 1s granularity).
+- On every evaluation: expired entries are bulk-pruned using binary search over the timestamp-sorted entries to find the first live entry, dropping expired prefixes in O(log n) time instead of sequential O(k) pops. Evaluation is lazy — no cron, no background writes.
 - On every evaluation: while `entries[0].ts + window_secs <= now`, pop from the front and
   subtract from `total`. Expiry is tested in this addition form (not the algebraically
   equivalent `entries[0].ts <= now - window_secs`) so that a low ledger timestamp cannot
@@ -837,10 +838,12 @@ Rules applied (in order; the denylist is checked before the allowlist/escape hat
      recipient's ledger.
 5. Amount validity: `amount > 0` or block `InvalidAmount`.
 
-An asset contract listed in `assets` invoked with any other function (e.g. `mint`, `burn`,
-`set_admin`, `clawback` — none of which the account should ever call as authorizer) is blocked
-(`AssetFnNotAllowed`). Asset addresses *not* listed in `assets` are blocked
-(`AssetNotAllowed`) — an agent cannot silently move balances on an unregistered SAC. This keeps
+An asset contract listed in `assets` invoked with any other function — in particular the
+administrative and custody-altering functions `mint`, `burn`, `clawback`, `set_admin`, `pause`,
+and `unpause`, none of which the account should ever call as authorizer — is blocked with the
+single dedicated reason `AssetFnNotAllowed` (one code for the whole class, so a compromised agent
+probing token custody is one alertable signal rather than several). The same function names on a
+contract that is *not* listed in `assets` are never parsed as asset calls and stay `UnknownContract` — an agent cannot silently move balances on an unregistered SAC. This keeps
 the "we know what we're enforcing" promise exact.
 
 **Measured worst case: evaluation ≈ 338,315 CPU instructions per context.** Rules 1 and 2 are the only
@@ -1058,9 +1061,11 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // spend accounting, but a submitted call may refresh TTLs under §9.5.
     // Simulation before signing does not persist those rent bumps.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
-  // Same preflight / simulate path, with remaining_window and effective cap metrics.
-  // `remaining_window` reflects the effective cap for the queried recipient
-  // (per-recipient override if configured, otherwise global cap).
+  // Same zero-write pre-flight, with remaining_window and effective cap metrics.
+pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
+  // Zero-write payment-run pre-flight. Evaluates transfers in order, staging each
+  // allowed admission in memory so later items see earlier admissions. Returns one
+  // verdict per item and `admissible: false` if any item is blocked.
 
 // ── Enforcement (host-invoked; not callable by anyone) ────────────────────
 impl CustomAccountInterface for PolicyEngine {

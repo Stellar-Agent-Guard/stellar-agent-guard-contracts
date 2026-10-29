@@ -112,7 +112,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 230 tests, isolated (no network)
+cargo test                                      # 233 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -529,6 +529,18 @@ stellar contract invoke --id GUARD_CONTRACT_ID --network testnet --source-accoun
 When a cap is disabled, its corresponding detail is `None` rather than a sentinel value.
 The SDK and dashboard should consume these fields for pre-signing warnings and blocked-call
 operator reports.
+
+For a payment run, `check_batch` evaluates transfers in order while staging each allowed
+admission in memory. It does not write state, so callers can inspect every per-transfer
+verdict and the overall admissibility before signing the run:
+```rust
+pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
+```
+For example, if a 60-unit transfer is allowed under the remaining window cap, a subsequent
+50-unit transfer can be returned as `WindowCapExceeded` because it is evaluated against the
+first transfer's staged admission. The result is overall inadmissible when any item is blocked;
+the caller must then adjust the run rather than submit a batch that the authorization path would
+reject.
 
 ### `__check_auth` (host-invoked — not callable by anyone)
 ```rust
@@ -963,7 +975,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-230 tests (unit + integration) cover the policy decision engine — including the regression
+233 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement

@@ -1088,6 +1088,51 @@ mod tests {
         ));
     }
 
+    /// SPEC §6.2 / issue #101: every administrative or custody-altering SAC
+    /// function on a listed asset is denied with the one dedicated reason,
+    /// `AssetFnNotAllowed`, rather than being bucketed with protocol function
+    /// denials. One code covers the whole class so telemetry can alert on it.
+    #[test]
+    fn listed_sac_abuse_functions_are_asset_fn_not_allowed() {
+        for function in ["mint", "burn", "clawback", "set_admin", "pause", "unpause"] {
+            let env = Env::default();
+            let sa = self_addr(&env);
+            let p = Some(base_policy(&env));
+            let mut l = Ledger::empty(&env);
+            let ctx = vec![&env, proto_ctx(&env, 1, function)];
+            let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx);
+            assert!(
+                matches!(
+                    d.first().unwrap(),
+                    Decision::Blocked(Error::AssetFnNotAllowed)
+                ),
+                "{function} on a listed SAC must be AssetFnNotAllowed"
+            );
+        }
+    }
+
+    /// The same functions on an asset that is not listed are never parsed as
+    /// asset calls: they stay `UnknownContract`.
+    #[test]
+    fn unlisted_sac_abuse_functions_stay_unknown_contract() {
+        for function in ["mint", "burn", "clawback", "set_admin", "pause", "unpause"] {
+            let env = Env::default();
+            let sa = self_addr(&env);
+            let p = Some(base_policy(&env));
+            let mut l = Ledger::empty(&env);
+            // Contract 7 is not in `assets` or `protocols`.
+            let ctx = vec![&env, proto_ctx(&env, 7, function)];
+            let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx);
+            assert!(
+                matches!(
+                    d.first().unwrap(),
+                    Decision::Blocked(Error::UnknownContract)
+                ),
+                "{function} on an unlisted contract must stay UnknownContract"
+            );
+        }
+    }
+
     #[test]
     fn window_cap_blocks_across_transactions_and_rolls_over() {
         let env = Env::default();
