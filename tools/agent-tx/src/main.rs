@@ -649,7 +649,7 @@ fn print_events(events: &serde_json::Value, reporter: &Reporter) {
     for ev in arr {
         if let Some(b64) = ev["xdr"].as_str().or_else(|| ev.as_str()) {
             let Ok(de) = DiagnosticEvent::from_xdr_base64(b64, Limits::none()) else {
-                println!("  event [invalid diagnostic XDR; ignored]");
+                reporter.line(format_args!("  event [invalid diagnostic XDR; ignored]"));
                 continue;
             };
             let contract = match &de.event.contract_id {
@@ -896,6 +896,18 @@ fn guard_auth_checked_block_reason(
     guard: &ScAddress,
 ) -> Option<&'static str> {
     diagnostics::block_reason(simulation_events(simulation)?, guard)
+}
+
+/// Signed execution paths must report the same verified policy verdict in JSON
+/// as they use for --expect-blocked; transport and host errors are not denials.
+fn guard_simulation_report(simulation: &serde_json::Value, guard: &ScAddress) -> RunReport {
+    if simulation_error_message(simulation).is_none() {
+        return RunReport::allowed();
+    }
+    match guard_auth_checked_block_reason(simulation, guard) {
+        Some(reason) => RunReport::blocked(reason.to_string()),
+        None => RunReport::failed("simulation_failed"),
+    }
 }
 
 // ── Footprint helpers ────────────────────────────────────────────────────
@@ -1167,7 +1179,7 @@ fn preflight<R: PreflightRpc>(call: &Call, args: &Args, rpc: &R) -> Result<(), i
     // unauthenticated simulation said, so it is `failed` with the symbol that
     // says why; a signed run takes the simulation's own verdict.
     let report = if agent.is_some() {
-        simulation_report(&sim)
+        guard_simulation_report(&sim, &args.guard)
     } else {
         RunReport::failed("unsigned_simulation")
     };
@@ -1177,7 +1189,9 @@ fn preflight<R: PreflightRpc>(call: &Call, args: &Args, rpc: &R) -> Result<(), i
         let reason = guard_auth_checked_block_reason(&sim, &args.guard);
         let policy_block = reason.is_some();
         if let Some(reason) = reason {
-            println!("BLOCKED (pre-broadcast, guard auth_checked): reason={reason}");
+            args.reporter.line(format_args!(
+                "BLOCKED (pre-broadcast, guard auth_checked): reason={reason}"
+            ));
         } else if agent.is_some() {
             args.reporter.line(format_args!(
                 "TRANSACTION REJECTED (pre-broadcast, not a guard policy block):"
@@ -1534,7 +1548,9 @@ fn run(call: &Call, args: &Args) -> RunOutcome {
         let reason = guard_auth_checked_block_reason(&sim, guard);
         let policy_block = reason.is_some();
         if let Some(reason) = reason {
-            println!("BLOCKED (pre-broadcast, guard auth_checked): reason={reason}");
+            args.reporter.line(format_args!(
+                "BLOCKED (pre-broadcast, guard auth_checked): reason={reason}"
+            ));
         } else {
             args.reporter.line(format_args!(
                 "TRANSACTION REJECTED (pre-broadcast, not a guard policy block):"
@@ -1549,7 +1565,7 @@ fn run(call: &Call, args: &Args) -> RunOutcome {
         args.reporter.line(format_args!("  broadcast: no"));
         let report = args
             .reporter
-            .complete(simulation_report(&sim), Some(latest));
+            .complete(guard_simulation_report(&sim, guard), Some(latest));
         args.reporter.emit(&report);
         return RunOutcome::SimulationBlocked {
             policy_block,
