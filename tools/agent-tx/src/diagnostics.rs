@@ -287,6 +287,51 @@ mod tests {
 
     #[test]
     fn malformed_diagnostic_printing_does_not_panic() {
-        crate::print_events(&serde_json::json!(["invalid base64", {"xdr":"AAAA"}, null]));
+        for json in [false, true] {
+            let reporter = crate::Reporter {
+                json,
+                network: None,
+            };
+            crate::print_events(
+                &serde_json::json!(["invalid base64", {"xdr":"AAAA"}, null]),
+                &reporter,
+            );
+        }
+    }
+
+    #[test]
+    fn signed_json_reports_only_verified_guard_denials_as_blocked() {
+        let simulation = serde_json::json!({
+            "error": "host failure",
+            "events": [encoded(&valid_event())],
+        });
+        let report = crate::guard_simulation_report(&simulation, &guard());
+        assert_eq!(report.outcome, "blocked");
+        assert_eq!(report.reason.as_deref(), Some("per_tx_cap_exceeded"));
+    }
+
+    #[test]
+    fn signed_json_reports_unverified_errors_as_failures() {
+        let mut other_guard = valid_event();
+        other_guard.event.contract_id = Some(ContractId(Hash([8; 32])));
+        for simulation in [
+            serde_json::json!({"error": "RPC unavailable"}),
+            serde_json::json!({"error": {"message": "auth_checked: per_tx_cap_exceeded"}}),
+            serde_json::json!({"error": "host failure", "events": [encoded(&other_guard)]}),
+            serde_json::json!({"error": "host failure", "events": ["invalid XDR"]}),
+        ] {
+            let report = crate::guard_simulation_report(&simulation, &guard());
+            assert_eq!(report.outcome, "failed");
+            assert_eq!(report.reason.as_deref(), Some("simulation_failed"));
+        }
+    }
+
+    #[test]
+    fn signed_json_reports_success_without_an_error() {
+        for simulation in [serde_json::json!({}), serde_json::json!({"error": null})] {
+            let report = crate::guard_simulation_report(&simulation, &guard());
+            assert_eq!(report.outcome, "allowed");
+            assert_eq!(report.reason, None);
+        }
     }
 }
