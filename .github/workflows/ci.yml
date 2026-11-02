@@ -116,6 +116,21 @@ jobs:
 
       - name: Agent submission tool build (tools/agent-tx)
         run: cargo build --release --manifest-path tools/agent-tx/Cargo.toml
+
+      # tools/agent-strkey is also a separate cargo project (issue #379): the
+      # base-32 / CRC16-XModem / StrKey codec both `tools/agent-tx` and
+      # `examples/agent_pubkey.rs` parse keys with. The root gates above exclude
+      # the tool and the tool's gates do not run a dependency's tests, so the
+      # codec's own suite runs here. Keep this list in sync with CONTRIBUTING.md.
+      - name: StrKey codec format check (tools/agent-strkey)
+        run: cargo fmt --manifest-path tools/agent-strkey/Cargo.toml --check
+
+      - name: StrKey codec clippy (tools/agent-strkey)
+        run: cargo clippy --manifest-path tools/agent-strkey/Cargo.toml --all-targets -- -D warnings
+
+      - name: StrKey codec tests (tools/agent-strkey)
+        run: cargo test --manifest-path tools/agent-strkey/Cargo.toml
+
       - name: Install nightly for cargo-fuzz
         uses: dtolnay/rust-toolchain@nightly
 

@@ -1,0 +1,21 @@
+[package]
+name = "agent-strkey"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+rust-version = "1.91.0"
+description = "Base-32, CRC16-XModem and StrKey codec shared by tools/agent-tx and examples/agent_pubkey.rs"
+
+# Deliberately dependency-free (issue #379). This crate parses the one secret
+# that can move funds, so it is kept small enough to audit in one sitting and
+# small enough that neither consumer pays for it: `tools/agent-tx` keeps its
+# "no Stellar SDK, just stellar-xdr" dependency surface, and the root crate's
+# `examples/agent_pubkey.rs` gains only these ~150 lines, not a StrKey library
+# with a transitive tree.
+#
+# One implementation, two consumers. Editing this file changes both the tool
+# and the example, which is the point: there is nowhere for the two to diverge.
+
+[dev-dependencies]
+hex = "0.4"

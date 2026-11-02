@@ -39,6 +39,12 @@ cargo fmt --manifest-path tools/agent-tx/Cargo.toml --check
 cargo clippy --manifest-path tools/agent-tx/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path tools/agent-tx/Cargo.toml
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
+
+# tools/agent-strkey is the dependency-free StrKey codec shared by the tool
+# and examples/agent_pubkey.rs (issue #379)
+cargo fmt --manifest-path tools/agent-strkey/Cargo.toml --check
+cargo clippy --manifest-path tools/agent-strkey/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path tools/agent-strkey/Cargo.toml
 ```
 
 ## Coding standards
@@ -389,6 +395,8 @@ examples/
   agent_pubkey.rs      # Derive raw Ed25519 pubkey from a Stellar secret key
 tools/
   agent-tx/            # Sign+submit helper for the custom-account address
+  agent-strkey/        # Dependency-free base-32 / CRC16-XModem / StrKey codec
+                       #   shared by agent-tx and examples/agent_pubkey.rs
 tests/fixtures/        # Real testnet evidence (tx hashes, contract IDs, events)
 docs/                  # GitBook documentation site
 SPEC.md                # Architecture specification (mechanism is settled)
