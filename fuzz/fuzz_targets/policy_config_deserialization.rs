@@ -7,14 +7,6 @@ use stellar_xdr::{Limits, ReadXdr, ScVal};
 
 const MAX_INPUT_BYTES: usize = 4_096;
 const MAX_XDR_DEPTH: u32 = 64;
-fn panic_is_conversion_error(payload: &(dyn std::any::Any + Send)) -> bool {
-    payload
-        .downcast_ref::<String>()
-        .is_some_and(|message| message.contains("ConversionError"))
-        || payload
-            .downcast_ref::<&str>()
-            .is_some_and(|message| message.contains("ConversionError"))
-}
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT_BYTES {
@@ -31,16 +23,19 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
+    // NOTE: a panic here is *not* recoverable, so this target must not rely on
+    // `catch_unwind`. libfuzzer-sys installs a panic hook that abort()s before
+    // unwinding (so libFuzzer can symbolize the stack), which makes any
+    // in-target panic handler dead code — a `ConversionError` panic inside
+    // `Vec::get` would kill the process all the same. Preventing those panics
+    // is `validate_policy_config_scval`'s job: its ScVal shape guard pins the
+    // element type of every lazily-converted vector before the SDK builds a
+    // `PolicyConfig`, so a malformed element is a normal `InvalidConfig`
+    // rejection instead of an abort. Keep this target panic-free by keeping
+    // that guard exhaustive; see `scval_vec_is_addresses`.
     let env = Env::default();
     let contract_id = env.register_contract(None, PolicyEngine);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        env.as_contract(&contract_id, || validate_policy_config_scval(&env, &scval))
-    }));
-    let result = match result {
-        Ok(result) => result,
-        Err(payload) if panic_is_conversion_error(payload.as_ref()) => Err(Error::InvalidConfig),
-        Err(payload) => std::panic::resume_unwind(payload),
-    };
+    let result = env.as_contract(&contract_id, || validate_policy_config_scval(&env, &scval));
     assert!(
         matches!(result, Ok(()) | Err(Error::InvalidConfig)),
         "policy decoding and validation returned an unstable error: {result:?}"

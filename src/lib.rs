@@ -35,13 +35,13 @@ use engine::{cap_metrics, contains_addr, decide, effective_per_tx_cap, AccountSt
 use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
 use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, vec, Address, Bytes, BytesN, Env,
-    IntoVal, Symbol, TryFromVal, Val,
+    IntoVal, Symbol, TryFromVal, Val, Vec,
 };
 pub use types::MAX_AUTH_CONTEXTS;
 pub use types::NO_POLICY_DIGEST;
 pub use types::{
-    AssetCap, CheckDetail, Error, PolicyConfig, ProtocolRule, RecipientCap, RecipientWindowState,
-    ValidationOutcome,
+    AssetCap, BatchCheckResult, BatchTransfer, CheckDetail, Error, PolicyConfig, ProtocolRule,
+    RecipientCap, RecipientWindowState, ValidationOutcome,
 };
 use types::{
     CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_ASSET_CAP_ENTRIES,
@@ -1235,6 +1235,91 @@ mod policy_engine_type {
                 effective_window_cap,
             }
         }
+
+        /// Pre-flight a payment run without writing storage.
+        ///
+        /// Transfers are evaluated in order against a local copy of the rolling
+        /// window ledger. An allowed transfer is staged before the next item is
+        /// evaluated, so the returned verdicts match the all-or-nothing admission
+        /// rules used by `__check_auth`. The local ledger is discarded afterwards.
+        #[allow(clippy::must_use_candidate)]
+        pub fn check_batch(
+            env: Env,
+            asset: Address,
+            transfers: Vec<BatchTransfer>,
+        ) -> BatchCheckResult {
+            let mut contexts = Vec::new(&env);
+            for transfer in transfers.iter() {
+                contexts.push_back(transfer_context(
+                    &env,
+                    &asset,
+                    &transfer.to,
+                    transfer.amount,
+                ));
+            }
+            let Some(snapshot) = AuthSnapshot::load(&env) else {
+                let mut verdicts = Vec::new(&env);
+                let mut index: u32 = 0;
+                for context in contexts.iter() {
+                    emit_auth(&env, false, Some(Error::NoPolicy), Some(&context), index);
+                    index = index.saturating_add(1);
+                    verdicts.push_back(CheckResult::Blocked(Symbol::new(
+                        &env,
+                        Error::NoPolicy.reason(),
+                    )));
+                }
+                return BatchCheckResult {
+                    verdicts,
+                    admissible: false,
+                };
+            };
+
+            let AuthSnapshot {
+                policy,
+                admin_frozen,
+                last_heartbeat,
+                mut ledger,
+                ..
+            } = snapshot;
+            let now = env.ledger().timestamp();
+            let self_addr = env.current_contract_address();
+            let decisions = decide(
+                &env,
+                &self_addr,
+                Some(&policy),
+                &AccountState {
+                    admin_frozen,
+                    last_heartbeat,
+                },
+                &mut ledger,
+                now,
+                contexts.clone(),
+            );
+            let mut verdicts = Vec::new(&env);
+            let mut admissible = true;
+            let mut index: u32 = 0;
+            for decision in &decisions {
+                let context = contexts.get(index);
+                let result = match decision {
+                    Decision::Allowed => {
+                        emit_auth(&env, true, None, context.as_ref(), index);
+                        CheckResult::Allowed
+                    }
+                    Decision::Blocked(error) => {
+                        admissible = false;
+                        emit_auth(&env, false, Some(*error), context.as_ref(), index);
+                        CheckResult::Blocked(Symbol::new(&env, error.reason()))
+                    }
+                };
+                verdicts.push_back(result);
+                index = index.saturating_add(1);
+            }
+
+            BatchCheckResult {
+                verdicts,
+                admissible,
+            }
+        }
     }
 
     /// Build the auth `Context` of a SAC `transfer` call for pre-flight checks.
@@ -1459,6 +1544,62 @@ pub mod testutils {
         })
     }
 
+    fn scval_is_address(value: &soroban_sdk::xdr::ScVal) -> bool {
+        use soroban_sdk::xdr::{ScAddress, ScVal};
+
+        // `Address` only represents account and contract addresses. Other
+        // `ScAddress` variants still convert to host objects, but not to
+        // `AddressObject`, so a lazy `Vec::get` would abort on them.
+        matches!(
+            value,
+            ScVal::Address(ScAddress::Account(_) | ScAddress::Contract(_))
+        )
+    }
+
+    fn scval_is_bool(value: &soroban_sdk::xdr::ScVal) -> bool {
+        use soroban_sdk::xdr::ScVal;
+
+        matches!(value, ScVal::Bool(_))
+    }
+
+    fn scval_is_i128(value: &soroban_sdk::xdr::ScVal) -> bool {
+        use soroban_sdk::xdr::ScVal;
+
+        matches!(value, ScVal::I128(_))
+    }
+
+    /// `ProtocolRule::fns`'s two wire forms: `ScVal::Void` for `None`, a
+    /// symbol vector for `Some`.
+    fn scval_is_symbol_list_or_void(value: &soroban_sdk::xdr::ScVal) -> bool {
+        use soroban_sdk::xdr::ScVal;
+
+        match value {
+            ScVal::Void => true,
+            ScVal::Vec(Some(items)) => items.iter().all(|item| matches!(item, ScVal::Symbol(_))),
+            _ => false,
+        }
+    }
+
+    /// A `Vec<Address>` wire form whose every element is an address.
+    ///
+    /// The SDK converts vector elements *lazily*: `PolicyConfig::try_from_val`
+    /// only checks that the field is a host vector, and each element is
+    /// converted on `Vec::get` — where a mismatch aborts the process via
+    /// `unwrap_optimized` on `ConversionError` rather than returning an error.
+    /// Pinning element types here is therefore what keeps
+    /// `validate_policy_config_scval`'s "without panicking" promise (a fuzz
+    /// input with e.g. a bool in `assets` reached `contains_addr` and killed
+    /// the libFuzzer process, whose abort-on-panic hook also defeats any
+    /// `catch_unwind` in the target).
+    fn scval_vec_is_addresses(value: &soroban_sdk::xdr::ScVal) -> bool {
+        use soroban_sdk::xdr::ScVal;
+
+        let ScVal::Vec(Some(items)) = value else {
+            return false;
+        };
+        items.iter().all(scval_is_address)
+    }
+
     fn policy_config_scval_has_safe_struct_shape(value: &soroban_sdk::xdr::ScVal) -> bool {
         use soroban_sdk::xdr::ScVal;
 
@@ -1479,34 +1620,55 @@ pub mod testutils {
             "dms_grace_secs",
             "protocol_calls_per_window",
         ];
+        // `Vec<Address>` fields carry no per-element check at conversion time,
+        // so their element types are pinned here (see `scval_vec_is_addresses`).
+        const ADDRESS_LIST_FIELDS: &[&str] = &["assets", "recipients", "blocked_recipients"];
         if !has_exact_scval_fields(value, POLICY_FIELDS) {
             return false;
         }
+        if !ADDRESS_LIST_FIELDS
+            .iter()
+            .all(|field| scval_field(value, field).is_some_and(scval_vec_is_addresses))
+        {
+            return false;
+        }
+        // The nested entry structs are also converted lazily on `Vec::get`, so
+        // their exact field sets *and* field types are pinned here. The field
+        // sets must match `AssetCap`/`ProtocolRule`/`RecipientCap` exactly: a
+        // set that omits a real field (this check previously omitted `paused`)
+        // admits maps the struct conversion then fails to build, aborting on
+        // the same lazy `unwrap_optimized` path.
         let Some(ScVal::Vec(Some(asset_caps))) = scval_field(value, "asset_caps") else {
             return false;
         };
-        if !asset_caps
-            .iter()
-            .all(|cap| has_exact_scval_fields(cap, &["asset", "per_tx_cap"]))
-        {
+        if !asset_caps.iter().all(|cap| {
+            has_exact_scval_fields(cap, &["asset", "paused", "per_tx_cap"])
+                && scval_field(cap, "asset").is_some_and(scval_is_address)
+                && scval_field(cap, "paused").is_some_and(scval_is_bool)
+                && scval_field(cap, "per_tx_cap").is_some_and(scval_is_i128)
+        }) {
             return false;
         }
         let Some(ScVal::Vec(Some(protocols))) = scval_field(value, "protocols") else {
             return false;
         };
-        if !protocols
-            .iter()
-            .all(|rule| has_exact_scval_fields(rule, &["contract", "fns"]))
-        {
+        if !protocols.iter().all(|rule| {
+            has_exact_scval_fields(rule, &["contract", "fns", "paused"])
+                && scval_field(rule, "contract").is_some_and(scval_is_address)
+                && scval_field(rule, "fns").is_some_and(scval_is_symbol_list_or_void)
+                && scval_field(rule, "paused").is_some_and(scval_is_bool)
+        }) {
             return false;
         }
         let Some(ScVal::Vec(Some(recipient_caps))) = scval_field(value, "recipient_window_caps")
         else {
             return false;
         };
-        recipient_caps
-            .iter()
-            .all(|cap| has_exact_scval_fields(cap, &["recipient", "cap"]))
+        recipient_caps.iter().all(|cap| {
+            has_exact_scval_fields(cap, &["recipient", "cap"])
+                && scval_field(cap, "recipient").is_some_and(scval_is_address)
+                && scval_field(cap, "cap").is_some_and(scval_is_i128)
+        })
     }
     /// Decode and validate a host-provided policy `ScVal` without panicking.
     ///

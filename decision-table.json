@@ -206,13 +206,15 @@
         {
           "error": "AssetFnNotAllowed",
           "tests": [
-            "asset_other_function_is_asset_fn_not_allowed"
+            "asset_other_function_is_asset_fn_not_allowed",
+            "listed_sac_abuse_functions_are_asset_fn_not_allowed"
           ]
         },
         {
           "error": "UnknownContract",
           "tests": [
             "unlisted_asset_is_unknown_contract",
+            "unlisted_sac_abuse_functions_stay_unknown_contract",
             "protocol_unknown_contract_denied",
             "arity_guard_transfer_4_args_is_denied"
           ]

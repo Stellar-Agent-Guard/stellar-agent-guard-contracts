@@ -7,6 +7,7 @@ yanked = "deny"
 # review date; remove it when the dependency is fixed.
 ignore = [
   { id = "RUSTSEC-2024-0436", reason = "Unmaintained-only advisory, not a known vulnerability; transitive through soroban-sdk 27.0.6 (ark-ff and soroban-wasmi), with no safe upgrade reported by cargo-deny. Reassess on the next Soroban SDK upgrade; review by 2026-12-01." },
+  { id = "RUSTSEC-2026-0387", reason = "Constant-time timing advisory in crypto-bigint 0.5.5, pulled in by soroban-env-host 27.0.1's k256/p256 dependencies. The contract uses Ed25519 only and never calls secp256k1/P-256 host functions; there is no patched 0.5.x release and moving to the fixed 0.7.x line requires a newer Soroban SDK. Reassess on the next Soroban SDK upgrade; review by 2026-12-01." },
 ]
 
 [licenses]
