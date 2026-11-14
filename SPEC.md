@@ -1398,6 +1398,20 @@ surfacing the new field are cross-repo follow-ups. Two `auth_checked` events
 sharing a revision were evaluated under the same policy generation; the
 `policy_hash` (§7.3) distinguishes *which* policy that generation installed.
 
+**Policy revision join key (issue #38).** `PolicyRevision` is a persistent
+instance-stored counter (`DataKey::PolicyRevision`, §3) incremented by every
+`set_policy` and `revoke_policy` — starting at 1 after the first `set_policy`
+and never reset by a revoke. `status()` exposes it as `policy_revision`, and
+the `policy_set`, `policy_revoked`, and `auth_checked` events stamp it as
+additive `revision` data. Telemetry consumers can therefore join "which policy
+was in force when this transfer was admitted" on the counter instead of
+wall-clock joins, which are wrong the instant an admin makes two `set_policy`
+calls within one ledger. The fields are additive data on unchanged topics, so
+decoders that ignore unknown map keys keep working; SDK/dashboard decoders
+surfacing the new field are cross-repo follow-ups. Two `auth_checked` events
+sharing a revision were evaluated under the same policy generation; the
+`policy_hash` (§7.3) distinguishes *which* policy that generation installed.
+
 Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
 
 **Heartbeat expiry (`heartbeat.expires_at`).** `expires_at` is the deadline the heartbeat was
