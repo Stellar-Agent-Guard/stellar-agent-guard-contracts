@@ -1,4 +1,4 @@
-//! StrKey input validation (issue #52).
+//! `StrKey` input validation (issue #52).
 //!
 //! Nothing in this module performs I/O, which is what makes "malformed input
 //! never reaches an RPC" testable: `agent-tx` validates every address-typed
@@ -7,7 +7,7 @@
 //!
 //! # Network-vs-prefix policy
 //!
-//! A StrKey's leading character comes from its version byte, which encodes the
+//! A `StrKey`'s leading character comes from its version byte, which encodes the
 //! *key type* (`G` account, `C` contract, `S` secret seed) and never the
 //! network. The same Ed25519 key has the same string form on testnet,
 //! futurenet and mainnet, so no prefix check can tell a "testnet address" from
@@ -70,7 +70,7 @@ impl KeyKind {
     }
 }
 
-/// The leading character a StrKey with this version byte renders as. StrKey is
+/// The leading character a `StrKey` with this version byte renders as. `StrKey` is
 /// base-32 over `version || payload || crc`, so it carries the top 5 bits of
 /// the version byte.
 fn prefix_for(version: u8) -> char {
@@ -86,7 +86,7 @@ fn version_name(version: u8) -> String {
     }
 }
 
-/// Decode a StrKey into `(version byte, 32-byte payload)`, checking the
+/// Decode a `StrKey` into `(version byte, 32-byte payload)`, checking the
 /// alphabet, the length, and the CRC16-XModem checksum. The error names the
 /// broken rule in terms an operator can act on.
 pub fn decode_strkey(value: &str) -> Result<(u8, [u8; 32]), String> {
