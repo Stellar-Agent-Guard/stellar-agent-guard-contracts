@@ -472,6 +472,13 @@ Two notes that matter when these rows are used to triage a live incident:
 3. Install the scenario policies (JSON in `--config`), then run the
    `agent-tx` invocations above. Use `--expect-blocked` for scenarios 2–5.
 
+A `BLOCKED` line now means a verified guard denial specifically: simulation
+failed and a contract diagnostic event from the requested guard has the ordered
+topics `event_auth_checked, blocked, <known reason>`. The line prints
+`reason=<symbol>` for the evidence record. `--expect-blocked` exits 0 only for
+that verified denial; bad addresses, fee/signature failures, RPC errors, and
+missing, malformed, or unrecognized block events remain non-zero failures.
+
 The five blocked/emitted events above are the contract's own
 `event_auth_checked` topics — grep the enforced-simulation output for
 `blocked, <reason>` to confirm each.
