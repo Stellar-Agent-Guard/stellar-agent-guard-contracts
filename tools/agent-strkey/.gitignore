@@ -1,0 +1,6 @@
+# A library crate: its lockfile is not what consumers build against (they each
+# record it in their own Cargo.lock), so it is not committed.
+Cargo.lock
+
+# Build artifacts (the repo root also ignores **/target).
+/target
