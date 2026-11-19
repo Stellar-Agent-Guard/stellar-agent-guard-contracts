@@ -450,6 +450,10 @@ pub struct MockAsset;
 impl MockAsset {
     /// Seeds `holder` with `initial_balance`, replacing any prior balance.
     /// Test-only setup helper (no auth required).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `initial_balance` is negative.
     pub fn initialize(env: Env, holder: Address, initial_balance: i128) {
         assert!(initial_balance >= 0, "negative initial balance");
         let mut balances = mock_load_balances(&env);
@@ -458,6 +462,10 @@ impl MockAsset {
     }
 
     /// Credits `amount` to `to`'s balance. Test-only setup helper (no auth).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `amount` is negative or overflows `i128`.
     pub fn mint(env: Env, to: Address, amount: i128) {
         assert!(amount >= 0, "negative mint amount");
         let mut balances = mock_load_balances(&env);
@@ -476,18 +484,25 @@ impl MockAsset {
     /// `amount` from `from` to `to`, failing on insufficient funds. The guard
     /// contract is `from`, so `from.require_auth()` routes through
     /// `__check_auth` before any balance changes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `amount <= 0`, if `from` has insufficient balance, or if the
+    /// recipient balance overflows `i128`.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         from.require_auth();
         assert!(amount > 0, "non-positive transfer");
         let mut balances = mock_load_balances(&env);
-        let from_bal = balances.get(from.clone()).unwrap_or(0);
+        let sender_balance = balances.get(from.clone()).unwrap_or(0);
         assert!(
-            from_bal >= amount,
-            "insufficient mock asset balance: holder has {from_bal}, tried to transfer {amount}"
+            sender_balance >= amount,
+            "insufficient mock balance: has {sender_balance}, tried to transfer {amount}"
         );
-        balances.set(from, from_bal - amount);
-        let to_bal = balances.get(to.clone()).unwrap_or(0);
-        let credited = to_bal.checked_add(amount).expect("balance overflow");
+        balances.set(from, sender_balance - amount);
+        let recipient_balance = balances.get(to.clone()).unwrap_or(0);
+        let credited = recipient_balance
+            .checked_add(amount)
+            .expect("balance overflow");
         balances.set(to.clone(), credited);
         mock_save_balances(&env, &balances);
         #[allow(deprecated)] // test-only helper; not part of the shipped surface
@@ -6604,8 +6619,7 @@ fn increase_window_cap_preserves_total_and_blocks_at_new_cap() {
     h.set_time(1_000);
     h.install_policy(&policy);
 
-    let client = PolicyEngineClient::new(&h.env, &h.guard);
-    let hash_before = client.policy_hash();
+    let hash_before = PolicyEngineClient::new(&h.env, &h.guard).policy_hash();
     let initial_heartbeat = h.status().last_heartbeat;
 
     h.set_time(1_010);
@@ -6620,6 +6634,7 @@ fn increase_window_cap_preserves_total_and_blocks_at_new_cap() {
     assert_eq!(event_count(&h.env, "event_window_cap_increased"), 1);
     let rev = last_event_revision(&h.env, "event_window_cap_increased");
     assert_eq!(rev, 2);
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
     assert_eq!(client.policy().unwrap().window_cap, 150);
     assert_ne!(client.policy_hash(), hash_before);
     assert_eq!(h.status().last_heartbeat, initial_heartbeat);
@@ -6717,11 +6732,9 @@ fn increase_window_cap_requires_admin_initialized_and_installed_policy() {
         GuardError::NotInitialized
     );
 
-    let client = PolicyEngineClient::new(&h.env, &h.guard);
-    assert_eq!(
-        try_contract_error(client.try_increase_window_cap(&200)),
-        GuardError::NoPolicy
-    );
+    let no_policy_res = PolicyEngineClient::new(&h.env, &h.guard).try_increase_window_cap(&200);
+    let err = try_contract_error(no_policy_res);
+    assert_eq!(err, GuardError::NoPolicy);
 
     let mut policy = h.base_policy();
     policy.window_cap = 100;
@@ -6750,6 +6763,7 @@ fn increase_window_cap_requires_admin_initialized_and_installed_policy() {
         "increase_window_cap authorized by the agent key must fail"
     );
 
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
     assert_eq!(client.policy().unwrap().window_cap, 100);
     assert_eq!(h.status().policy_revision, 1);
 }

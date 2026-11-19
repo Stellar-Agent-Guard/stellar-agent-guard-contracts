@@ -694,20 +694,18 @@ fn window_cap_increased_event_carries_caps_and_revision() {
         1,
         "event_window_cap_increased must carry exactly 1 topic"
     );
-    match &cap_v0.data {
-        ScVal::Map(Some(map)) => {
-            assert_eq!(
-                map.0.len(),
-                4,
-                "event_window_cap_increased must carry by, old_cap, new_cap, and revision"
-            );
-            assert_eq!(map.0[0].key, event_name("by"));
-            assert_eq!(map.0[1].key, event_name("new_cap"));
-            assert_eq!(map.0[2].key, event_name("old_cap"));
-            assert_eq!(map.0[3].key, event_name("revision"));
-        }
-        _ => panic!("event_window_cap_increased data must be a Map"),
-    }
+    let ScVal::Map(Some(map)) = &cap_v0.data else {
+        panic!("event_window_cap_increased data must be a Map");
+    };
+    assert_eq!(
+        map.0.len(),
+        4,
+        "event_window_cap_increased must carry by, old_cap, new_cap, and revision"
+    );
+    assert_eq!(map.0[0].key, event_name("by"));
+    assert_eq!(map.0[1].key, event_name("new_cap"));
+    assert_eq!(map.0[2].key, event_name("old_cap"));
+    assert_eq!(map.0[3].key, event_name("revision"));
     assert_eq!(map_i128_field(cap_event, "old_cap"), 500);
     assert_eq!(map_i128_field(cap_event, "new_cap"), 750);
     assert_eq!(map_u64_field(cap_event, "revision"), 2);
