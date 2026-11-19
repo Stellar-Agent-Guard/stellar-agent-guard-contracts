@@ -138,6 +138,16 @@ mod event_types {
         pub(super) revision: u64,
     }
 
+    /// Telemetry warning emitted when `set_policy` installs a policy with
+    /// `allow_any_recipient == false` and an empty `recipients` list, meaning no
+    /// SAC transfer recipient can ever be authorized (issue #351).
+    #[contractevent]
+    #[derive(Clone)]
+    pub(super) struct EventNoRecipientsAllowed {
+        pub(super) by: Address,
+        pub(super) revision: u64,
+    }
+
     /// Admin policy revoke: data `by` (the admin address that acted) plus
     /// `revision` — the `PolicyRevision` value this `revoke_policy` produced.
     /// `auth_checked` events after this one carry this revision while the account
@@ -860,6 +870,13 @@ mod policy_engine_type {
                 persist_set(&env, &DataKey::LastHeartbeat, &now);
             }
             emit_policy_set(&env, &admin);
+            if !config.allow_any_recipient && config.recipients.is_empty() {
+                EventNoRecipientsAllowed {
+                    by: admin,
+                    revision: current_revision(&env),
+                }
+                .publish(&env);
+            }
         }
 
         /// Explicitly zeroes the rolling spend window (issue #289). Admin-only.

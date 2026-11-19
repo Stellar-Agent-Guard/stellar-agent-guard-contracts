@@ -211,6 +211,7 @@ TTL on every write; see §9.5).
 | `AdminFrozen` | `bool` | persistent | admin-initiated freeze flag |
 | `PolicyRevision` | `u64` | persistent | policy sequence number; incremented on every `set_policy`/`revoke_policy` and on a `pause()`/`resume()` that actually flips `paused` (issues #289/#290), stamped into `policy_set`/`policy_revoked`/`paused`/`resumed`/`auth_checked` events (§9, issue #38) |
 
+
 ```rust
 #[contracttype]
 pub struct PolicyConfig {
@@ -1519,7 +1520,7 @@ entire validation surface at a glance (issue #353).
 | `protocols[i].fns == Some(list)` where `list.is_empty()` or `list` has duplicate `Symbol`s | **Rejected** — `InvalidConfig` / `ProtocolFnListInvalid` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_protocol_fn_list_invalid` (`src/integration_tests.rs`) |
 | `window_secs > MAX_WINDOW_SECS` or `dms_grace_secs > MAX_DMS_GRACE_SECS` (`315_360_000` s ≈ 10 years; issue #34) | **Rejected** — `InvalidConfig` / `DurationExceedsBound`; `0` (disabled) and `MAX_*` boundary are **Accepted** | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_duration_exceeds_bound`, `window_and_dms_upper_bounds_rejected`, `window_and_dms_upper_bounds_accept_boundary` (`src/integration_tests.rs`) |
 | Empty `assets` (`assets.is_empty()`) | **Accepted (inert for SAC transfers)** — no SAC token is allowlisted, so every SAC `transfer`/`transfer_from` classifies as `UnknownContract` and is never allowed (useful for watch-only / heartbeat-only accounts) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`parse_call_inner`) | `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset), `audit_event_payloads_and_topics` (`src/event_audit_tests.rs`); dedicated transfer-denial test tracked in [issue #363](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/363) |
-| Empty `recipients` with `allow_any_recipient == false` | **Accepted (inert for SAC transfers)** — no destination is allowlisted and the escape hatch is off, so every SAC transfer is blocked with `RecipientNotAllowed`. Accepted in v1 unless changed by companion [issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`decide`) | `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset); companion policy-rejection decision tracked in [issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) |
+| Empty `recipients` with `allow_any_recipient == false` | **Accepted with telemetry warning (`event_no_recipients_allowed`)** — no destination is allowlisted and the escape hatch is off, so every SAC transfer is blocked with `RecipientNotAllowed`. `set_policy` emits `event_no_recipients_allowed` (`by`, `revision`) so telemetry surfaces the inert recipient state (issue #351) | `src/lib.rs` (`set_policy`, `first_failing_rule`); `src/engine.rs` (`decide`) | `no_recipients_allowed_event_emitted_only_when_inert`, `every_documented_preset_installs_and_round_trips` (`src/event_audit_tests.rs`, `src/policy_preset_tests.rs`) |
 | Empty `recipients` with `allow_any_recipient == true` | **Accepted** — recipient allowlist is skipped by the escape hatch; `blocked_recipients`, `per_tx_cap`, and `window_cap` still apply | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`decide`) | `allow_any_recipient_with_empty_list_still_enforces_both_caps` (`src/integration_tests.rs`) |
 | Empty `protocols` (`protocols.is_empty()`) | **Accepted (inert for protocol calls)** — no non-asset external protocol is allowlisted; every non-asset, non-self call is blocked with `UnknownContract` | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`parse_call_inner`) | `validate_policy_accepts_valid_config_and_ignores_installed_policy` (`src/integration_tests.rs`), `unlisted_asset_is_unknown_contract` (`src/engine.rs`) |
 | `protocols[i].fns == None` | **Accepted** — wildcard: any function on that allowlisted protocol contract is allowed (contrasts with `Some([])`, which is rejected as `ProtocolFnListInvalid`) | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`decide`) | `protocol_allowlist_is_enforced_through_real_host_authorization` (`src/integration_tests.rs`) |
@@ -1594,6 +1595,7 @@ filtering by the SDK listener.
 | `frozen` | (none) | `by: Address` | admin freeze |
 | `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
 | `policy_set` / `policy_revoked` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced | admin policy changes |
+| `no_recipients_allowed` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this `set_policy` produced | `set_policy` when `allow_any_recipient == false` and `recipients.is_empty()` (issue #351) |
 | `paused` / `resumed` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced; the counter advances only when the call actually flips `paused`, so a redundant double-pause emits the event with an unchanged revision | admin `pause()` / `resume()` (issues #289/#290) |
 | `window_reset` | (none) | `by: Address` — the admin that explicitly zeroed the rolling window (`set_policy` preserves it across edits, issue #289) | admin `reset_window()` (issue #289) |
 | `window_cap_increased` | (none) | `by: Address`, `old_cap: i128`, `new_cap: i128`, `revision: u64` — the admin that raised `window_cap` in place without resetting the ledger, plus the incremented `PolicyRevision` | admin `increase_window_cap(new_cap)` (issue #349) |
@@ -1606,7 +1608,7 @@ instance-stored counter (`DataKey::PolicyRevision`, §3) incremented by every
 actually flips the `paused` flag (a redundant pause leaves the counter
 untouched; issues #289/#290) — starting at 1 after the first `set_policy`
 and never reset by a revoke. `status()` exposes it as `policy_revision`, and
-the `policy_set`, `policy_revoked`, `paused`, `resumed`, `window_cap_increased`, and `auth_checked`
+the `policy_set`, `policy_revoked`, `no_recipients_allowed`, `paused`, `resumed`, `window_cap_increased`, and `auth_checked`
 events stamp it as
 additive `revision` data. Telemetry consumers can therefore join "which policy
 was in force when this transfer was admitted" on the counter instead of
@@ -1616,8 +1618,6 @@ decoders that ignore unknown map keys keep working; SDK/dashboard decoders
 surfacing the new field are cross-repo follow-ups. Two `auth_checked` events
 sharing a revision were evaluated under the same policy generation; the
 `policy_hash` (§7.3) distinguishes *which* policy that generation installed.
-
-Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
 
 **Heartbeat expiry (`heartbeat.expires_at`).** `expires_at` is the deadline the heartbeat was
 actually attested under, derived from the `dms_grace_secs` of the policy *current at the moment
