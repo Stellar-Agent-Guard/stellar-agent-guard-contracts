@@ -204,7 +204,7 @@ use soroban_sdk::xdr::{
 use soroban_sdk::{
     contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, InvokeError, Symbol, Val,
 };
-use std::format;
+use std::{boxed::Box, format};
 
 /// A `ScVal::Symbol` built from a plain string (event names / map keys).
 fn symbol_val(s: &str) -> ScVal {
@@ -898,13 +898,14 @@ impl Harness {
     /// `heartbeat_with_expect_blocked`). The expected reason comes from the
     /// permissionless preflight and must match the host-routed failure.
     fn transfer_blocked_reason(&mut self, to: &Address, amount: i128) -> std::string::String {
-        let expected = match PolicyEngineClient::new(&self.env, &self.guard)
-            .check(&self.asset, to, &amount)
-        {
-            CheckResult::Blocked(reason) => GuardError::from_block_reason(&reason)
-                .unwrap_or_else(|| panic!("preflight returned an unknown block reason {reason:?}")),
-            CheckResult::Allowed => panic!("expected preflight to block the transfer"),
-        };
+        let expected =
+            match PolicyEngineClient::new(&self.env, &self.guard).check(&self.asset, to, &amount) {
+                CheckResult::Blocked(reason) => GuardError::from_block_reason(&reason)
+                    .unwrap_or_else(|| {
+                        panic!("preflight returned an unknown block reason {reason:?}")
+                    }),
+                CheckResult::Allowed => panic!("expected preflight to block the transfer"),
+            };
         assert_eq!(
             self.emitted_blocked_auth(expected.reason()),
             1,

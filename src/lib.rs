@@ -730,23 +730,22 @@ mod policy_engine_type {
         let policy_revision = persist_get::<u64>(env, &DataKey::PolicyRevision).unwrap_or(0);
         let admin_frozen = persist_get::<bool>(env, &DataKey::AdminFrozen).unwrap_or(false);
         let last_heartbeat = persist_get::<u64>(env, &DataKey::LastHeartbeat).unwrap_or(0);
-        let (paused, window_remaining, outside_active_window, dms_grace_secs) =
-            match &policy {
-                None => (false, None, false, 0),
-                Some(cfg) => {
-                    let (mut ledger, _) = load_window(env);
-                    if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
-                        ledger.prune(as_of, cfg.window_secs);
-                    }
-                    (
-                        cfg.paused,
-                        engine::global_window_remaining(cfg, &ledger),
-                        (cfg.active_from != 0 && as_of < cfg.active_from)
-                            || (cfg.active_until != 0 && as_of > cfg.active_until),
-                        cfg.dms_grace_secs,
-                    )
+        let (paused, window_remaining, outside_active_window, dms_grace_secs) = match &policy {
+            None => (false, None, false, 0),
+            Some(cfg) => {
+                let (mut ledger, _) = load_window(env);
+                if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
+                    ledger.prune(as_of, cfg.window_secs);
                 }
-            };
+                (
+                    cfg.paused,
+                    engine::global_window_remaining(cfg, &ledger),
+                    (cfg.active_from != 0 && as_of < cfg.active_from)
+                        || (cfg.active_until != 0 && as_of > cfg.active_until),
+                    cfg.dms_grace_secs,
+                )
+            }
+        };
         let heartbeat_expires_at = (dms_grace_secs > 0 && last_heartbeat != 0)
             .then(|| last_heartbeat.saturating_add(dms_grace_secs));
 
