@@ -98,6 +98,13 @@ jobs:
       - name: Verify documentation reachability
         run: scripts/verify-docs-reachability.sh
 
+      # Issue #331: README, SPEC §2 and docs/enforcement-scope.md deliberately
+      # duplicate the enforcement-scope paragraph for three audiences. This
+      # gate keeps the copies word-for-word identical instead of relying on
+      # review memory. Runs in `ci` because main protection requires that job.
+      - name: Verify enforcement-scope statement is consistent
+        run: scripts/check-enforcement-scope.sh
+
       # tools/agent-tx is a separate cargo project (its own Cargo.toml and
       # Cargo.lock), so none of the gates above see it. It signs and submits
       # guard authorization entries, so it gets the same gates, not just a

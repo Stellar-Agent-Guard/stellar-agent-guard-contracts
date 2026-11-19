@@ -97,8 +97,9 @@ rolling-window spend accounting are not applied to non-SAC calls; extending fine
 enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered.**
 
 *Canonical statement: the paragraph above is the single source of truth for the scope
-wording. The README and `docs/enforcement-scope.md` carry short excerpts that link back
-here; scope-wording edits touch this section only (CONTRIBUTING rule 2).*
+wording. The README and `docs/enforcement-scope.md` quote the same paragraph word for
+word and link back here; `scripts/check-enforcement-scope.sh` fails CI if the three
+copies diverge (CONTRIBUTING rule 2).*
 
 What "window and pause state" means for non-SAC calls is made exact in §6.4: the account is a
 **default-deny** environment — every call must match the protocol allowlist (contract, and

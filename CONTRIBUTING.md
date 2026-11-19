@@ -48,9 +48,12 @@ cargo build --release --target wasm32v1-none
 # 7. Check the release WASM for panic/unwrap strings
 bash scripts/check-wasm-panic-strings.sh
 
-# 8. Audit README claims and verify docs reachability
+# 8. Audit README claims, verify docs reachability, and check that the
+#    enforcement-scope statement matches across SPEC §2, README, and
+#    docs/enforcement-scope.md.
 scripts/verify-readme.sh
 scripts/verify-docs-reachability.sh
+scripts/check-enforcement-scope.sh
 
 # 9. tools/agent-tx is a separate cargo project (its own Cargo.toml and
 #    Cargo.lock — not a workspace member), so steps 1-8 never see it. CI gates
@@ -161,10 +164,11 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2)
    must stay word-for-word consistent with the code; that consistency is
    a review requirement, not a nicety. Scope *wording* itself is single-sourced:
-   edit the canonical paragraph in SPEC §2 only — the README and
-   `docs/enforcement-scope.md` carry short excerpts plus a
-   `full statement: SPEC §2` link that auto-follows (re-sync an excerpt only if
-   the quoted sentence itself changes). Copies in sibling repositories
+   edit the canonical paragraph in SPEC §2, then paste the identical paragraph
+   into the README and `docs/enforcement-scope.md` (each keeps its
+   `full statement: SPEC §2` link). `scripts/check-enforcement-scope.sh` runs in
+   the `ci` job and fails on any divergence, so the three copies are mechanically
+   word-for-word, not by convention. Copies in sibling repositories
    (`stellar-agent-guard-sdk`, `stellar-agent-guard-dashboard`) are out of scope
    here; they are tracked in their own issue trackers.
 
