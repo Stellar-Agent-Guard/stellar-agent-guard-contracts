@@ -24,6 +24,8 @@
 * [Storage Rent and TTL](rent-and-ttl.md)
 * [Architecture](architecture.md)
 * [Testnet Verification](verification.md)
+* [Fixture Re-verification Contract](fixture-verification.md)
+* [Release Checklist](release-checklist.md)
 * [Enforcement Scope](enforcement-scope.md)
 * [Scenario Matrix](scenario-matrix.md)
 * [Reason Glossary](reason-glossary.md)
