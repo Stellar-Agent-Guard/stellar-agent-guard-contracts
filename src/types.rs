@@ -21,7 +21,11 @@ pub enum DmsHealthStatus {
 
 /// Hard bound on rolling-window entries. Above this, the engine merges the two
 /// oldest entries forward (conservative over-count) — see SPEC §3.1.
-pub const MAX_WINDOW_ENTRIES: usize = 8192;
+///
+/// The width is `u32` because that is what `soroban_sdk::Vec::len()` returns and
+/// what `Ledger::len()` exposes, so the bound and the backstop comparison in
+/// `window.rs` need no `as` casts (issue #338).
+pub const MAX_WINDOW_ENTRIES: u32 = 8192;
 
 /// Hard bound on auth contexts evaluated in one authorization (SPEC §4/§6).
 /// Sixty-four admits large DEX batches while bounding worst-case decision work.

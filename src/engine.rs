@@ -2433,24 +2433,24 @@ mod tests {
 
         // Exactly MAX_WINDOW_ENTRIES distinct seconds (amount 1 each): the
         // bound is not exceeded, so no merge has happened yet.
-        for ts in 0..(MAX_WINDOW_ENTRIES as u64) {
+        for ts in 0..u64::from(MAX_WINDOW_ENTRIES) {
             l.admit(ts, 1);
         }
-        assert_eq!(l.entries.len() as usize, MAX_WINDOW_ENTRIES);
+        assert_eq!(l.entries.len(), MAX_WINDOW_ENTRIES);
 
         // One more distinct second crosses the bound: the two oldest entries
         // merge forward into a single entry at the NEWER timestamp.
-        l.admit(MAX_WINDOW_ENTRIES as u64, 1);
-        assert_eq!(l.entries.len() as usize, MAX_WINDOW_ENTRIES);
+        l.admit(u64::from(MAX_WINDOW_ENTRIES), 1);
+        assert_eq!(l.entries.len(), MAX_WINDOW_ENTRIES);
         let head = l.entries.first().unwrap();
         assert_eq!(head.ts, 1, "merged ts must be the newer of the two");
         assert_eq!(head.amount, 2);
 
         // Prune at the exact point where the true (un-merged) ts-0 spend has
         // expired; the merged entry keeps ts 1, so that amount is retained.
-        p.window_cap = (MAX_WINDOW_ENTRIES as i128) + 1;
+        p.window_cap = i128::from(MAX_WINDOW_ENTRIES) + 1;
         l.prune(p.window_secs, p.window_secs);
-        let true_rolling_sum = MAX_WINDOW_ENTRIES as i128; // ts 1..=MAX alive
+        let true_rolling_sum = i128::from(MAX_WINDOW_ENTRIES); // ts 1..=MAX alive
         assert!(
             l.total >= true_rolling_sum,
             "merge must over-count, never under-count"
