@@ -136,6 +136,16 @@ process.
 
 Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces account-level gates — admin freeze, dead-man switch, pause, and the active window (`active_from` / `active_until`) — but per-call amount/recipient limits and rolling-window spend accounting are not applied to non-SAC calls; extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered. Full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing) (canonical; this paragraph is kept word-for-word identical by `scripts/check-enforcement-scope.sh`). Elaborated with tables in [docs/enforcement-scope.md](docs/enforcement-scope.md).
 
+**Maximum exposure.** For a policy with `per_tx_cap = P`, `window_cap = W`, and
+`window_secs = S`: both disabled → balance-limited; per-tx only → `P` per call,
+unbounded over time; window only → `W` per call and `W` per rolling `S` seconds;
+both → `P` per call and `W` per rolling `S` seconds. With the documented default
+`S = 86_400`, `P = 100`, `W = 1_000` means at most 100 per transfer and 1,000 per
+rolling day. This bound covers SAC transfers only — it is not a bound on value an
+allowlisted protocol can move, on an admin who rewrites policy, or on a live key
+that keeps heartbeating. Full derivation and caveats:
+[SPEC §3.3](SPEC.md#33-maximum-exposure-implied-by-a-policy-issue-323).
+
 ## Quick Start
 
 ```bash
@@ -232,7 +242,7 @@ Tooling can validate this CLI JSON shape against the checked-in
 | `window_secs` | `u64` | rolling window width in seconds (default 86_400) |
 | `window_cap` | `i128` | rolling cap within `window_secs` (shared across all assets in `assets`); `0` = disabled |
 | `assets` | `Vec<Address>` | SAC token contracts whose transfers get parsed and enforced |
-| `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`) |
+| `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`); **this authorizes the contract's whole function body — it can move funds beyond `per_tx_cap`/`window_cap`** ([SPEC §2.2](SPEC.md#22-what-a-protocol-allowlist-entry-actually-authorizes-issue-322)) |
 | `recipients` | `Vec<Address>` | allowed SAC transfer destinations |
 | `recipient_window_caps` | `Vec<RecipientCap>` | per-recipient rolling-window cap overrides; recipients not listed use the global `window_cap` |
 | `blocked_recipients` | `Vec<Address>` | denied SAC transfer destinations; checked before the allowlist and `allow_any_recipient` |
@@ -259,7 +269,8 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
     "window_cap": "150", "window_secs": 60 }'
 # → Event: EventPolicySet (event_policy_set)
 ```
-Other validation rules (SPEC §8): negative caps, `window_cap > 0` or a positive
+Other validation rules (SPEC §8): negative caps, caps above `MAX_CAP_MAGNITUDE`
+(`10^24` smallest units, on the global and override caps alike), `window_cap > 0` or a positive
 `recipient_window_caps` entry with `window_secs == 0`, duplicate
 assets/recipients/blocked_recipients/protocol contracts, duplicate recipients in
 `recipient_window_caps`, a non-empty intersection between `recipients` and
@@ -925,11 +936,14 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    `SelfCall` (only `heartbeat` and `self_lock` are allowed), `CreateContract` (denied in v1),
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).
-6. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
-   denylist (checked before the allowlist and before `allow_any_recipient`), recipient
-   allowlist, per-tx cap, and the rolling-window projection (existing total + amounts
-   staged earlier in the same request). Protocol calls get contract + per-function
-   allowlisting. Everything else is denied by default.
+6. **Per-kind enforcement.** Asset transfers get the full treatment, in this fixed
+   order: amount validity (`amount > 0`), recipient denylist (checked before the
+   allowlist and before `allow_any_recipient`), recipient allowlist, per-tx cap, then
+   the rolling-window projection (existing total + amounts staged earlier in the same
+   request). Only the **first** failing rule is the reported reason — a transfer to a
+   disallowed recipient that also exceeds the per-tx cap reports `recipient_not_allowed`
+   ([SPEC §6.2](SPEC.md#62-asset-sac-calls--fully-enforced)). Protocol calls get contract
+   + per-function allowlisting. Everything else is denied by default.
 7. **All-or-nothing commit.** Window admissions are staged and only committed to storage
    if *every* context passes — a partially-validating batch can never spend. `Ok(())`
    approves; `Err(reason)` rejects the entire transaction, and the `auth_checked` event

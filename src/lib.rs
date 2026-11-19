@@ -46,8 +46,8 @@ pub use types::{
 };
 use types::{
     CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_ASSET_CAP_ENTRIES,
-    MAX_DMS_GRACE_SECS, MAX_POLICY_ASSETS, MAX_POLICY_PROTOCOLS, MAX_RECIPIENT_ENTRIES,
-    MAX_WINDOW_SECS,
+    MAX_CAP_MAGNITUDE, MAX_DMS_GRACE_SECS, MAX_POLICY_ASSETS, MAX_POLICY_PROTOCOLS,
+    MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
 };
 use window::{Ledger, WindowMerge, WindowMergeKind};
 
@@ -506,6 +506,26 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     }
     if cfg.per_tx_cap < 0 || cfg.window_cap < 0 {
         return Err(PolicyRuleId::AmountSign);
+    }
+    // No cap may exceed the documented ceiling (issue #321). An absurd cap is
+    // indistinguishable from "unlimited" to the decision path while still
+    // reading as policy, and it makes the saturating window arithmetic
+    // load-bearing. Override caps are bounded too: they are the effective
+    // per-tx / per-recipient ceiling for the assets and recipients they name.
+    let mut cap_too_large =
+        cfg.per_tx_cap > MAX_CAP_MAGNITUDE || cfg.window_cap > MAX_CAP_MAGNITUDE;
+    for i in 0..cfg.asset_caps.len() {
+        if let Some(cap) = cfg.asset_caps.get(i) {
+            cap_too_large |= cap.per_tx_cap > MAX_CAP_MAGNITUDE;
+        }
+    }
+    for i in 0..cfg.recipient_window_caps.len() {
+        if let Some(cap) = cfg.recipient_window_caps.get(i) {
+            cap_too_large |= cap.cap > MAX_CAP_MAGNITUDE;
+        }
+    }
+    if cap_too_large {
+        return Err(PolicyRuleId::CapMagnitudeExceedsBound);
     }
     if cfg.window_cap_enabled() && cfg.window_secs == 0 {
         return Err(PolicyRuleId::WindowRequiresWidth);

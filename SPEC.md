@@ -193,8 +193,32 @@ A protocol that wants to move an allowlisted asset out of the account must there
 a context the guard evaluates; the honest statement of the boundary is "amount/recipient
 enforcement is per SAC-transfer context, wherever that context appears in the tree", not "a
 protocol can spend invisibly". This strengthens, and does not widen, the §2 paragraph — the v2
-work (protocol-specific parsers, declared-max, return-value commitments) remains open, and the
-v2 issue is referenced there rather than designed here.
+work (protocol-specific parsers, declared-max, return-value commitments) remains open, and
+the v2 issue is referenced there rather than designed here.
+
+### 2.2 What a protocol allowlist entry actually authorizes (issue #322)
+
+**Read this as an operator, not as a protocol author.** A `protocols` entry is a permission
+for the guarded account to authorize calls to that contract. The engine checks the contract
+address and, when `fns` is set, the function name; it does **not** inspect what the function
+does with the account's authorization. At authorization time the engine cannot tell whether
+the call moves value, calls further protocols, or grants a fresh authorization.
+
+Adding a protocol is therefore a materially larger grant than adding a recipient:
+
+| Grant | What it permits |
+|---|---|
+| One `recipients` entry | Transfers of allowlisted assets to that address, bounded per call by `per_tx_cap`, per window by `window_cap` / per-recipient caps, and restricted to the asset allowlist. |
+| One `protocols` entry | Any invocation of that contract (optionally restricted to named functions). The contract's own logic decides how much value moves and where it goes. |
+
+**Residual risk, stated explicitly:** an allowlisted protocol can move funds by its own
+internal logic, in amounts that `per_tx_cap` and `window_cap` never see. Those caps bind SAC
+`transfer`/`transfer_from` contexts only (§2, §6.2). `protocol_calls_per_window` bounds how
+often such a call may happen, not how much it can move. A nested SAC transfer performed by the
+protocol *is* seen and capped (§2.1), but a protocol that moves value by its own bookkeeping,
+or holds a balance of its own, is not. Only allowlist protocols whose function bodies you
+would trust with the account's authorization; when in doubt, narrow `fns` to the exact
+functions the agent needs.
 
 ---
 
@@ -549,6 +573,46 @@ ScVal::Map(Some(vec![
 Note the two address shapes: `assets` holds contract (C…) addresses →
 `ScAddress::Contract`, while `recipients` holds account (G…) addresses →
 `ScAddress::Account`.
+
+### 3.3 Maximum exposure implied by a policy (issue #323)
+
+The caps bound exactly one thing: how much value can leave the account through **SAC asset
+transfers** in a given span. For a policy with `per_tx_cap = P`, `window_cap = W`, and
+`window_secs = S` (`0` = disabled; §8 requires `0 < P ≤ W` whenever both are enabled):
+
+| Configuration | Maximum in one call | Maximum in any rolling `S`-second span |
+|---|---|---|
+| Both disabled (`P = 0`, `W = 0`) | Account balance | Account balance — no cap applies |
+| Per-tx only (`P > 0`, `W = 0`) | `P` | Unbounded over time: `N · P` for `N` calls, until the balance is gone |
+| Window only (`P = 0`, `W > 0`) | `W` (one call may consume the whole window) | `W` |
+| Both enabled (`0 < P ≤ W`) | `P` | `W` |
+
+The bound is per asset transfer, not per transaction: a transaction may carry several
+contexts, but every admitted SAC transfer is counted against the same rolling window, so `W`
+still bounds their sum within `S` seconds. When `recipient_window_caps` is in use, a
+recipient's own rolling cap `C_r` replaces `W` for that recipient's transfers (the global `W`
+still applies), so the per-recipient maximum in a window is `min(W, C_r)`; the account-wide
+maximum stays `W`.
+
+**Worked example (documented defaults).** With the default `window_secs = 86_400` (24 hours),
+`per_tx_cap = 100`, and `window_cap = 1_000` (units of the allowlisted asset): a single
+transfer can move at most 100, and any rolling 24-hour span can move at most 1,000 in total —
+for example ten transfers of 100 in one minute, after which no further transfer is admissible
+until the first of those entries is 24 hours old. A live attacker holding the agent key can
+extract at most 1,000 per rolling day, indefinitely — not 1,000 once.
+
+**What the bound does not cover.** It is not a bound on total loss:
+
+- **Protocol calls.** An allowlisted protocol can move funds by its own internal logic, beyond
+  `per_tx_cap`/`window_cap`; those caps bind SAC transfer contexts only (§2.2, §6.3). The
+  protocol-call rate limit bounds call count, not value.
+- **Admin compromise.** The admin can rewrite policy (including disabling the caps), rotate the
+  agent key, and pause/unpause. That is a control compromise, not a cap breach (§1, §10).
+- **A live agent key that keeps heartbeating.** The dead-man switch fires on silence only; a
+  heartbeating attacker is bounded by the caps per window, not stopped (§5, §10).
+- **Balance and asset scope.** The formula is denominated in the policy's shared, unit-less
+  window total. If several assets are allowlisted, the same `W` is shared across them (§3.1),
+  so the bound is an aggregate value across those assets, not a per-asset guarantee.
 
 ---
 
@@ -961,7 +1025,7 @@ Auth contexts, in the order the host supplies them:
 |---|---|---|---|
 | 0 | `P::deposit` | §6.3 protocol allowlist — contract listed, `fns = None` | **Allowed** |
 | 1 | `A.transfer(guard → R1, 40)` | §6.2 in order: recipient allowed, `40 ≤ 80` per-tx, `0 + 40 ≤ 100` window | **Allowed**, 40 staged |
-| 2 | `A.transfer(guard → R1, 90)` | §6.2 rule 3 — `90 > per_tx_cap 80` | **Blocked**, `per_tx_cap_exceeded` (22) |
+| 2 | `A.transfer(guard → R1, 90)` | §6.2 rule 4 — `90 > per_tx_cap 80` | **Blocked**, `per_tx_cap_exceeded` (22) |
 
 What each observer is left with:
 
@@ -1045,19 +1109,30 @@ issue #294 kept it and pinned that with `asset_identity_selects_the_per_asset_ca
 
 **Exact arity required; extra args deny -- we do not partially parse.** A call whose argument list does not match the SAC schema exactly (`transfer` = 3, `transfer_from` = 4) is rejected with `UnknownContract` and never reaches the cap/allowlist evaluation. We only enforce what we fully understand; a context carrying extra trailing values is treated as a call we cannot reason about (conservative default-deny).
 
-Rules applied (in order; the denylist is checked before the allowlist/escape hatch):
+Rules are applied in this **fixed order**, and **only the first failing rule is the reported
+reason**. The order is normative, not an accident of statement sequence: a transfer that
+violates several rules at once reports exactly one of them, so reordering the checks for
+readability would silently change every incident report. It matches the statement order in
+`decide` (`src/engine.rs`) and is pinned by
+`transfer_violating_recipient_and_per_tx_cap_reports_recipient_first` and
+`transfer_violating_amount_and_recipient_reports_invalid_amount_first` (`src/engine.rs`).
 
-1. **Recipient denylist:** if `recipient ∈ policy.blocked_recipients`, block
+A transfer whose `asset` has an `asset_caps` entry with `paused: true` is blocked with
+`AssetNotAllowed` before any numbered rule below runs.
+
+1. **Amount validity:** `amount > 0` or block `InvalidAmount`. Evaluated first so a malformed
+   amount is never described in terms of allowlists or caps.
+2. **Recipient denylist:** if `recipient ∈ policy.blocked_recipients`, block
    `RecipientBlocked`. The denylist wins over both the allowlist and
    `allow_any_recipient`.
-2. **Recipient allowlist:** if `allow_any_recipient == false`, `recipient ∈ policy.recipients`
+3. **Recipient allowlist:** if `allow_any_recipient == false`, `recipient ∈ policy.recipients`
    or block `RecipientNotAllowed`.
-3. **Per-tx cap:** resolve the effective per-tx cap for the transfer's asset — the matching
+4. **Per-tx cap:** resolve the effective per-tx cap for the transfer's asset — the matching
    `asset_caps` entry's `per_tx_cap` when non-zero, otherwise the global `per_tx_cap`. If the
    effective cap is non-zero, `amount <= effective_per_tx_cap` or block `PerTxCapExceeded`.
    The comparison is exclusive-of-blocking (i.e. the cap value itself is permitted:
    `amount == effective_per_tx_cap` is admitted; only `amount > effective_per_tx_cap` is blocked).
-4. **Rolling window (§3.1):**
+5. **Rolling window (§3.1):**
    - Global window: if `window_cap != 0`, prune expired entries, then
      `total + amount <= window_cap` or block `WindowCapExceeded`.
    - Per-recipient window: if `recipient` has an entry in `policy.recipient_window_caps` with
@@ -1065,7 +1140,10 @@ Rules applied (in order; the denylist is checked before the allowlist/escape hat
      the global window cap. If the effective cap is exceeded, block `WindowCapExceeded`.
    - On admission, update the global ledger and, when a per-recipient cap applies, the
      recipient's ledger.
-5. Amount validity: `amount > 0` or block `InvalidAmount`.
+
+Example of the first-failure rule: a transfer to a non-allowlisted recipient whose amount is
+*also* above the per-tx cap is reported as `RecipientNotAllowed`, because rule 3 runs before
+rule 4. The cap violation is real but unreported; the operator sees one reason per context.
 
 An asset contract listed in `assets` invoked with any other function — in particular the
 administrative and custody-altering functions `mint`, `burn`, `clawback`, `set_admin`, `pause`,
@@ -1075,7 +1153,7 @@ probing token custody is one alertable signal rather than several). The same fun
 contract that is *not* listed in `assets` are never parsed as asset calls and stay `UnknownContract` — an agent cannot silently move balances on an unregistered SAC. This keeps
 the "we know what we're enforcing" promise exact.
 
-**Measured worst case: evaluation ≈ 338,315 CPU instructions per context.** Rules 1 and 2 are the only
+**Measured worst case: evaluation ≈ 338,315 CPU instructions per context.** Rules 2 and 3 are the only
 steps whose cost depends on a policy list length, and §8 caps every recipient list at
 `MAX_RECIPIENT_ENTRIES = 256`, so the decision path is bounded by construction. Measured in the
 Soroban test environment with both `recipients` and `blocked_recipients` filled to exactly 256
@@ -1085,7 +1163,7 @@ the linear sweeps the dominant term:
 | Configuration | Instructions | % of the 100,000,000 per-invocation CPU budget |
 |---|---|---|
 | `allow_any_recipient = false` — full 2×256 scan, miss on the last element of each | **338,315** | 0.34% |
-| `allow_any_recipient = true` — denylist swept, rule 2 skipped | 179,674 | 0.18% |
+| `allow_any_recipient = true` — denylist swept, rule 3 skipped | 179,674 | 0.18% |
 
 The escape hatch saves 158,641 instructions by skipping the 256-entry allowlist, which is
 precisely what it buys: under the escape hatch the remaining linear work is a single sweep, not
@@ -1114,6 +1192,10 @@ cap, the call is blocked with `ProtocolCallRateExceeded`. This count-based throt
 defensible v1 enforcement that does not overclaim — it directly addresses runaway loops
 (the threat case this project exists to stop) within what the host actually exposes. Functions
 not in a rule's `fns` allowlist (when present) are blocked `FunctionNotAllowed`.
+
+What authorizing that contract/function pair means operationally — including the residual
+risk that the protocol can move funds beyond `per_tx_cap`/`window_cap` — is stated for
+operators in §2.2.
 
 ### 6.4 Anything else — blocked
 
@@ -1723,6 +1805,7 @@ entire validation surface at a glance (issue #353).
 | `recipients.len() > 256`, `recipient_window_caps.len() > 256`, or `blocked_recipients.len() > 256` (`MAX_RECIPIENT_ENTRIES`) | **Rejected** — `InvalidConfig` / `RecipientListTooLong` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_recipient_list_too_long`, `policy_asset_protocol_and_recipient_limits_are_inclusive_and_fail_closed` (`src/integration_tests.rs`) |
 | `asset_caps.len() > MAX_ASSET_CAP_ENTRIES` (256) | **Rejected** — `InvalidConfig` / `AssetCapListTooLong` | `src/lib.rs` (`first_failing_rule`) | *(uncovered — no dedicated over-256 `asset_caps` test yet)* |
 | `per_tx_cap < 0` or `window_cap < 0` (`window_secs` and `dms_grace_secs` are `u64`, so negatives are unrepresentable) | **Rejected** — `InvalidConfig` / `AmountSign` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_amount_sign` (`src/integration_tests.rs`) |
+| `per_tx_cap`, `window_cap`, `asset_caps[i].per_tx_cap`, or `recipient_window_caps[i].cap` above `MAX_CAP_MAGNITUDE` (`10^24`; issue #321) | **Rejected** — `InvalidConfig` / `CapMagnitudeExceedsBound`; `0` (disabled) and the boundary value are **Accepted** | `src/lib.rs` (`first_failing_rule`) | `cap_magnitude_upper_bounds_rejected`, `cap_magnitude_upper_bound_accepts_boundary`, `validate_policy_reports_cap_magnitude_exceeds_bound` (`src/integration_tests.rs`) |
 | `window_cap > 0 && window_secs == 0` | **Rejected** — `InvalidConfig` / `WindowRequiresWidth` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_window_requires_width` (`src/integration_tests.rs`) |
 | `per_tx_cap > 0 && window_cap > 0 && per_tx_cap > window_cap` (issue #33) | **Rejected** — `InvalidConfig` / `PerTxCapExceedsWindowCap`; equal caps and either cap `== 0` are **Accepted** | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_per_tx_cap_exceeds_window_cap`, `validate_policy_accepts_equal_per_tx_and_window_caps`, `validate_policy_skips_cap_comparison_when_either_is_zero`, `validate_policy_accepts_per_tx_cap_less_than_window_cap` (`src/integration_tests.rs`) |
 | `active_until != 0 && active_until <= active_from` | **Rejected** — `InvalidConfig` / `ActiveWindowOrder` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_active_window_order` (`src/integration_tests.rs`) |
@@ -1754,6 +1837,7 @@ entire validation surface at a glance (issue #353).
 - **Duration upper bounds (issue #34):** `window_secs` and `dms_grace_secs` are `u64`, so a seconds/milliseconds mix-up (e.g. a 90-day window passed as `7_776_000_000` ms) or `u64::MAX` would silently disable pruning (unbounded storage growth) or disable the dead-man switch (§5). Capping both at `315_360_000` s (86_400 × 3_650 ≈ 10 years) catches accidental units while affecting no realistic policy; `0` remains legal (feature disabled).
 - **Self-address rejection:** `env.current_contract_address()` is known at deployment (pre-`initialize`), and `set_policy` only runs post-initialize. Self-calls are governed by the fixed §6.1 rule rather than `assets`/`protocols`, a self-recipient is a no-op loop signaling a mis-pasted address, and self-entries in `recipient_window_caps`/`asset_caps` cannot be meaningful overrides.
 - **Cardinality bounds:** list bounds (`256` entries each) are checked before content and duplicate scans so validation work, authorization scans, and per-recipient storage stay strictly bounded.
+- **Cap magnitude ceiling (issue #321):** `MAX_CAP_MAGNITUDE = 10^24` smallest units is above any realistic token supply (at Stellar's usual 7 decimals, `10^17` whole tokens — roughly two million times the entire XLM supply) and far below `i128::MAX` (`≈1.7 × 10^38`). An unbounded cap is indistinguishable from "disabled" to the decision path while still charging the account for a window ledger nothing will prune; the ceiling keeps the saturating additions in `window.rs`/`engine.rs` belt-and-braces rather than load-bearing, and gives the SDK/dashboard a finite value to preflight against. Override caps are bounded too, because they are the effective per-tx / per-recipient ceiling for the assets and recipients they name.
 
 Invalid config → `InvalidConfig`, policy unchanged (fail-closed, never partially applied).
 
@@ -1781,6 +1865,7 @@ order:
 | `RecipientListTooLong` | `recipients` / `recipient_window_caps` / `blocked_recipients` over `MAX_RECIPIENT_ENTRIES` |
 | `AssetCapListTooLong` | `asset_caps` over `MAX_ASSET_CAP_ENTRIES` |
 | `AmountSign` | `per_tx_cap`, `window_cap`, or `asset_caps[i].per_tx_cap` negative |
+| `CapMagnitudeExceedsBound` | `per_tx_cap`, `window_cap`, or an override cap above `MAX_CAP_MAGNITUDE` (`10^24`; issue #321) |
 | `WindowRequiresWidth` | `window_cap != 0` (or a per-recipient cap `> 0`) with `window_secs == 0` |
 | `PerTxCapExceedsWindowCap` | `per_tx_cap > window_cap` when both are enabled (`> 0`; issue #33) |
 | `ActiveWindowOrder` | `active_until != 0 && active_until <= active_from` |
@@ -1998,10 +2083,12 @@ moves):
   (issue #306) — a halt path that gives the agent no fund-moving power
 
 Not guarded by v1 (documented, not hidden):
-- fine-grained amount/recipient limits on non-SAC protocol calls (§2, v2 item)
-- a live attacker who keeps the agent key heartbeating and never calls `self_lock` (caps still
-  bind them; the switch only fires on silence). `self_lock` closes the *honest runaway* half of
-  this gap, not the compromised-key half: an attacker holding the key simply does not call it.
+- fine-grained amount/recipient limits on non-SAC protocol calls (§2, v2 item); the caps
+  are therefore not a total maximum-loss bound — §3.3 states exactly what the bound covers
+- a live attacker who keeps the agent key heartbeating (caps still bind them; the switch only
+  fires on silence). A live attacker who never calls `self_lock` keeps this gap open: `self_lock`
+  closes only the *honest runaway* half, not the compromised-key half — an attacker holding the
+  key simply does not call it.
 - `self_lock` as a fund-safety control: an agent (or a compromised agent) can lock itself — and
   therefore the account — out. That is an availability outcome, not a loss-of-funds outcome; the
   call cannot move funds, change policy, or rotate keys, and only admin `unfreeze` reverses it.
