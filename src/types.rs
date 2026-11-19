@@ -588,6 +588,14 @@ pub enum DataKey {
 /// off-chain SDKs, indexers, and telemetry decode errors using these exact numeric codes
 /// (`Error(Contract, #N)`).
 ///
+/// The numbers are **public ABI, not an implementation detail**: `Error(Contract, #N)`
+/// appears in transaction results, published evidence (`tests/fixtures/README.md` and
+/// `docs/functions/`), the SDK's `REASON_CODES`, and operator runbooks. New variants are
+/// therefore **appended at the end of their numeric group**, never inserted between
+/// existing codes, and an assigned discriminant is never renumbered, repurposed, or
+/// deleted. Renumbering is only permissible with an explicit version note in SPEC §7
+/// recording the date, the reason, and the old → new mapping for every consumer.
+///
 /// Variants are partitioned into three numeric groups:
 /// - Generic / lifecycle (`1..=9`, next free: `7`)
 /// - Account-level gates (`10..=19`, next free: `15`)
@@ -597,6 +605,12 @@ pub enum DataKey {
 /// full end-to-end contributor workflow (touching the enum, reason mappings, decision table,
 /// SPEC §4/§6/§7, event vocabulary, and tests), see the checklist in `docs/contributing.md`
 /// (`#how-to-add-a-new-error-variant-end-to-end`) and `CONTRIBUTING.md`.
+///
+/// Enforcement lives with the rule: `tests/abi_snapshot.rs` pins every
+/// code/variant/reason triple in `tests/snapshots/abi_snapshot.txt`,
+/// `error_code_discriminant_stability_spec_7` (below) pins the raw values, and
+/// `scripts/check-spec-coverage.sh` (the deny-list coverage check documented in
+/// CONTRIBUTING) reports this enum and the SPEC §7 table drifting apart.
 #[allow(missing_docs)] // individual ABI variants are described below
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
