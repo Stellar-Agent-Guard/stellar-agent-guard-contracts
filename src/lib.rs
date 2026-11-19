@@ -178,6 +178,19 @@ mod event_types {
         pub(super) by: Address,
     }
 
+    /// Admin rolling-window cap top-up: data `by` (the admin address that
+    /// acted), `old_cap`, `new_cap`, and `revision` — the `PolicyRevision` this
+    /// call produced, preserving the §9 join-key invariant (same revision ⟺
+    /// same effective policy; issue #349).
+    #[contractevent]
+    #[derive(Clone)]
+    pub(super) struct EventWindowCapIncreased {
+        pub(super) by: Address,
+        pub(super) old_cap: i128,
+        pub(super) new_cap: i128,
+        pub(super) revision: u64,
+    }
+
     /// Agent key rotation: data `by` (the admin that acted) plus truncated
     /// fingerprints of the outgoing and incoming agent keys, so an auditor can
     /// reconstruct the old→new linkage without carrying full pubkeys (SPEC §9).
@@ -678,6 +691,16 @@ fn emit_window_reset(env: &Env, by: &Address) {
     EventWindowReset { by: by.clone() }.publish(env);
 }
 
+fn emit_window_cap_increased(env: &Env, by: &Address, old_cap: i128, new_cap: i128) {
+    EventWindowCapIncreased {
+        by: by.clone(),
+        old_cap,
+        new_cap,
+        revision: current_revision(env),
+    }
+    .publish(env);
+}
+
 fn emit_agent_rotated(env: &Env, by: &Address, old: &BytesN<32>, new: &BytesN<32>) {
     EventAgentRotated {
         by: by.clone(),
@@ -844,6 +867,44 @@ mod policy_engine_type {
             let admin = Self::admin_or_panic(&env);
             env.storage().persistent().remove(&DataKey::Window);
             emit_window_reset(&env, &admin);
+        }
+
+        /// Raises the installed policy's global `window_cap` in place without
+        /// resetting the rolling spend ledger (issue #349). Admin-only.
+        ///
+        /// Companion to [`PolicyEngine::set_policy`] and
+        /// [`PolicyEngine::reset_window`] (issue #289): an operator can top up
+        /// a throttled agent's budget mid-window while keeping every
+        /// non-expired spend entry counted. Leaves `DataKey::Window` and
+        /// `LastHeartbeat` untouched, bumps `PolicyRevision`, and emits
+        /// `window_cap_increased` carrying `by`, `old_cap`, `new_cap`, and
+        /// `revision`.
+        ///
+        /// Rejects with `NoPolicy` when no policy is installed, and with
+        /// `InvalidConfig` when `new_cap <= cfg.window_cap` (not an increase;
+        /// also rejects `<= 0`), when `new_cap` is below the live pruned
+        /// rolling total (silently setting a cap below the current total would
+        /// block the account with no recourse), or when the resulting policy
+        /// violates SPEC §8 (e.g. `window_secs == 0` or
+        /// `per_tx_cap > new_cap`).
+        pub fn increase_window_cap(env: Env, new_cap: i128) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            let (mut ledger, _) = load_window(&env);
+            if cfg.window_secs > 0 {
+                ledger.prune(env.ledger().timestamp(), cfg.window_secs);
+            }
+            if new_cap <= cfg.window_cap || new_cap < ledger.total {
+                panic_with_error!(&env, Error::InvalidConfig);
+            }
+            let old_cap = cfg.window_cap;
+            cfg.window_cap = new_cap;
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_window_cap_increased(&env, &admin, old_cap, new_cap);
         }
 
         /// Policy-level kill switch (issue #290): flips the stored policy's

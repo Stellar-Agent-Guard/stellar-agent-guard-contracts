@@ -227,6 +227,17 @@ impl EventAuditHarness {
         self.enforce(entry);
         PolicyEngineClient::new(&self.env, &self.guard).revoke_policy();
     }
+
+    fn increase_window_cap(&mut self, new_cap: i128) {
+        let root = self.invocation(
+            &self.guard,
+            "increase_window_cap",
+            std::vec![new_cap.into_val(&self.env)],
+        );
+        let entry = self.admin_entry(&root);
+        self.enforce(entry);
+        PolicyEngineClient::new(&self.env, &self.guard).increase_window_cap(&new_cap);
+    }
 }
 
 #[test]
@@ -639,4 +650,63 @@ fn window_merge_event_emits_once_at_the_entry_bound() {
     ));
     assert_eq!(map_u64_field(event, "merged_ts"), 1);
     assert_eq!(map_i128_field(event, "merged_value"), 2);
+}
+
+/// Issue #349: `increase_window_cap` emits `event_window_cap_increased` with
+/// 1 topic and a 4-field data map (`by`, `old_cap`, `new_cap`, `revision`).
+#[test]
+fn window_cap_increased_event_carries_caps_and_revision() {
+    let mut h = EventAuditHarness::new();
+    let cfg = PolicyConfig {
+        per_tx_cap: 100,
+        window_secs: 60,
+        window_cap: 500,
+        assets: vec![&h.env],
+        protocols: vec![&h.env],
+        recipients: vec![&h.env],
+        recipient_window_caps: vec![&h.env],
+        blocked_recipients: vec![&h.env],
+        asset_caps: vec![&h.env],
+        allow_any_recipient: false,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
+    };
+    h.set_policy(&cfg);
+    h.increase_window_cap(750);
+
+    let all = h.env.events().all();
+    let events = all.events();
+    let cap_event = events
+        .iter()
+        .find(|e| match &e.body {
+            xdr::ContractEventBody::V0(v0) => {
+                v0.topics.first() == Some(&event_name("event_window_cap_increased"))
+            }
+        })
+        .expect("event_window_cap_increased not found");
+
+    let xdr::ContractEventBody::V0(cap_v0) = &cap_event.body;
+    assert_eq!(
+        cap_v0.topics.len(),
+        1,
+        "event_window_cap_increased must carry exactly 1 topic"
+    );
+    let ScVal::Map(Some(map)) = &cap_v0.data else {
+        panic!("event_window_cap_increased data must be a Map");
+    };
+    assert_eq!(
+        map.0.len(),
+        4,
+        "event_window_cap_increased must carry by, old_cap, new_cap, and revision"
+    );
+    assert_eq!(map.0[0].key, event_name("by"));
+    assert_eq!(map.0[1].key, event_name("new_cap"));
+    assert_eq!(map.0[2].key, event_name("old_cap"));
+    assert_eq!(map.0[3].key, event_name("revision"));
+    assert_eq!(map_i128_field(cap_event, "old_cap"), 500);
+    assert_eq!(map_i128_field(cap_event, "new_cap"), 750);
+    assert_eq!(map_u64_field(cap_event, "revision"), 2);
 }
