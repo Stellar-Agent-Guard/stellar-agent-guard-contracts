@@ -2066,7 +2066,7 @@ fn per_tx_cap_violation_blocked_without_window_effect() {
     .expect_block(GuardError::WindowCapExceeded, &recv, 1); // ledger genuinely full
 }
 
-/// SPEC §6.2 rule 3: `per_tx_cap` comparison is exclusive-of-blocking (inclusive cap):
+/// SPEC §6.2 rule 4: `per_tx_cap` comparison is exclusive-of-blocking (inclusive cap):
 /// a transfer with `amount == per_tx_cap` is admitted; `amount == per_tx_cap + 1` is
 /// blocked with `per_tx_cap_exceeded`.
 #[test]
@@ -5972,6 +5972,120 @@ fn validate_policy_reports_duration_exceeds_bound() {
     assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
     client.set_policy(&p);
     assert!(client.policy().is_some());
+}
+
+// ── Cap magnitude upper bound (issue #321, SPEC §8) ──────────────────────
+
+/// The ceiling applies to every cap field, not only the globals: an override
+/// is the *effective* per-tx / per-recipient cap, so leaving it unbounded would
+/// let an absurd value back in through `asset_caps` or `recipient_window_caps`.
+#[test]
+fn cap_magnitude_upper_bounds_rejected() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let over = crate::types::MAX_CAP_MAGNITUDE + 1;
+
+    let expect_invalid = |cfg: &PolicyConfig, what: &str| {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_policy(cfg);
+        }));
+        assert!(
+            res.is_err(),
+            "`{what}` must fail set_policy with InvalidConfig"
+        );
+        assert!(
+            client.policy().is_none(),
+            "`{what}` must leave the policy uninstalled (fail-closed)"
+        );
+    };
+
+    let mut p = h.base_policy();
+    p.per_tx_cap = over;
+    expect_invalid(&p, "per_tx_cap = MAX + 1");
+
+    let mut p = h.base_policy();
+    p.window_cap = over;
+    expect_invalid(&p, "window_cap = MAX + 1");
+
+    let mut p = h.base_policy();
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: over,
+            paused: false,
+        }
+    ];
+    expect_invalid(&p, "asset_caps[i].per_tx_cap = MAX + 1");
+
+    let mut p = h.base_policy();
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        RecipientCap {
+            recipient: h.recv.clone(),
+            cap: over,
+        }
+    ];
+    expect_invalid(&p, "recipient_window_caps[i].cap = MAX + 1");
+}
+
+/// Exactly at the ceiling remains legal on every cap field: the bound is
+/// inclusive, matching the duration bounds in SPEC §8.
+#[test]
+fn cap_magnitude_upper_bound_accepts_boundary() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let max = crate::types::MAX_CAP_MAGNITUDE;
+
+    let mut p = h.base_policy();
+    p.per_tx_cap = max;
+    p.window_cap = max;
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: max,
+            paused: false,
+        }
+    ];
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        RecipientCap {
+            recipient: h.recv.clone(),
+            cap: max,
+        }
+    ];
+    client.set_policy(&p);
+    let stored = client.policy().expect("policy installed");
+    assert_eq!(stored.per_tx_cap, max);
+    assert_eq!(stored.window_cap, max);
+}
+
+/// The dry-run read reports the same ceiling rule, so `set_policy` and
+/// `validate_policy` cannot disagree about it.
+#[test]
+fn validate_policy_reports_cap_magnitude_exceeds_bound() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    let mut p = h.base_policy();
+    p.per_tx_cap = crate::types::MAX_CAP_MAGNITUDE + 1;
+    assert_eq!(
+        client.validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::CapMagnitudeExceedsBound)
+    );
+
+    let mut p = h.base_policy();
+    p.window_cap = crate::types::MAX_CAP_MAGNITUDE + 1;
+    assert_eq!(
+        client.validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::CapMagnitudeExceedsBound)
+    );
+
+    let mut p = h.base_policy();
+    p.per_tx_cap = crate::types::MAX_CAP_MAGNITUDE;
+    p.window_cap = crate::types::MAX_CAP_MAGNITUDE;
+    assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
 }
 
 // ── Auth verification ordering (Issue #27, SPEC §4 & §7) ───────────────────

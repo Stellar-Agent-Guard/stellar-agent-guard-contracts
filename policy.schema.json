@@ -47,7 +47,7 @@
       "type": "string",
       "pattern": "^(0|[1-9][0-9]{0,38})$",
       "maxLength": 39,
-      "description": "Non-negative decimal i128. Contract validation additionally enforces the exact i128 upper bound."
+      "description": "Non-negative decimal i128. Contract validation additionally enforces the exact i128 upper bound and rejects cap values above MAX_CAP_MAGNITUDE (10^24; SPEC §8). The pattern cannot express that numeric ceiling, so the contract remains authoritative."
     },
     "contractAddress": { "type": "string", "pattern": "^C[A-Z2-7]{55}$", "description": "Stellar contract StrKey." },
     "accountAddress": { "type": "string", "pattern": "^G[A-Z2-7]{55}$", "description": "Stellar account StrKey." },
