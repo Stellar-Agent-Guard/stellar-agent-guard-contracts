@@ -408,6 +408,18 @@ drift:
 - the scenario list must stay ids 1–5 with coherent `outcome`,
   `expected_reason`, `tx`, `ledger`, and `event_topics`.
 
+## What "verified" means — the re-verification contract (issue #156)
+
+"Verified" in this file means *verified at the time of writing*, by the queries
+described in [`docs/fixture-verification.md`](../../docs/fixture-verification.md).
+That page enumerates every claim made here and maps it either to an exact
+read-only Horizon/RPC check or to an explicit "not remotely verifiable"
+limitation — pre-broadcast denials, historical storage state, and tooling
+properties have no remote surface — and it scopes the future re-verification
+script that will perform the checkable half. **No such script exists yet**; the
+only automated gate over this directory today is
+[`tests/fixtures_index.rs`](../fixtures_index.rs).
+
 ## Canonical `auth_checked` event vocabulary
 
 [`auth-checked-vocabulary.json`](auth-checked-vocabulary.json) is the complete,
