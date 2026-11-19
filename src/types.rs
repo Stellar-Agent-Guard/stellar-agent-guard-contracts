@@ -114,6 +114,17 @@ pub enum ValidationOutcome {
 }
 
 /// Per-policy rolling spend ledger for SAC asset transfers and protocol call counts.
+///
+/// # Wire format
+///
+/// **Field order and field names are part of the on-chain wire format.** As a
+/// `#[contracttype]`, this struct is encoded as an `ScVal` map keyed by these names,
+/// its generated decoder reads entries positionally against the sorted field list,
+/// and its XDR shape follows declaration order. Renaming, reordering, inserting, or
+/// removing a field therefore changes the stored `Window` value's shape for every
+/// consumer. Treat such an edit as a wire-format change and regenerate
+/// `tests/snapshots/abi_snapshot.txt` (`UPDATE_SNAPSHOTS=1 cargo test --test abi_snapshot`)
+/// in the same PR. See SPEC §3.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowState {
@@ -140,6 +151,11 @@ pub struct RecipientWindowState {
     pub entries: Vec<SpendEntry>,
 }
 
+/// One global or per-recipient rolling-window spend record.
+///
+/// **Field order and field names are part of the on-chain wire format.** This is a
+/// `#[contracttype]`: renaming or reordering `ts`/`amount` changes the persisted
+/// `Window` encoding and every off-chain decoder that reads it. See SPEC §3.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpendEntry {
@@ -182,6 +198,21 @@ pub struct AssetCap {
 }
 
 /// The policy an admin installs on the account. See SPEC §3/§4.
+///
+/// # Wire format — field order and names are part of the ABI
+///
+/// **Field order and field names are part of the on-chain wire format.** This is a
+/// `#[contracttype]`, so Soroban encodes it as an `ScVal` map keyed by these field
+/// names, its generated decoder reads entries positionally against the sorted field
+/// list, and its XDR shape follows declaration order. Renaming a field, reordering
+/// the declaration, or adding/removing one therefore changes the bytes hashed by
+/// `policy_hash` and the shape every hard-coded encoder/decoder sees — that is a
+/// breaking wire-format change even when it compiles cleanly.
+///
+/// The encoding is pinned by `tests/policyconfig_scval_encoding.rs` and SPEC §3.2, and
+/// the human-visible surface by `tests/snapshots/abi_snapshot.txt` (regenerate with
+/// `UPDATE_SNAPSHOTS=1 cargo test --test abi_snapshot`). Keep `policy.schema.json` in
+/// step in the same PR (CONTRIBUTING, coding standard 10).
 #[contracttype]
 #[derive(Clone, PartialEq, Eq)]
 pub struct PolicyConfig {
@@ -257,6 +288,12 @@ impl core::fmt::Debug for PolicyConfig {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// A protocol contract and optional function allowlist.
+///
+/// **Field order and field names are part of the on-chain wire format.** This is a
+/// `#[contracttype]` map keyed by these names, decoded positionally against the
+/// sorted field list: renaming or reordering `contract`, `fns`, or `paused` changes
+/// the persisted policy encoding and every off-chain decoder. See SPEC §3/§3.2 and
+/// `tests/snapshots/abi_snapshot.txt`.
 pub struct ProtocolRule {
     /// Contract permitted for non-SAC calls.
     pub contract: Address,
@@ -291,8 +328,15 @@ pub enum ParsedCall {
 }
 
 /// Operational snapshot returned by the auth-free `status()` read (SPEC §7).
-/// Additive-growth contract: new fields may be appended, but existing fields
-/// are never renamed or removed (see docs/research/wire-format.md).
+///
+/// # Wire format
+///
+/// Additive-growth contract: new fields may be appended, but existing fields are
+/// never renamed or removed. **Field order and field names are part of the on-chain
+/// wire format** — this is a `#[contracttype]` map keyed by these names, decoded
+/// positionally against the sorted field list, so a rename or a reorder is a
+/// breaking change for every consumer even though it compiles. See
+/// `docs/research/wire-format.md`, SPEC §3, and `tests/snapshots/abi_snapshot.txt`.
 #[allow(clippy::struct_excessive_bools)] // wire-format snapshot: the bool field set is fixed by the public ABI, not a design choice
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]

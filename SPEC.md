@@ -204,6 +204,18 @@ pub struct SpendEntry { pub ts: u64, pub amount: i128 }
 pub struct ProtocolCallEntry { pub ts: u64, pub count: u32 }  // coalesced call count per second
 ```
 
+**Field names and declaration order are part of the on-chain wire format.** These are
+`#[contracttype]` shapes: Soroban encodes a struct as an `ScVal` map keyed by the field
+names, its generated decoder reads entries positionally against the sorted field list, and
+its XDR shape follows declaration order. Renaming, reordering, inserting, or removing a
+field is therefore a wire-format change — it changes the bytes hashed by `policy_hash`, the
+persisted `Window` encoding, and the shape every off-chain decoder sees — even though the
+Rust code still compiles. Treat such an edit as breaking, regenerate
+`tests/snapshots/abi_snapshot.txt`, and review the diff
+(`git diff <last-release-tag> HEAD -- tests/snapshots/abi_snapshot.txt`). The encoding is
+pinned by §3.2 and `tests/policyconfig_scval_encoding.rs`; the contributor rule is
+CONTRIBUTING coding standard 10.
+
 Tooling-facing JSON shape is maintained in [`policy.schema.json`](policy.schema.json).
 Treat it as normative-adjacent: the contract's `validate_config` implementation is authoritative
 if a conflict exists, but changes to `PolicyConfig` or its validation rules must update this
