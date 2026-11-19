@@ -288,6 +288,30 @@ Host exposure of both contract-creation context variants is exercised by
 `contract_creation_denied_through_real_host_path` in
 [`src/integration_tests.rs`](src/integration_tests.rs).
 
+## Architecture decision records (ADRs)
+
+[`docs/adr/`](docs/adr/README.md) records the mechanism decisions that took real
+reasoning, including the alternatives rejected and the observable conditions that
+would reopen them. Read the [ADR index](docs/adr/README.md) before proposing a
+change to the mechanism; if you are re-litigating a settled decision, cite the ADR
+and say which revisit condition has changed.
+
+The settled decisions recorded so far:
+
+1. [ADR-0001](docs/adr/0001-custom-account-abstraction-over-wrapper-contract.md) —
+   Soroban Custom Account Abstraction rather than a wrapper contract.
+2. [ADR-0002](docs/adr/0002-rolling-window-over-fixed-bucket.md) — a genuinely
+   rolling spend window rather than a fixed bucket.
+3. [ADR-0003](docs/adr/0003-ed25519-single-key-over-multisig-v1.md) — one
+   registered Ed25519 key in v1 rather than multi-sig.
+4. [ADR-0004](docs/adr/0004-deny-by-default-classification.md) — deny-by-default
+   classification of auth contexts.
+
+When a change introduces a new settled decision, copy the template from the ADR
+index into `docs/adr/NNNN-short-title.md` and add it to the index. Never rewrite an
+accepted ADR to change its decision: add a new ADR and mark the old one
+`Superseded by ADR-NNNN`.
+
 ## How to add a new Error variant end-to-end
 
 Adding a new denial reason touches at least five places across the repository: the enum, the `reason()` mapping, the decision site & `decision-table.json`, the `SPEC.md` §4/§6/§7 tables, and the consumer event vocabulary. Forgetting any one of these breaks CI.

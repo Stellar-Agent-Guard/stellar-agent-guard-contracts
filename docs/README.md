@@ -64,6 +64,7 @@ The following GitBook pages provide operational guides, setup procedures, preset
 | GitBook Page | Audience | Status / Notes |
 |---|---|---|
 | [`installation.md`](installation.md) | Developers, Operators | **Explanatory-only.** Environment setup, Rust 1.91+ toolchain, `wasm32v1-none` target, and Wasm build instructions. |
+| [`adr/README.md`](adr/README.md) | Contributors, Auditors | **Explanatory-only.** Records the settled mechanism decisions (custom account abstraction, rolling window, single Ed25519 key, deny-by-default) with rejected alternatives and revisit conditions. Normative behavior remains in SPEC §1/§2/§3.1/§7. |
 | [`policy-templates.md`](policy-templates.md) | Operators, Integrators | **Explanatory-only.** Named starter configurations and presets (day-trader, payments bot, watch-only, max security). Config validation rules are normative in SPEC §8. |
 | [`key-rotation.md`](key-rotation.md) | Operators, Incident Responders | **Explanatory-only.** Operational runbook for agent key rotation and two-step admin handover. Rotation mechanics are normative in SPEC §6.6 and §7.2. |
 | [`audit-pack.md`](audit-pack.md) | Security Auditors, Protocol Reviewers | **Explanatory-only.** Audit readiness guide, security invariant synthesis, and testnet proof index. Invariants are normative across SPEC §1, §4, §6, and §10. |

@@ -23,6 +23,8 @@ implements the Soroban `CustomAccountInterface`. From then on, the agent's **add
 contract's address**: any transaction that needs the agent to authorize an action (any
 `require_auth` on that address) is routed by the host through the contract's `__check_auth`
 before the action can touch a target protocol. `__check_auth` is the single enforcement vector.
+The mechanism choice and the alternatives rejected are recorded in
+[ADR-0001](docs/adr/0001-custom-account-abstraction-over-wrapper-contract.md).
 
 - **Non-custodial.** Funds live in the agent's own smart account (balances held at the contract
   address by Stellar Asset Contracts). There is no third-party vault, no `top_up`, no deposit
@@ -113,7 +115,9 @@ trustworthy way.
 This boundary is an inherent property of the platform (an independent current confirmation:
 OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer contexts and
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
-and `docs/enforcement-scope.md` quote this section briefly and link here as canonical.
+and `docs/enforcement-scope.md` quote this section briefly and link here as canonical. The
+deny-by-default classification that produces this boundary is recorded in
+[ADR-0004](docs/adr/0004-deny-by-default-classification.md).
 
 **Contract creation contexts:** Host-function contract creation contexts (`CreateContractHostFn`
 and `CreateContractWithCtorHostFn`) are surfaced by the host to `__check_auth` when contract deployment
@@ -231,7 +235,9 @@ A fixed 86,400-second bucket (reset-at-midnight style) is a **different guarante
 rolling window and is rejected here. Under a fixed bucket, spend at 23:59 and spend at 00:01
 are never counted together even though they are two minutes apart; under a rolling window, any
 two spends within any 86,400-second span are counted together. The two guarantees diverge in
-exactly the burst-boundary cases a spend guard exists to catch.
+exactly the burst-boundary cases a spend guard exists to catch. The decision, its rejected
+alternatives, and the conditions that would reopen it are recorded in
+[ADR-0002](docs/adr/0002-rolling-window-over-fixed-bucket.md).
 
 Implementation (exact, lazy, bounded):
 
@@ -891,7 +897,9 @@ A context whose contract is not the account itself, not in `assets`, and not in 
 is blocked (`UnknownContract`). Host-function contract creation contexts (`CreateContractHostFn`
 and `CreateContractWithCtorHostFn`) are mapped by `parse_call` to `ParsedCall::CreateContract`
 and blocked with `CreateContractNotAllowed` (code 28). The account is **default-deny**: adding
-a protocol is an explicit policy act, and contract creation by the agent is disallowed.
+a protocol is an explicit policy act, and contract creation by the agent is disallowed. The
+classification rule and the rejected allow-by-default alternatives are recorded in
+[ADR-0004](docs/adr/0004-deny-by-default-classification.md).
 
 **Boundary stated exactly:** pause (#4), active-window (#5), and dead-man/admin freeze (#1–#2)
 are *transaction-level* gates applied before classification, so they bind every call the
@@ -943,7 +951,8 @@ authorized transactions.
 
 `__check_auth` itself enforces the ordering stated in §10.2: the agent's signature is verified
 before any policy state is read, so an unverifiable signature never reaches the decision table
-below.
+below. The single-key choice and the rejected multi-sig / delegated-signer alternatives are
+recorded in [ADR-0003](docs/adr/0003-ed25519-single-key-over-multisig-v1.md).
 
 ```rust
 // ── Lifecycle ─────────────────────────────────────────────────────────────
