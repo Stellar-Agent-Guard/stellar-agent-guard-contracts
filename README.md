@@ -56,7 +56,9 @@ Ed25519 public key is registered at `initialize`, and from then on the agent's a
 routed by the host through `__check_auth`, which verifies the agent's signature over the
 transaction auth payload and then evaluates the policy decision table over every auth
 context. Funds never leave the agent's own account — there is no deposit step, no vault,
-no `top_up`.
+no `top_up`. (Adopting the guard for an agent that already holds funds does require a
+one-time move of the balance to the contract address; that transfer of custody is covered
+in the [migration guide](docs/operations/migration-guide.md).)
 
 This is the mechanism the rest of the Soroban spend-guard ecosystem is converging on,
 not a niche choice:
@@ -79,6 +81,35 @@ not a niche choice:
 
 Stellar Agent Guard **is** that model, built and proven: `__check_auth` enforcement,
 non-custodial, no proxy wrappers, tested end-to-end on testnet.
+
+### Why non-custodial, concretely
+
+"Non-custodial" is a claim about what each party can reach, not only about where the
+balance sits. The contract exposes no sweep, withdraw, or arbitrary-transfer admin
+function — but that alone does not tell a reviewer what a compromised admin, SDK, or RPC
+can do. Concretely:
+
+| Party | Can reach | Cannot reach |
+|---|---|---|
+| **Registered agent key** | Move funds inside the policy (caps, rolling window, allowlists, pause/freeze/default-deny all run inside `__check_auth`). Can stop heartbeating and let the account self-freeze. | Exceed the policy, change policy, unfreeze itself, rotate its own key, or authorize a call outside the allowlists. A leaked agent key is bounded by the policy, not by the account balance. |
+| **Policy admin key** | Rewrite policy, pause/resume, freeze/unfreeze, rotate the agent key, hand over admin. | No entrypoint transfers value. But be plain about the consequence: an admin-key attacker can install a permissive policy and rotate the agent key to one it controls, so admin-key compromise is a **control compromise** and must be treated as equivalent to control of the balance. The no-fund-moving property describes the ABI, not a defence against a hostile admin (SPEC §1, §10). |
+| **SDK / RPC endpoint** | Return wrong or stale pre-flight results, censor or reorder submissions, and broadcast an already-signed payload (which is bound to its exact amount, recipient, and invocation, and is re-evaluated against policy on-chain). | Forge the agent's signature, alter a signed invocation, bypass `__check_auth`, or change policy without admin auth. Pre-flight is advisory; the on-chain decision is authoritative (SPEC §10.1). |
+| **Any third party without a key** | Read `policy`, `policy_hash`, `status`, `check*`; submit a transaction the agent already signed. | Spend, change policy, freeze, or write state. Reads are permissionless; writes are authenticated. |
+
+The enforcement boundary is part of the same argument: caps, allowlists, and the rolling
+window bind **SAC transfers** fully; arbitrary protocol calls are default-deny by
+contract/function, but per-call amount and recipient limits are a v2 item. Read
+[Enforcement scope](#enforcement-scope--read-this-before-relying-on-the-caps) and
+[SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing)
+together with this table — "non-custodial account" is not the same claim as "every call is
+amount-limited."
+
+What this argument does **not** cover is listed rather than implied: non-SAC amount limits,
+a live agent key that keeps heartbeating, admin-key compromise, and availability griefing
+by an agent-key holder are all in
+[SPEC §10](SPEC.md#10-threat-model-what-this-does-and-does-not-do). The admin key's role in
+liveness once `dms_grace_secs > 0` is in the same section and in the
+[incident playbook](docs/operations/incident-playbook-admin-key-lost.md).
 
 > ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do
 > not deploy to mainnet without an independent audit. See [SECURITY.md](SECURITY.md).
@@ -394,6 +425,11 @@ For gate ordering and full incident guidance, see [SPEC §4.2](SPEC.md#42-admin-
 > more. The emitted `event_unfrozen` carries `rearmed_dms: bool` (`true` = the call
 > changed `LastHeartbeat`, i.e. the clock was re-armed; `false` = it was already
 > `now`) so telemetry and audits can surface exactly that side effect. See [SPEC §5](SPEC.md#5-dead-man-switch--precise-definition).
+>
+> **If the admin key is unavailable, there is no reversal.** `unfreeze` is admin-only and
+> `propose_admin_rotation` needs the current admin's signature, so a lost admin key cannot be
+> replaced. Recognise the state with `status()` and plan for it before arming a grace:
+> [incident playbook — account DMS-frozen, admin key unavailable](docs/operations/incident-playbook-admin-key-lost.md).
 
 The real Phase-1 unfreeze — the DMS-reversal transaction verified on-chain (tx
 `dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5`):
@@ -704,6 +740,10 @@ cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 
 Both builds are covered by the full local gate; the complete list of commands CI
 runs, in CI's order, is in [Testing & CI](#testing--ci).
+
+The ordered on-chain sequence — upload → create → initialize → set_policy → `status`
+verification, with the expected output and the most likely failure of each step — is the
+[deployment runbook](docs/operations/deployment-runbook.md).
 
 ### Download a released artifact (instead of building)
 

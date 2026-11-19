@@ -33,6 +33,13 @@ cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 # → target/release/agent-tx
 ```
 
+## Deploy
+
+Deployment is not the standard contract flow: the WASM is uploaded, the contract is
+created, `initialize` is called, a policy is installed, and `status` verifies the result.
+The ordered sequence with copy-pasteable commands, expected output, and the most likely
+failure of each step is the [deployment runbook](operations/deployment-runbook.md).
+
 ## Run tests
 
 ```bash
