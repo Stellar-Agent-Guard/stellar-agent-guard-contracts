@@ -701,7 +701,8 @@ Stellar Agent Guard operates across three dedicated repositories:
                                       │
                                       ▼ Soroban RPC
 ┌─────────────────────────────────────────────────────────────────────────┐
-│               stellar-agent-guard-contracts (Soroban / Rust)             │
+│              stellar-agent-guard-contracts (Soroban / Rust)             │
+│                               [THIS REPO]                               │
 │            • CustomAccount interface (`__check_auth`)                   │
 │            • Spend caps, rolling window, allowlists, dead-man switch    │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -767,6 +768,8 @@ pasted in the function reference above) — the account is still on-chain and re
 and honestly reports the DMS has since expired, exactly as designed.
 
 ## Project Status
+
+Status legend: ✅ completed; 🚧 in progress; 🔲 not started/open. A “v2, tracked as issue” status must include a direct link to its tracking issue.
 
 | Feature | Status |
 |---|---|
