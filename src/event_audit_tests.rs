@@ -9,7 +9,7 @@ use crate::{PolicyEngine, PolicyEngineClient};
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use soroban_sdk::auth::{Context, CustomAccountInterface};
-use soroban_sdk::testutils::{Events as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{
     self, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs, Limited, Limits,
     ScBytes, ScSymbol, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
@@ -709,4 +709,86 @@ fn window_cap_increased_event_carries_caps_and_revision() {
     assert_eq!(map_i128_field(cap_event, "old_cap"), 500);
     assert_eq!(map_i128_field(cap_event, "new_cap"), 750);
     assert_eq!(map_u64_field(cap_event, "revision"), 2);
+}
+
+/// Issue #351: `set_policy` loudly accepts `allow_any_recipient == false` with
+/// an empty `recipients` list by emitting `event_no_recipients_allowed` (`by`,
+/// `revision`), and stays silent for `allow_any_recipient == true`, non-empty
+/// `recipients`, and the symmetric empty-`assets` case.
+#[test]
+fn no_recipients_allowed_event_emitted_only_when_inert() {
+    let mut h = EventAuditHarness::new();
+    let asset_a = Address::generate(&h.env);
+    let recipient_a = Address::generate(&h.env);
+
+    // 1. Empty recipients + allow_any_recipient == false -> emits event_no_recipients_allowed
+    let inert_cfg = PolicyConfig {
+        per_tx_cap: 100,
+        window_secs: 60,
+        window_cap: 500,
+        assets: vec![&h.env, asset_a],
+        protocols: vec![&h.env],
+        recipients: vec![&h.env],
+        recipient_window_caps: vec![&h.env],
+        blocked_recipients: vec![&h.env],
+        asset_caps: vec![&h.env],
+        allow_any_recipient: false,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
+    };
+    h.set_policy(&inert_cfg);
+
+    let all = h.env.events().all();
+    let events = all.events();
+    let warn_event = events
+        .iter()
+        .find(|e| match &e.body {
+            xdr::ContractEventBody::V0(v0) => {
+                v0.topics.first() == Some(&event_name("event_no_recipients_allowed"))
+            }
+        })
+        .expect("event_no_recipients_allowed must be emitted when recipients is empty and allow_any_recipient is false");
+
+    let xdr::ContractEventBody::V0(warn_v0) = &warn_event.body;
+    assert_eq!(warn_v0.topics.len(), 1);
+    let ScVal::Map(Some(map)) = &warn_v0.data else {
+        panic!("event_no_recipients_allowed data must be a Map");
+    };
+    assert_eq!(map.0.len(), 2);
+    assert_eq!(map.0[0].key, event_name("by"));
+    assert_eq!(map.0[1].key, event_name("revision"));
+    assert_eq!(map_u64_field(warn_event, "revision"), 1);
+
+    // 2. Empty recipients + allow_any_recipient == true -> silent
+    let mut open_cfg = inert_cfg.clone();
+    open_cfg.allow_any_recipient = true;
+    h.set_policy(&open_cfg);
+    assert!(!h.env.events().all().events().iter().any(|e| matches!(
+        &e.body,
+        xdr::ContractEventBody::V0(v0)
+            if v0.topics.first() == Some(&event_name("event_no_recipients_allowed"))
+    )));
+
+    // 3. Non-empty recipients + allow_any_recipient == false -> silent
+    let mut allowlisted_cfg = inert_cfg.clone();
+    allowlisted_cfg.recipients = vec![&h.env, recipient_a];
+    h.set_policy(&allowlisted_cfg);
+    assert!(!h.env.events().all().events().iter().any(|e| matches!(
+        &e.body,
+        xdr::ContractEventBody::V0(v0)
+            if v0.topics.first() == Some(&event_name("event_no_recipients_allowed"))
+    )));
+
+    // 4. Symmetric empty-assets scenario (assets.is_empty() with valid recipients) -> silent
+    let mut empty_assets_cfg = allowlisted_cfg;
+    empty_assets_cfg.assets = vec![&h.env];
+    h.set_policy(&empty_assets_cfg);
+    assert!(!h.env.events().all().events().iter().any(|e| matches!(
+        &e.body,
+        xdr::ContractEventBody::V0(v0)
+            if v0.topics.first() == Some(&event_name("event_no_recipients_allowed"))
+    )));
 }
