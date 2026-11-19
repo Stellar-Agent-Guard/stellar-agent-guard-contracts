@@ -216,7 +216,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> std::string::String 
         return message.clone();
     }
     if let Some(message) = payload.downcast_ref::<&str>() {
-        return (*message).to_owned();
+        return std::string::String::from(*message);
     }
     panic!("expected a string panic payload from the blocked host invocation");
 }
