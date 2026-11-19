@@ -49,6 +49,7 @@ pub fn policy_hash(env: Env) -> BytesN<32>
 pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
 pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus
 pub fn status(env: Env) -> Status
+pub fn status_at(env: Env, as_of: u64) -> Status
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
 pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
@@ -133,6 +134,8 @@ struct Status
   paused: bool
   window_remaining: Option<i128>
   outside_active_window: bool
+  dms_grace_secs: u64
+  heartbeat_expires_at: Option<u64>
 enum CheckResult
   Allowed
   Blocked(Symbol)
