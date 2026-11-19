@@ -2116,6 +2116,81 @@ fn rolling_window_cap_blocks_and_recovers_after_expiry() {
     h.transfer(&recv, 30); // ok again -> window is genuinely rolling
 }
 
+/// SPEC §11 scenario 3, automated: cap hit → blocked → rollover restores
+/// spending → exact-boundary membership.
+///
+/// The testnet proof (SPEC §11 scenario 3, fixture `tests/fixtures/README.md` §3)
+/// used the same window — `window_secs = 60`, `window_cap = 150`, spend 50, then
+/// 110 is blocked — but proving the window is *rolling* required waiting out the
+/// 60-second window in wall-clock time. In the Soroban test env that wait is a
+/// ledger-timestamp jump, so the scenario is deterministic and belongs in CI.
+///
+/// Sequence note: this is the dedicated minimal scenario-3 case. The exact-boundary
+/// arithmetic is not re-derived here — it is pinned by the `src/window.rs` unit
+/// fixtures `exact_boundary_semantics` (an entry at `ts + window_secs == now` is
+/// exactly expired) and `prune_boundary_is_addition_form_at_zero_timestamp` — and
+/// multi-rollover budget recovery belongs to
+/// `agent_runtime_lifecycle_simulation_continuous_heartbeat_loop_and_spends`.
+/// This test only asserts the rollover as observed through the contract boundary
+/// (`auth_checked` admit/deny plus `status().window_remaining`).
+#[test]
+fn spec_11_scenario_3_window_rollover_restores_spending() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    // The window the live fixture used: a 150-unit cap over a 60-second window.
+    // `per_tx_cap` is set to 150 (the largest value §8 allows with that window
+    // cap) rather than the fixture's historical 1000, which current validation
+    // rejects as `PerTxCapExceedsWindowCap`; no transfer below trips it.
+    p.per_tx_cap = 150;
+    p.window_secs = 60;
+    p.window_cap = 150;
+    h.install_policy(&p);
+
+    // Away from timestamp 0, so the boundary is the addition form
+    // (`ts + window_secs`) rather than a saturated subtraction.
+    let t0 = 1_000_000u64;
+    h.set_time(t0);
+
+    // §11 scenario 3, step 1 — a policy-respecting spend inside the window.
+    h.transfer(&recv, 50);
+
+    // Step 2 — the later transfer pushes the cumulative total past `window_cap`
+    // and is blocked. The denied attempt does not consume budget (SPEC §6.0), so
+    // headroom is still exactly the admitted 50.
+    h.transfer_expect_blocked(&recv, 110); // 50 + 110 = 160 > 150
+    assert_eq!(h.status().window_remaining, Some(100)); // 150 - 50
+
+    // Step 3 — still inside the window: the admission at `t0` is live, so the
+    // identical transfer stays blocked. This is the retention half of the
+    // boundary rule the `src/window.rs` fixtures pin.
+    h.set_time(t0 + p.window_secs - 1);
+    h.transfer_expect_blocked(&recv, 110);
+    assert_eq!(h.status().window_remaining, Some(100));
+
+    // Step 4 — `window_secs + 1`: the spend admitted at `t0` has aged out, so
+    // the same transfer is admitted now. This is the rollover the testnet run
+    // had to wait 60 real seconds for.
+    h.set_time(t0 + p.window_secs + 1);
+    h.transfer(&recv, 110);
+    assert_eq!(h.status().window_remaining, Some(40)); // 150 - 110
+
+    // Step 5 — exact-boundary membership for the *new* admission: one second
+    // before `admitted_at + window_secs` it still counts, so 41 is over the cap
+    // and blocked...
+    let admitted_at = t0 + p.window_secs + 1;
+    h.set_time(admitted_at + p.window_secs - 1);
+    h.transfer_expect_blocked(&recv, 41); // 110 + 41 = 151 > 150
+    assert_eq!(h.status().window_remaining, Some(40));
+
+    // ...and at exactly `admitted_at + window_secs` it is expired (SPEC §3.1:
+    // `ts + window_secs == now`), so the full cap is available again. That is
+    // rolling-window membership, not a fixed-bucket reset.
+    h.set_time(admitted_at + p.window_secs);
+    h.transfer(&recv, 150);
+    assert_eq!(h.status().window_remaining, Some(0));
+}
+
 #[test]
 fn disabled_window_cap_writes_no_window_entries() {
     // Issue #20: `window_cap = 0` disables the rolling window, so a caps-only
