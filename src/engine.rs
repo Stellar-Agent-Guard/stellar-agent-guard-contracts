@@ -34,7 +34,7 @@ pub fn cap_metrics(
     recipient: &Address,
 ) -> (Option<i128>, Option<i128>, Option<i128>) {
     let window_cap = effective_window_cap(policy, recipient);
-    let per_tx_cap = (policy.per_tx_cap > 0).then_some(policy.per_tx_cap);
+    let per_tx_cap = policy.per_tx_cap_enabled().then_some(policy.per_tx_cap);
     let tracked_total = if has_recipient_window_cap(policy, recipient) {
         ledger.recipient_total(recipient)
     } else {
@@ -54,7 +54,7 @@ pub fn cap_metrics(
 #[allow(clippy::must_use_candidate)]
 pub fn global_window_remaining(policy: &PolicyConfig, ledger: &Ledger) -> Option<i128> {
     let remaining = policy.window_cap.saturating_sub(ledger.total).max(0);
-    (policy.window_cap > 0).then_some(remaining)
+    policy.window_cap_enabled().then_some(remaining)
 }
 
 /// Overflow-checked three-term running sum for a rolling-window projection:
@@ -255,7 +255,7 @@ fn has_recipient_window_cap(cfg: &PolicyConfig, recipient: &Address) -> bool {
 #[allow(clippy::must_use_candidate)]
 fn effective_window_cap(cfg: &PolicyConfig, recipient: &Address) -> Option<i128> {
     recipient_override_cap(cfg, recipient)
-        .or_else(|| (cfg.window_cap > 0).then_some(cfg.window_cap))
+        .or_else(|| cfg.window_cap_enabled().then_some(cfg.window_cap))
 }
 
 /// Effective per-transaction cap for `asset`: a per-asset override when
@@ -270,7 +270,7 @@ pub fn effective_per_tx_cap(cfg: &PolicyConfig, asset: &Address) -> Option<i128>
             }
         }
     }
-    (cfg.per_tx_cap > 0).then_some(cfg.per_tx_cap)
+    cfg.per_tx_cap_enabled().then_some(cfg.per_tx_cap)
 }
 
 // ── Context parsing (SPEC §6) ────────────────────────────────────────────
@@ -407,7 +407,7 @@ pub fn decide(
         return verdicts;
     };
 
-    let account_error = if cfg.dms_grace_secs > 0
+    let account_error = if cfg.dms_enabled()
         && state.last_heartbeat != 0
         && now.saturating_sub(state.last_heartbeat) > cfg.dms_grace_secs
     {
@@ -435,9 +435,9 @@ pub fn decide(
     // this request). Admission is staged and committed only after every
     // context passes. Per-recipient overrides run alongside the global window.
     // Protocol call rate limiting uses the same lazy pruning semantics.
-    if cfg.window_cap > 0
+    if cfg.window_cap_enabled()
         || !cfg.recipient_window_caps.is_empty()
-        || cfg.protocol_calls_per_window > 0
+        || cfg.protocol_calls_enabled()
     {
         ledger.prune(now, cfg.window_secs);
     }
@@ -514,7 +514,7 @@ pub fn decide(
                         staged_recip,
                         amount,
                     );
-                    let global_over = cfg.window_cap > 0
+                    let global_over = cfg.window_cap_enabled()
                         && match global_projected {
                             Some(projected) => projected > cfg.window_cap,
                             None => true,
@@ -529,7 +529,7 @@ pub fn decide(
                     if global_over || recip_over {
                         Decision::Blocked(Error::WindowCapExceeded)
                     } else {
-                        if cfg.window_cap > 0 {
+                        if cfg.window_cap_enabled() {
                             pending = pending.saturating_add(amount);
                             admission.push_back(crate::types::SpendEntry { ts: now, amount });
                         }
@@ -567,7 +567,7 @@ pub fn decide(
                     Decision::Blocked(Error::ProtocolNotAllowed)
                 } else if !fn_ok {
                     Decision::Blocked(Error::FunctionNotAllowed)
-                } else if cfg.protocol_calls_per_window > 0 {
+                } else if cfg.protocol_calls_enabled() {
                     // Protocol call rate limiting: check if admitting this call
                     // would exceed the per-window cap.
                     let projected_calls = ledger
@@ -2433,24 +2433,24 @@ mod tests {
 
         // Exactly MAX_WINDOW_ENTRIES distinct seconds (amount 1 each): the
         // bound is not exceeded, so no merge has happened yet.
-        for ts in 0..(MAX_WINDOW_ENTRIES as u64) {
+        for ts in 0..u64::from(MAX_WINDOW_ENTRIES) {
             l.admit(ts, 1);
         }
-        assert_eq!(l.entries.len() as usize, MAX_WINDOW_ENTRIES);
+        assert_eq!(l.entries.len(), MAX_WINDOW_ENTRIES);
 
         // One more distinct second crosses the bound: the two oldest entries
         // merge forward into a single entry at the NEWER timestamp.
-        l.admit(MAX_WINDOW_ENTRIES as u64, 1);
-        assert_eq!(l.entries.len() as usize, MAX_WINDOW_ENTRIES);
+        l.admit(u64::from(MAX_WINDOW_ENTRIES), 1);
+        assert_eq!(l.entries.len(), MAX_WINDOW_ENTRIES);
         let head = l.entries.first().unwrap();
         assert_eq!(head.ts, 1, "merged ts must be the newer of the two");
         assert_eq!(head.amount, 2);
 
         // Prune at the exact point where the true (un-merged) ts-0 spend has
         // expired; the merged entry keeps ts 1, so that amount is retained.
-        p.window_cap = (MAX_WINDOW_ENTRIES as i128) + 1;
+        p.window_cap = i128::from(MAX_WINDOW_ENTRIES) + 1;
         l.prune(p.window_secs, p.window_secs);
-        let true_rolling_sum = MAX_WINDOW_ENTRIES as i128; // ts 1..=MAX alive
+        let true_rolling_sum = i128::from(MAX_WINDOW_ENTRIES); // ts 1..=MAX alive
         assert!(
             l.total >= true_rolling_sum,
             "merge must over-count, never under-count"

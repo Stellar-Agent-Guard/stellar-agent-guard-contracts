@@ -478,7 +478,7 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     if cfg.per_tx_cap < 0 || cfg.window_cap < 0 {
         return Err(PolicyRuleId::AmountSign);
     }
-    if cfg.window_cap > 0 && cfg.window_secs == 0 {
+    if cfg.window_cap_enabled() && cfg.window_secs == 0 {
         return Err(PolicyRuleId::WindowRequiresWidth);
     }
     // Per-tx cap cannot exceed rolling window cap when both are enabled
@@ -486,7 +486,7 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     // and amounts between the two would pass per-tx only to fail on window.
     // That advertised range is never admitted, so we reject as InvalidConfig.
     // Skipped when either cap is disabled (0). Equal values are allowed.
-    if cfg.per_tx_cap > 0 && cfg.window_cap > 0 && cfg.per_tx_cap > cfg.window_cap {
+    if cfg.per_tx_cap_enabled() && cfg.window_cap_enabled() && cfg.per_tx_cap > cfg.window_cap {
         return Err(PolicyRuleId::PerTxCapExceedsWindowCap);
     }
     if cfg.active_until != 0 && cfg.active_until <= cfg.active_from {
@@ -730,11 +730,12 @@ mod policy_engine_type {
         let policy_revision = persist_get::<u64>(env, &DataKey::PolicyRevision).unwrap_or(0);
         let admin_frozen = persist_get::<bool>(env, &DataKey::AdminFrozen).unwrap_or(false);
         let last_heartbeat = persist_get::<u64>(env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let dms_enabled = policy.as_ref().is_some_and(PolicyConfig::dms_enabled);
         let (paused, window_remaining, outside_active_window, dms_grace_secs) = match &policy {
             None => (false, None, false, 0),
             Some(cfg) => {
                 let (mut ledger, _) = load_window(env);
-                if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
+                if cfg.window_cap_enabled() || !cfg.recipient_window_caps.is_empty() {
                     ledger.prune(as_of, cfg.window_secs);
                 }
                 (
@@ -746,14 +747,14 @@ mod policy_engine_type {
                 )
             }
         };
-        let heartbeat_expires_at = (dms_grace_secs > 0 && last_heartbeat != 0)
+        let heartbeat_expires_at = (dms_enabled && last_heartbeat != 0)
             .then(|| last_heartbeat.saturating_add(dms_grace_secs));
 
         Status {
             has_policy: policy.is_some(),
             policy_revision,
             admin_frozen,
-            heartbeat_expired: dms_grace_secs > 0
+            heartbeat_expired: dms_enabled
                 && last_heartbeat != 0
                 && as_of.saturating_sub(last_heartbeat) > dms_grace_secs,
             dms_grace_secs,
@@ -1216,7 +1217,7 @@ mod policy_engine_type {
             let now = env.ledger().timestamp();
             let self_addr = env.current_contract_address();
 
-            if policy.window_cap > 0 || !policy.recipient_window_caps.is_empty() {
+            if policy.window_cap_enabled() || !policy.recipient_window_caps.is_empty() {
                 ledger.prune(now, policy.window_secs);
             }
 

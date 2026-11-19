@@ -204,6 +204,27 @@ pub struct SpendEntry { pub ts: u64, pub amount: i128 }
 pub struct ProtocolCallEntry { pub ts: u64, pub count: u32 }  // coalesced call count per second
 ```
 
+**Field names and declaration order are part of the on-chain wire format.** These are
+`#[contracttype]` shapes: Soroban encodes a struct as an `ScVal` map keyed by the field
+names, its generated decoder reads entries positionally against the sorted field list, and
+its XDR shape follows declaration order. Renaming, reordering, inserting, or removing a
+field is therefore a wire-format change — it changes the bytes hashed by `policy_hash`, the
+persisted `Window` encoding, and the shape every off-chain decoder sees — even though the
+Rust code still compiles. Treat such an edit as breaking, regenerate
+`tests/snapshots/abi_snapshot.txt`, and review the diff
+(`git diff <last-release-tag> HEAD -- tests/snapshots/abi_snapshot.txt`). The encoding is
+pinned by §3.2 and `tests/policyconfig_scval_encoding.rs`; the contributor rule is
+CONTRIBUTING coding standard 10.
+
+**`0` means disabled — normative helper definitions.** The sentinel convention used by
+`per_tx_cap`, `window_cap`, and `dms_grace_secs` (and `0` = no limit for
+`protocol_calls_per_window`) is defined once, in code, by the `PolicyConfig` accessors
+`per_tx_cap_enabled()`, `window_cap_enabled()`, `dms_enabled()`, and
+`protocol_calls_enabled()` in `src/types.rs`. `decide`, `status()`, and policy validation
+read the sentinel through those helpers; any off-chain reimplementation (SDK, dashboard)
+should match them rather than comparing the raw field, so the contract and its consumers
+cannot drift on what `0` means.
+
 Tooling-facing JSON shape is maintained in [`policy.schema.json`](policy.schema.json).
 Treat it as normative-adjacent: the contract's `validate_config` implementation is authoritative
 if a conflict exists, but changes to `PolicyConfig` or its validation rules must update this
@@ -954,7 +975,9 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 
 To close the CheckResult/Error duality gap, every contract `Error` variant maps 1:1 to a `BlockReason` symbol emitted in `CheckResult::Blocked` and `auth_checked` events. The table below records the complete correspondence, including auth-only or admin-only variants that are unreachable via `check()` pre-flight reads and their rationale.
 
-**Discriminant stability & frozen codes:** Contract error codes (`Error(Contract, #N)`) are permanently frozen on testnet and mainnet (`1..=9` for generic/lifecycle, `10..=19` for account-level gates, and `20..=39` for per-call decisions). Renumbering any code breaks SDK/telemetry decoders. When introducing a new variant, contributors must adhere to the 'append, never insert' convention and execute the end-to-end checklist in [`docs/contributing.md`](docs/contributing.md#how-to-add-a-new-error-variant-end-to-end).
+**Discriminant stability & frozen codes:** Contract error codes (`Error(Contract, #N)`) are permanently frozen on testnet and mainnet (`1..=9` for generic/lifecycle, `10..=19` for account-level gates, and `20..=39` for per-call decisions). The numbers are public ABI, not an implementation detail: raw codes appear in published evidence (`tests/fixtures/README.md`), operator docs, the SDK's `REASON_CODES`, and telemetry, so renumbering any code breaks SDK/telemetry decoders and invalidates published evidence. When introducing a new variant, contributors must adhere to the 'append, never insert' convention — **append at the end of the variant's numeric group; never insert between existing codes** — and execute the end-to-end checklist in [`docs/contributing.md`](docs/contributing.md#how-to-add-a-new-error-variant-end-to-end). Renumbering is only permissible with an explicit version note in this section recording the date, the reason, and the old → new mapping for every consumer, together with the corresponding SDK change.
+
+The rule has three enforcement mechanisms, so a slip is caught rather than reviewed by memory: `tests/abi_snapshot.rs` pins every code/variant/reason triple in the committed `tests/snapshots/abi_snapshot.txt`, `error_code_discriminant_stability_spec_7` in `src/types.rs` asserts each numeric discriminant against this table, and `scripts/check-spec-coverage.sh` (the deny-list coverage check documented in CONTRIBUTING) reports when this enum and the table drift apart.
 
 | Error Code | Error Variant | Reason Symbol (`CheckResult::Blocked`) | Reachable via `check()`? | Rationale for Unreachable Direction |
 |---|---|---|---|---|

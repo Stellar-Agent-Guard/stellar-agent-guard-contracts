@@ -610,7 +610,7 @@ fn window_merge_event_emits_once_at_the_entry_bound() {
     let env = Env::default();
     env.cost_estimate().budget().reset_unlimited();
     let mut ledger = Ledger::empty(&env);
-    for ts in 0..crate::types::MAX_WINDOW_ENTRIES as u64 {
+    for ts in 0..u64::from(crate::types::MAX_WINDOW_ENTRIES) {
         ledger.admit(ts, 1);
     }
     assert!(
@@ -619,7 +619,7 @@ fn window_merge_event_emits_once_at_the_entry_bound() {
     );
     assert_eq!(env.events().all().events(), []);
 
-    ledger.admit(crate::types::MAX_WINDOW_ENTRIES as u64, 1);
+    ledger.admit(u64::from(crate::types::MAX_WINDOW_ENTRIES), 1);
     assert_eq!(ledger.merges.len(), 1);
     let merge = ledger.merges.pop().expect("one merge metadata record");
     assert_eq!(merge.kind, WindowMergeKind::GlobalSpend);
