@@ -69,6 +69,9 @@ The following GitBook pages provide operational guides, setup procedures, preset
 | [`audit-pack.md`](audit-pack.md) | Security Auditors, Protocol Reviewers | **Explanatory-only.** Audit readiness guide, security invariant synthesis, and testnet proof index. Invariants are normative across SPEC §1, §4, §6, and §10. |
 | [`contributing.md`](contributing.md) | Contributors | **Explanatory-only.** Development workflows, test running, PR checklist, and step-by-step guide for adding error variants. |
 | [`faq.md`](faq.md) | Operators, Integrators, Community | **Explanatory-only.** Frequently asked questions covering account abstraction differences, fee models, and non-custodial guarantees. |
+| [`operations/deployment-runbook.md`](operations/deployment-runbook.md) | Operators, Integrators | **Explanatory-only.** Ordered deploy sequence — build, upload, create, initialize, `set_policy`, `status` verification — with expected output and failure modes per step. Lifecycle mechanics are normative in SPEC §7. |
+| [`operations/migration-guide.md`](operations/migration-guide.md) | Operators | **Explanatory-only.** One-time move of an existing funded agent wallet to the guard's contract address, the verification steps, and the reverse path. Custody is normative in SPEC §1. |
+| [`operations/incident-playbook-admin-key-lost.md`](operations/incident-playbook-admin-key-lost.md) | Operators, Incident Responders | **Explanatory-only.** Recognising a DMS-frozen account, what recovery exists when the admin key is unavailable, and prevention. Semantics are normative in SPEC §5, §5.1, and §10. |
 | [`README.md`](README.md) | Contributors, Maintainers | **Explanatory-only.** Guide to the documentation site, GitBook sync, preview workflows, and this cross-reference map. |
 
 ---

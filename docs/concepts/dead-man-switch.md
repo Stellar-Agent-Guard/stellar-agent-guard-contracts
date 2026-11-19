@@ -68,6 +68,11 @@ For the agent-side steady-state loop that keeps this clock alive — heartbeat c
 (`interval ≤ grace / 3`), pre-flight, and the stop conditions when grace does lapse —
 see [`examples/agent-loop.md`](../../examples/agent-loop.md).
 
+If the admin key itself is unavailable when the grace has lapsed, there is no reversal:
+`unfreeze` is admin-only and the admin address cannot be changed without the current
+admin's signature. The recognition, recovery, and prevention steps are in the
+[incident playbook — account DMS-frozen, admin key unavailable](../operations/incident-playbook-admin-key-lost.md).
+
 ## Admin freeze vs. dead-man freeze
 
 These are **separate conditions**:

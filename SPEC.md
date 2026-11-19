@@ -35,6 +35,28 @@ before the action can touch a target protocol. `__check_auth` is the single enfo
   of its own), so every action of the account is a Soroban invocation and therefore passes
   through `__check_auth`. There is no classic-op enforcement gap to configure.
 
+**Why non-custodial, concretely.** The guarantee is about reachability, not only about where
+the balance sits. The contract exposes no sweep, withdraw, or arbitrary-transfer admin
+entrypoint: no admin function moves value, and only the registered agent key can authorize a
+transfer, under the policy evaluated in `__check_auth`. Two consequences are part of the same
+statement and must be read with it:
+
+- **An admin-key attacker is a control attacker, even though no admin entrypoint moves
+  funds.** The admin can rewrite policy (§8), pause/resume, freeze/unfreeze, and re-bind the
+  agent key (§7). Those powers let a hostile admin install a permissive policy and rotate the
+  agent key to one it controls, so describing admin-key compromise as "cannot touch funds"
+  would understate it. Admin compromise is out of scope by design (§10); the mitigation is
+  custody of the admin key, not a contract check.
+- **The enforcement boundary is distinct from the custody boundary.** Custody is
+  non-custodial for every authorized call; *amount and recipient* enforcement is complete
+  only for SAC transfers. Arbitrary protocol calls are bound by contract/function
+  allowlisting and the account-level gates, not by per-call caps (§2).
+
+What infrastructure can and cannot reach (SDK, RPC, third-party contracts) is summarized
+with the actor table in the README's
+[Why non-custodial, concretely](README.md#why-non-custodial-concretely) subsection; the
+exclusions are §10.
+
 ### 1.1 SDK and host surface this is built on (soroban-sdk 27)
 
 Verified against `soroban-sdk 27.0.6` source (`src/auth.rs`, `src/custom_account.rs`). The SDK
@@ -1525,6 +1547,15 @@ Not guarded by v1 (documented, not hidden):
   fires on silence)
 - admin compromise (admin can freeze and rewrite policy/keys — that is its function; it still
   cannot move funds)
+- **admin-key loss while the dead-man switch is armed** — arming `dms_grace_secs > 0` makes
+  the admin key a liveness dependency for the entire balance. The grace freeze is reversed
+  only by an admin `unfreeze` (§5, §5.1), and `propose_admin_rotation` requires the current
+  admin's signature, so a lost admin key cannot be replaced. Once the grace has lapsed the
+  balance is unspendable: the agent's heartbeat is rejected and no other actor can authorize
+  a transfer. Recognise it with `status()` (`admin_frozen: false`,
+  `heartbeat_expired: true`) and treat admin-key custody as a precondition of arming the
+  switch; see the
+  [incident playbook](docs/operations/incident-playbook-admin-key-lost.md).
 - **availability griefing by a holder of the agent key** — see §10.3
 - DoS on the account by someone **without** the agent key is not possible (anyone may call read
   functions); policy writes are admin-only. The contract is unaudited; see `SECURITY.md`/README disclaimers.
