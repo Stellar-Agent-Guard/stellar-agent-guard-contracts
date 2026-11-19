@@ -2768,4 +2768,37 @@ mod tests {
              budget: {escape_on} > {DECISION_PATH_CPU_BUDGET}"
         );
     }
+
+    /// Issue #368: an empty `contexts` vec yields an empty verdict list
+    /// (vacuously allowed — no `Decision::Blocked` entries) and commits zero
+    /// window admissions. Approving an authorization that authorizes zero
+    /// calls grants no capability and moves no funds; see SPEC §4.
+    #[test]
+    fn empty_auth_contexts_yields_vacuously_allowed() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.window_cap = 100;
+        let mut ledger = Ledger::empty(&env);
+        ledger.admit(1_000, 25);
+        let before = ledger.clone();
+        let contexts = Vec::new(&env);
+
+        // Zero contexts authorize zero contract calls or host functions, so
+        // vacuous approval grants no authority and leaves the ledger untouched.
+        let verdicts = decide(&env, &sa, Some(&p), &alive(), &mut ledger, 1_000, contexts);
+
+        assert!(
+            verdicts.is_empty(),
+            "zero auth contexts must produce zero per-context verdicts in the decision engine"
+        );
+        assert!(
+            verdicts.iter().all(|d| matches!(d, Decision::Allowed)),
+            "empty verdict list is vacuously allowed with no blocking decision"
+        );
+        assert_eq!(
+            ledger, before,
+            "zero-context authorization must not admit any spend or protocol calls"
+        );
+    }
 }

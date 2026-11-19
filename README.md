@@ -112,7 +112,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 238 tests, isolated (no network)
+cargo test                                      # 246 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -248,6 +248,24 @@ admin action); it does not touch the policy, `PolicyRevision`, or the dead-man-s
 clock. Emits `EventWindowReset`. Reach for it only when a fresh budget is actually
 intended (e.g. after raising `window_cap` mid-incident); a pause, a tightening, or any
 routine policy edit leaves the window intact.
+
+### `increase_window_cap`
+```rust
+pub fn increase_window_cap(env: Env, new_cap: i128)
+```
+Admin-only. Raises the installed policy's global `window_cap` **in place** without
+resetting the rolling spend ledger or touching the dead-man-switch clock
+([issue #349](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/349),
+companion to `set_policy`'s window-preservation and explicit `reset_window` in
+[issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289)
+and [issue #305](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/305)).
+Prunes the loaded ledger against `now` to evaluate the live rolling total, rejects
+`NoPolicy` when no policy is installed, and rejects `InvalidConfig` if
+`new_cap <= cfg.window_cap` (not an increase, including `<= 0`), if `new_cap` is below
+the current live total (silently setting a cap below already-spent volume would block the
+account with no recourse), or if the updated policy violates SPEC §8 (e.g.
+`window_secs == 0` or `per_tx_cap > new_cap`). Increments `PolicyRevision` and emits
+`EventWindowCapIncreased` carrying `by`, `old_cap`, `new_cap`, and `revision`.
 
 ### `revoke_policy`
 ```rust
@@ -995,7 +1013,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-238 tests (unit + integration) cover the policy decision engine — including the regression
+246 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
