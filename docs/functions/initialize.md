@@ -17,7 +17,10 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 - Stores `admin` as the policy admin in instance storage.
 - Stores `agent_pubkey` (raw Ed25519 public key, 32 bytes) as the agent's registered key.
 - Sets `AdminFrozen = false` and `LastHeartbeat = 0` in persistent storage.
-- Emits `EventInitialized`.
+- Emits `EventInitialized` carrying `by` and `agent_fingerprint` — the first 4 bytes of the
+  registered key (8 lowercase hex characters). The prefix is for correlating setup from telemetry
+  only: 32 bits can collide and the full key is already in instance storage. See
+  [SPEC §9](../../SPEC.md#9-events-and-telemetry).
 - Can only be called **once** — subsequent calls fail with `AlreadyInitialized`.
 
 ## What happens after initialize

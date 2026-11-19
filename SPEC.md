@@ -1431,7 +1431,7 @@ read them by key regardless.
 | `event_auth_checked` | `[0] Symbol("event_auth_checked")`, `[1] result: Symbol` (`allowed`/`blocked`), `[2] reason: Symbol` (empty on allow) | `context_index: u32`, `contract: Option<Address>`, `fn_name: Option<Symbol>`, `revision: u64` | every `__check_auth` / `check` decision |
 | `event_heartbeat` | `[0] Symbol("event_heartbeat")` | `at: u64`, `expires_at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `event_dms_auto_frozen` | `[0] Symbol("event_dms_auto_frozen")` | `at: u64` | when a heartbeat proves the dead-man deadline has passed and the account auto-freezes (§5) |
-| `event_initialized` | `[0] Symbol("event_initialized")` | `by: Address` | contract initialization |
+| `event_initialized` | `[0] Symbol("event_initialized")` | `agent_fingerprint: BytesN<4>`, `by: Address` | contract initialization |
 | `event_frozen` | `[0] Symbol("event_frozen")` | `by: Address` | admin freeze |
 | `event_unfrozen` | `[0] Symbol("event_unfrozen")` | `by: Address`, `rearmed_dms: bool` | admin unfreeze; `rearmed_dms` says whether `LastHeartbeat` was changed (DMS clock re-armed; §5) |
 | `event_policy_set` | `[0] Symbol("event_policy_set")` | `by: Address`, `revision: u64` | admin `set_policy`; `revision` is the `PolicyRevision` this call produced |
@@ -1508,7 +1508,10 @@ data     = Map{ "at": U64(1700003601) }
 
 ```text
 topic[0] = Symbol("event_initialized")
-data     = Map{ "by": Address("GD5S...LAVS") }
+data     = Map{
+  "agent_fingerprint": Bytes(4),
+  "by":                Address("GD5S...LAVS"),
+}
 
 topic[0] = Symbol("event_frozen")
 data     = Map{ "by": Address("GD5S...LAVS") }
@@ -1623,6 +1626,17 @@ the same expiry the contract enforced instead of a drifting recomputation. When 
 switch is disabled the event carries `expires_at == 0` rather than `at + 0`, so `0` unambiguously
 means "no deadline was attested" and never a real timestamp (ledger timestamps are far above `0`).
 Reads `Policy` at emission time to obtain the grace; a missing policy reads as disabled.
+
+**Agent fingerprint (`initialized.agent_fingerprint`).** The `initialized` event
+carries the first 4 bytes of the registered Ed25519 public key, rendered as 8
+lowercase hex characters off-chain, so an auditor or incident responder can
+answer "which key was this account bound to at setup?" from telemetry alone
+instead of replaying the initialize transaction or reading instance storage.
+This is a **correlation prefix, not a security fingerprint**: 32 bits collide by
+the birthday bound at roughly 77,000 keys, so it must never be used to prove key
+identity or to authorize anything. It reveals nothing new — the full key is
+already public in instance storage. `agent_rotated` uses a different, longer
+fingerprint (below); the two are intentionally not comparable.
 
 **Key fingerprints (`agent_rotated`).** A fingerprint is `sha256(pubkey)[0..8]` — the first
 8 bytes of the SHA-256 digest of the agent public key, rendered as 16 lowercase hex characters
