@@ -204,14 +204,14 @@ use soroban_sdk::xdr::{
 use soroban_sdk::{
     contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, InvokeError, Symbol, Val,
 };
-use std::{boxed::Box, format};
+use std::format;
 
 /// A `ScVal::Symbol` built from a plain string (event names / map keys).
 fn symbol_val(s: &str) -> ScVal {
     ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from(s)).unwrap())
 }
 
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> std::string::String {
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> std::string::String {
     if let Some(message) = payload.downcast_ref::<std::string::String>() {
         return message.clone();
     }
@@ -920,7 +920,7 @@ impl Harness {
             MockAssetClient::new(&self.env, &self.asset).transfer(&self.guard, to, &amount);
         }));
         let log = match res {
-            Err(payload) => panic_message(payload),
+            Err(payload) => panic_message(payload.as_ref()),
             Ok(()) => panic!("expected the transfer to be blocked"),
         };
         assert!(
@@ -965,7 +965,7 @@ impl Harness {
             _ => panic!("unsupported MockProtocol function {function}"),
         }));
         let log = match res {
-            Err(payload) => panic_message(payload),
+            Err(payload) => panic_message(payload.as_ref()),
             Ok(()) => panic!("expected protocol call to be blocked"),
         };
         assert!(
@@ -990,7 +990,7 @@ impl Harness {
             PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
         }));
         let log = match res {
-            Err(payload) => panic_message(payload),
+            Err(payload) => panic_message(payload.as_ref()),
             Ok(()) => panic!("expected the heartbeat to be blocked"),
         };
         assert!(
@@ -1019,7 +1019,7 @@ impl Harness {
             PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
         }));
         if let Err(payload) = res {
-            panic_message(payload)
+            panic_message(payload.as_ref())
         } else {
             panic!("expected the heartbeat to be blocked")
         }
