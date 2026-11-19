@@ -23,6 +23,8 @@ implements the Soroban `CustomAccountInterface`. From then on, the agent's **add
 contract's address**: any transaction that needs the agent to authorize an action (any
 `require_auth` on that address) is routed by the host through the contract's `__check_auth`
 before the action can touch a target protocol. `__check_auth` is the single enforcement vector.
+The mechanism choice and the alternatives rejected are recorded in
+[ADR-0001](docs/adr/0001-custom-account-abstraction-over-wrapper-contract.md).
 
 - **Non-custodial.** Funds live in the agent's own smart account (balances held at the contract
   address by Stellar Asset Contracts). There is no third-party vault, no `top_up`, no deposit
@@ -97,8 +99,9 @@ rolling-window spend accounting are not applied to non-SAC calls; extending fine
 enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered.**
 
 *Canonical statement: the paragraph above is the single source of truth for the scope
-wording. The README and `docs/enforcement-scope.md` carry short excerpts that link back
-here; scope-wording edits touch this section only (CONTRIBUTING rule 2).*
+wording. The README and `docs/enforcement-scope.md` quote the same paragraph word for
+word and link back here; `scripts/check-enforcement-scope.sh` fails CI if the three
+copies diverge (CONTRIBUTING rule 2).*
 
 What "window and pause state" means for non-SAC calls is made exact in §6.4: the account is a
 **default-deny** environment — every call must match the protocol allowlist (contract, and
@@ -112,7 +115,9 @@ trustworthy way.
 This boundary is an inherent property of the platform (an independent current confirmation:
 OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer contexts and
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
-and `docs/enforcement-scope.md` quote this section briefly and link here as canonical.
+and `docs/enforcement-scope.md` quote this section briefly and link here as canonical. The
+deny-by-default classification that produces this boundary is recorded in
+[ADR-0004](docs/adr/0004-deny-by-default-classification.md).
 
 **Contract creation contexts:** Host-function contract creation contexts (`CreateContractHostFn`
 and `CreateContractWithCtorHostFn`) are surfaced by the host to `__check_auth` when contract deployment
@@ -230,7 +235,9 @@ A fixed 86,400-second bucket (reset-at-midnight style) is a **different guarante
 rolling window and is rejected here. Under a fixed bucket, spend at 23:59 and spend at 00:01
 are never counted together even though they are two minutes apart; under a rolling window, any
 two spends within any 86,400-second span are counted together. The two guarantees diverge in
-exactly the burst-boundary cases a spend guard exists to catch.
+exactly the burst-boundary cases a spend guard exists to catch. The decision, its rejected
+alternatives, and the conditions that would reopen it are recorded in
+[ADR-0002](docs/adr/0002-rolling-window-over-fixed-bucket.md).
 
 Implementation (exact, lazy, bounded):
 
@@ -890,7 +897,9 @@ A context whose contract is not the account itself, not in `assets`, and not in 
 is blocked (`UnknownContract`). Host-function contract creation contexts (`CreateContractHostFn`
 and `CreateContractWithCtorHostFn`) are mapped by `parse_call` to `ParsedCall::CreateContract`
 and blocked with `CreateContractNotAllowed` (code 28). The account is **default-deny**: adding
-a protocol is an explicit policy act, and contract creation by the agent is disallowed.
+a protocol is an explicit policy act, and contract creation by the agent is disallowed. The
+classification rule and the rejected allow-by-default alternatives are recorded in
+[ADR-0004](docs/adr/0004-deny-by-default-classification.md).
 
 **Boundary stated exactly:** pause (#4), active-window (#5), and dead-man/admin freeze (#1–#2)
 are *transaction-level* gates applied before classification, so they bind every call the
@@ -942,7 +951,8 @@ authorized transactions.
 
 `__check_auth` itself enforces the ordering stated in §10.2: the agent's signature is verified
 before any policy state is read, so an unverifiable signature never reaches the decision table
-below.
+below. The single-key choice and the rejected multi-sig / delegated-signer alternatives are
+recorded in [ADR-0003](docs/adr/0003-ed25519-single-key-over-multisig-v1.md).
 
 ```rust
 // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -1376,21 +1386,217 @@ those repositories.
 
 ## 9. Events and telemetry
 
-Events are the contract's audit trail and Phase-2 telemetry vocabulary. Topics chosen for cheap
-filtering by the SDK listener.
+Events are the contract's audit trail and Phase-2 telemetry vocabulary. This
+section is the indexer contract: it states the exact **encoded shape** of every
+event — topic positions and data layout — not just the conceptual payload. A
+listener can be written from this section alone, and a field reorder is called
+out as the breaking change it is (§9.4).
 
-| Event | Topics | Data | Emitted |
+### 9.1 Encoding rules (`#[contractevent]`)
+
+Events are declared as Rust structs with `#[contractevent]`. The macro's
+encoding is the on-chain API:
+
+1. `topic[0]` is always the event-name symbol: `event_` followed by the struct
+   name converted to `lower_snake_case` (`EventAuthChecked` →
+   `event_auth_checked`). It is prepended by the macro; it is not declared as a
+   field.
+2. Every field marked `#[topic]` follows in **declaration order**: `topic[1]`,
+   `topic[2]`, and so on.
+3. Fields not marked `#[topic]` become the event data — an `ScVal::Map` keyed
+   by the field names as `ScVal::Symbol`. Soroban maps are canonically ordered
+   by key, so the encoded entries are **sorted by field name, not by declaration
+   order**. Always decode data by key.
+
+Consequences an indexer must rely on:
+
+- Topic positions are meaningful. For `auth_checked`, `result` is `topic[1]`
+  and `reason` is `topic[2]`; `src/integration_tests.rs` filters on exactly
+  those positions.
+- An event with no `#[topic]` fields still has one topic: the prepended name.
+- Data is a map, not a tuple. Decode by key and ignore unknown keys; that is
+  what makes additive fields backward-compatible (an added `#[topic]` field is
+  not additive — it shifts every later position, §9.4).
+- `Option<T>` data fields encode as `ScVal::Void` when `None` and as the inner
+  value when `Some`; `BytesN<N>` encodes as `ScVal::Bytes` of length `N`.
+
+### 9.2 Event catalogue
+
+The table is normative. `topic[0]` is shown explicitly so no reader has to
+infer the prepended name. Data keys are listed in encoded (sorted-key) order;
+read them by key regardless.
+
+| Event symbol | Topics | Data (encoded key order) | Emitted when |
 |---|---|---|---|
-| `auth_checked` | event-name topic `event_auth_checked`, then `result: Symbol` (`allowed`/`blocked`) and `reason: Symbol` (empty on allow) | Map: `context_index: u32`, `revision: u64`, `contract: Option<Address>`, `fn_name: Option<Symbol>` | every `__check_auth` / `check` decision |
-| `heartbeat` | (none) | `at: u64`, `expires_at: u64` — the attested DMS deadline as it stood at emission time, `at + dms_grace_secs` of the policy current at that moment; `0` when the dead-man switch is disabled (`dms_grace_secs == 0`, or no policy) | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
-| `initialized` | (none) | `by: Address` | contract initialization |
-| `frozen` | (none) | `by: Address` | admin freeze |
-| `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
-| `policy_set` / `policy_revoked` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced | admin policy changes |
-| `paused` / `resumed` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced; the counter advances only when the call actually flips `paused`, so a redundant double-pause emits the event with an unchanged revision | admin `pause()` / `resume()` (issues #289/#290) |
-| `window_reset` | (none) | `by: Address` — the admin that explicitly zeroed the rolling window (`set_policy` preserves it across edits, issue #289) | admin `reset_window()` (issue #289) |
-| `agent_rotated` | (none) | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
-| `event_window_merged` | `ledger_kind: Symbol` (`global_spend`, `recipient_spend`, `protocol_calls`) | `(merged_ts: u64, merged_value: i128)` â€” retained newer timestamp and merged spend amount or call count | successful admission engages the 8192-entry backstop |
+| `event_auth_checked` | `[0] Symbol("event_auth_checked")`, `[1] result: Symbol` (`allowed`/`blocked`), `[2] reason: Symbol` (empty on allow) | `context_index: u32`, `contract: Option<Address>`, `fn_name: Option<Symbol>`, `revision: u64` | every `__check_auth` / `check` decision |
+| `event_heartbeat` | `[0] Symbol("event_heartbeat")` | `at: u64`, `expires_at: u64` | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
+| `event_dms_auto_frozen` | `[0] Symbol("event_dms_auto_frozen")` | `at: u64` | when a heartbeat proves the dead-man deadline has passed and the account auto-freezes (§5) |
+| `event_initialized` | `[0] Symbol("event_initialized")` | `agent_fingerprint: BytesN<4>`, `by: Address` | contract initialization |
+| `event_frozen` | `[0] Symbol("event_frozen")` | `by: Address` | admin freeze |
+| `event_unfrozen` | `[0] Symbol("event_unfrozen")` | `by: Address`, `rearmed_dms: bool` | admin unfreeze; `rearmed_dms` says whether `LastHeartbeat` was changed (DMS clock re-armed; §5) |
+| `event_policy_set` | `[0] Symbol("event_policy_set")` | `by: Address`, `revision: u64` | admin `set_policy`; `revision` is the `PolicyRevision` this call produced |
+| `event_policy_revoked` | `[0] Symbol("event_policy_revoked")` | `by: Address`, `revision: u64` | admin `revoke_policy`; the revision this call produced |
+| `event_paused` | `[0] Symbol("event_paused")` | `by: Address`, `revision: u64` | admin `pause()`; the counter advances only when the call actually flips `paused`, so a redundant double-pause emits the event with an unchanged revision (issues #289/#290) |
+| `event_resumed` | `[0] Symbol("event_resumed")` | `by: Address`, `revision: u64` | admin `resume()`, same revision semantics as `event_paused` |
+| `event_window_reset` | `[0] Symbol("event_window_reset")` | `by: Address` | admin `reset_window()` — the explicit zeroing `set_policy` no longer performs (issue #289) |
+| `event_agent_rotated` | `[0] Symbol("event_agent_rotated")` | `by: Address`, `new_fingerprint: BytesN<8>`, `old_fingerprint: BytesN<8>` | admin agent-key rotation |
+| `event_window_merged` | `[0] Symbol("event_window_merged")`, `[1] ledger_kind: Symbol` (`global_spend`, `recipient_spend`, `protocol_calls`) | `merged_ts: u64`, `merged_value: i128` | a successful admission engages the 8192-entry backstop (§3.1); no event below the bound |
+| `event_admin_rotation_proposed` | `[0] Symbol("event_admin_rotation_proposed")` | `by: Address`, `proposed: Address` | admin `propose_admin_rotation` (§6.6) |
+| `event_admin_rotated` | `[0] Symbol("event_admin_rotated")` | `new: Address`, `old: Address` | `confirm_admin_rotation` completes the handover |
+| `event_admin_rotation_cancelled` | `[0] Symbol("event_admin_rotation_cancelled")` | `by: Address`, `cancelled: Address` | admin `cancel_admin_rotation` |
+
+**Heartbeat expiry (`heartbeat.expires_at`).** `expires_at` is the deadline the heartbeat was
+actually attested under, derived from the `dms_grace_secs` of the policy *current at the moment
+the heartbeat is emitted* — not a value the consumer recomputes from `at` using whatever grace
+the policy carries later. A `set_policy` that changes `dms_grace_secs` after a heartbeat does not
+retroactively change that heartbeat's recorded deadline, so a listener replaying the log derives
+the same expiry the contract enforced instead of a drifting recomputation. When the dead-man
+switch is disabled the event carries `expires_at == 0` rather than `at + 0`, so `0` unambiguously
+means "no deadline was attested" and never a real timestamp (ledger timestamps are far above `0`).
+Reads `Policy` at emission time to obtain the grace; a missing policy reads as disabled.
+
+### 9.3 Worked encoded examples
+
+Notation: `Map{ "key": value, ... }` is an `ScVal::Map`; `Symbol("...")`,
+`Address("C..."/"G...")`, `U32`, `U64`, `I128`, `Bool`, and `Bytes` are the
+corresponding `ScVal` variants. Addresses are abbreviated; the real values are
+full StrKey addresses.
+
+**Decision family (`auth_checked`).** A blocked transfer, second context of an
+authorization running under policy revision 4:
+
+```text
+topic[0] = Symbol("event_auth_checked")
+topic[1] = Symbol("blocked")
+topic[2] = Symbol("recipient_not_allowed")
+data     = Map{
+  "context_index": U32(1),
+  "contract":      Address("CBLQ...TJC7"),
+  "fn_name":       Symbol("transfer"),
+  "revision":      U64(4),
+}
+```
+
+The allowed shape differs only in the decision topics; the data map is the same
+shape, with `contract`/`fn_name` absent (`ScVal::Void`) for a heartbeat
+self-call:
+
+```text
+topic[0] = Symbol("event_auth_checked")
+topic[1] = Symbol("allowed")
+topic[2] = Symbol("")
+data     = Map{
+  "context_index": U32(0),
+  "contract":      Void,
+  "fn_name":       Void,
+  "revision":      U64(4),
+}
+```
+
+**Liveness family (`heartbeat`, `dms_auto_frozen`).** No declared topics; the
+prepended name is the only topic:
+
+```text
+topic[0] = Symbol("event_heartbeat")
+data     = Map{ "at": U64(1700000000), "expires_at": U64(1700003600) }
+
+topic[0] = Symbol("event_dms_auto_frozen")
+data     = Map{ "at": U64(1700003601) }
+```
+
+**Lifecycle family (`initialized`, `frozen`, `unfrozen`).**
+
+```text
+topic[0] = Symbol("event_initialized")
+data     = Map{
+  "agent_fingerprint": Bytes(4),
+  "by":                Address("GD5S...LAVS"),
+}
+
+topic[0] = Symbol("event_frozen")
+data     = Map{ "by": Address("GD5S...LAVS") }
+
+topic[0] = Symbol("event_unfrozen")
+data     = Map{ "by": Address("GD5S...LAVS"), "rearmed_dms": Bool(true) }
+```
+
+**Policy-administration family (`policy_set`, `policy_revoked`, `paused`,
+`resumed`, `window_reset`).**
+
+```text
+topic[0] = Symbol("event_policy_set")
+data     = Map{ "by": Address("GD5S...LAVS"), "revision": U64(1) }
+
+topic[0] = Symbol("event_policy_revoked")
+data     = Map{ "by": Address("GD5S...LAVS"), "revision": U64(2) }
+
+topic[0] = Symbol("event_paused")
+data     = Map{ "by": Address("GD5S...LAVS"), "revision": U64(3) }
+
+topic[0] = Symbol("event_resumed")
+data     = Map{ "by": Address("GD5S...LAVS"), "revision": U64(4) }
+
+topic[0] = Symbol("event_window_reset")
+data     = Map{ "by": Address("GD5S...LAVS") }
+```
+
+**Rotation family (`agent_rotated`, `admin_rotation_*`).** A fingerprint is an
+eight-byte `Bytes` value rendered as hex off-chain (§9.4):
+
+```text
+topic[0] = Symbol("event_agent_rotated")
+data     = Map{
+  "by":              Address("GD5S...LAVS"),
+  "new_fingerprint": Bytes(8),
+  "old_fingerprint": Bytes(8),
+}
+
+topic[0] = Symbol("event_admin_rotation_proposed")
+data     = Map{ "by": Address("GD5S...LAVS"), "proposed": Address("GDUY...RRX") }
+
+topic[0] = Symbol("event_admin_rotated")
+data     = Map{ "new": Address("GDUY...RRX"), "old": Address("GD5S...LAVS") }
+
+topic[0] = Symbol("event_admin_rotation_cancelled")
+data     = Map{ "by": Address("GD5S...LAVS"), "cancelled": Address("GDUY...RRX") }
+```
+
+**Window-backstop family (`window_merged`).** The only non-`auth_checked` event
+with a declared topic:
+
+```text
+topic[0] = Symbol("event_window_merged")
+topic[1] = Symbol("global_spend")
+data     = Map{ "merged_ts": U64(1), "merged_value": I128(2) }
+```
+
+### 9.4 Stability commitment for indexers
+
+Topic positions, the prepended event-name symbol, data keys, and field types are
+part of the contract's public off-chain API. The commitment is:
+
+- **Breaking:** renaming an event struct (changes `topic[0]`), adding, removing,
+  reordering, or retyping a `#[topic]` field (shifts or changes every later
+  topic position), removing a data key, or retyping a data value. Any of these
+  requires a SPEC version note and a coordinated SDK/dashboard release; it is
+  never a drive-by refactor.
+- **Additive:** adding a non-`#[topic]` data field at the end of the struct.
+  Decoders that read by key and ignore unknown keys keep working, which is why
+  the `revision` fields could be added on unchanged topics (§9 policy-revision
+  note). New decoders may require the field; old ones must tolerate it.
+- **Pinned by tests:** `src/event_audit_tests.rs` asserts topic counts, topic
+  symbols, and data-map shapes for the event families;
+  `src/integration_tests.rs` pins the `auth_checked` positions (`topic[1]` is
+  `result`, `topic[2]` is `reason`); `tests/fixtures/auth-checked-vocabulary.json`
+  pins the reason symbols. A field reorder that misses this section still fails
+  those tests, and the failure is a prompt to update the SPEC version note, not
+  a test to relax.
+
+**Cross-repo boundary (sibling SDK).** The events-onboarding path lives in
+`stellar-agent-guard-sdk`, not here. It should link to this section as the
+normative encoded-shape reference; that link and its page are tracked in the
+SDK repository and are not created by this repository.
+
 
 **Policy revision join key (issue #38).** `PolicyRevision` is a persistent
 instance-stored counter (`DataKey::PolicyRevision`, §3) incremented by every
@@ -1420,6 +1626,17 @@ the same expiry the contract enforced instead of a drifting recomputation. When 
 switch is disabled the event carries `expires_at == 0` rather than `at + 0`, so `0` unambiguously
 means "no deadline was attested" and never a real timestamp (ledger timestamps are far above `0`).
 Reads `Policy` at emission time to obtain the grace; a missing policy reads as disabled.
+
+**Agent fingerprint (`initialized.agent_fingerprint`).** The `initialized` event
+carries the first 4 bytes of the registered Ed25519 public key, rendered as 8
+lowercase hex characters off-chain, so an auditor or incident responder can
+answer "which key was this account bound to at setup?" from telemetry alone
+instead of replaying the initialize transaction or reading instance storage.
+This is a **correlation prefix, not a security fingerprint**: 32 bits collide by
+the birthday bound at roughly 77,000 keys, so it must never be used to prove key
+identity or to authorize anything. It reveals nothing new — the full key is
+already public in instance storage. `agent_rotated` uses a different, longer
+fingerprint (below); the two are intentionally not comparable.
 
 **Key fingerprints (`agent_rotated`).** A fingerprint is `sha256(pubkey)[0..8]` — the first
 8 bytes of the SHA-256 digest of the agent public key, rendered as 16 lowercase hex characters

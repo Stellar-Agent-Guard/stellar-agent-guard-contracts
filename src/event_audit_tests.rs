@@ -255,13 +255,45 @@ fn audit_event_payloads_and_topics() {
         1,
         "event_initialized must have 1 topic"
     );
-    // Data must contain 'by' address
+    // Data carries the admin plus the 4-byte prefix of the registered agent
+    // key (SPEC §9), so setup is verifiable from telemetry alone. Soroban
+    // stores map entries in canonical key order, so find by key rather than
+    // indexing into declaration order.
+    let expected_pubkey = h.agent.verifying_key().to_bytes();
     match &init_v0.data {
         ScVal::Map(Some(map)) => {
-            assert_eq!(map.0.len(), 1);
             assert_eq!(
-                map.0[0].key,
-                ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("by")).unwrap())
+                map.0.len(),
+                2,
+                "event_initialized carries by + agent_fingerprint"
+            );
+            let by_entry = map
+                .0
+                .iter()
+                .find(|entry| {
+                    entry.key
+                        == ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("by")).unwrap())
+                })
+                .expect("event_initialized data must carry `by`");
+            assert_eq!(
+                by_entry.val,
+                ScVal::Address(xdr::ScAddress::from(&h.admin)),
+                "initialized.by must be the admin that initialized"
+            );
+            let fingerprint_entry = map
+                .0
+                .iter()
+                .find(|entry| {
+                    entry.key
+                        == ScVal::Symbol(
+                            ScSymbol::try_from(std::vec::Vec::from("agent_fingerprint")).unwrap(),
+                        )
+                })
+                .expect("event_initialized data must carry `agent_fingerprint`");
+            assert_eq!(
+                fingerprint_entry.val,
+                ScVal::Bytes(ScBytes::try_from(expected_pubkey[..4].to_vec()).unwrap()),
+                "initialized.agent_fingerprint must be the first 4 bytes of the registered key"
             );
         }
         _ => panic!("event_initialized data must be a Map"),
