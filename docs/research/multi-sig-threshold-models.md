@@ -2,7 +2,8 @@
 
 **Issue:** #153 (refinement of #2)  
 **Status:** Design exploration — maintainer sign-off required per branch protection  
-**Cross-link:** SDK `AgentSigner` interface awaits this decision
+**Cross-link:** SDK `AgentSigner` interface awaits this decision  
+**Delegation gate (#80):** CAP-71 delegation is analysed separately in [CAP-71 Delegated Signers](cap71-delegated-signers.md) and is **rejected as the basis for this model** — it is AND-only. Continue with the in-account signature models below.
 
 ---
 
