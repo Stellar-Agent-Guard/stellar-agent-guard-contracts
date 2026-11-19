@@ -1246,6 +1246,22 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // pure pre-flight replica of the §6.2 decision path: it does not change
     // spend accounting, but a submitted call may refresh TTLs under §9.5.
     // Simulation before signing does not persist those rent bumps.
+    //
+    // Exact synthetic context it constructs and hands to `decide` (one per
+    // call; `check_batch` builds one per transfer, in order):
+    //   Context::Contract(ContractContext {
+    //       contract: asset,                            // the SAC being debited
+    //       fn_name:  "transfer",
+    //       args:     [ env.current_contract_address(), // SAC `from`,   args[0]
+    //                   to,                             // SAC `to`,     args[1]
+    //                   amount ],                       // SAC `amount`, args[2]
+    //   })
+    // i.e. `args = [from, to, amount]` with `from` = `env.current_contract_address()`
+    // — byte-for-byte the shape the host hands `__check_auth` for the real
+    // transfer, so pre-flight and on-chain authorization score the same context
+    // (issue #317). The decision table reads only `args[1]`/`args[2]` today;
+    // `args[0]` is pinned for the `from`-is-the-guarded-account validation
+    // (issue #10), which must land after this shape is correct.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
   // Same zero-write pre-flight, with remaining_window and effective cap metrics.
 pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
