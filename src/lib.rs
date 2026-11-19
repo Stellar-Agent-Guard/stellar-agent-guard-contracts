@@ -548,21 +548,24 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
             }
         }
     }
-    let mut contracts: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(env);
+    // SPEC §8: the same contract must not appear in two protocol rules
+    // (`ProtocolContractDuplicate`). Comparing each rule against the rules
+    // already validated ahead of it is the rule itself, so no temporary
+    // collection is needed to remember what has been seen.
     for i in 0..cfg.protocols.len() {
-        if let Some(pr) = cfg.protocols.get(i) {
-            for j in 0..contracts.len() {
-                if let Some(existing) = contracts.get(j) {
-                    if existing == pr.contract {
-                        return Err(PolicyRuleId::ProtocolContractDuplicate);
-                    }
+        let Some(pr) = cfg.protocols.get(i) else {
+            continue;
+        };
+        for earlier in 0..i {
+            if let Some(existing) = cfg.protocols.get(earlier) {
+                if existing.contract == pr.contract {
+                    return Err(PolicyRuleId::ProtocolContractDuplicate);
                 }
             }
-            contracts.push_back(pr.contract.clone());
-            if let Some(fns) = &pr.fns {
-                if fns.is_empty() || has_dup(env, fns) {
-                    return Err(PolicyRuleId::ProtocolFnListInvalid);
-                }
+        }
+        if let Some(fns) = &pr.fns {
+            if fns.is_empty() || has_dup(env, fns) {
+                return Err(PolicyRuleId::ProtocolFnListInvalid);
             }
         }
     }
