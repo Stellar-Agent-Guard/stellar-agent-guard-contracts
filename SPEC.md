@@ -216,6 +216,15 @@ Rust code still compiles. Treat such an edit as breaking, regenerate
 pinned by §3.2 and `tests/policyconfig_scval_encoding.rs`; the contributor rule is
 CONTRIBUTING coding standard 10.
 
+**`0` means disabled — normative helper definitions.** The sentinel convention used by
+`per_tx_cap`, `window_cap`, and `dms_grace_secs` (and `0` = no limit for
+`protocol_calls_per_window`) is defined once, in code, by the `PolicyConfig` accessors
+`per_tx_cap_enabled()`, `window_cap_enabled()`, `dms_enabled()`, and
+`protocol_calls_enabled()` in `src/types.rs`. `decide`, `status()`, and policy validation
+read the sentinel through those helpers; any off-chain reimplementation (SDK, dashboard)
+should match them rather than comparing the raw field, so the contract and its consumers
+cannot drift on what `0` means.
+
 Tooling-facing JSON shape is maintained in [`policy.schema.json`](policy.schema.json).
 Treat it as normative-adjacent: the contract's `validate_config` implementation is authoritative
 if a conflict exists, but changes to `PolicyConfig` or its validation rules must update this

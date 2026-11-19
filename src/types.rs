@@ -254,6 +254,55 @@ pub struct PolicyConfig {
     pub protocol_calls_per_window: u32,
 }
 
+impl PolicyConfig {
+    /// Whether the global per-transaction cap is enforced.
+    ///
+    /// `per_tx_cap == 0` is the **disabled** sentinel: no per-call ceiling applies.
+    /// A positive value is the maximum a single asset-transfer call may move.
+    ///
+    /// This method and its siblings below are the normative definition of the
+    /// `0 = disabled` convention (SPEC §3). The decision engine, `status()`, and
+    /// policy validation read the convention only through them, so an off-chain
+    /// reimplementation (SDK, dashboard) should match them instead of comparing the
+    /// raw field.
+    #[must_use]
+    pub const fn per_tx_cap_enabled(&self) -> bool {
+        self.per_tx_cap > 0
+    }
+
+    /// Whether the global rolling-window spend cap is enforced.
+    ///
+    /// `window_cap == 0` **disables** the rolling spend cap. Per-recipient override
+    /// caps in `recipient_window_caps` are independent of this flag: they are
+    /// enabled by a positive `RecipientCap::cap` and are never disabled by a zero
+    /// global cap. See SPEC §3 for the normative `0 = disabled` statement.
+    #[must_use]
+    pub const fn window_cap_enabled(&self) -> bool {
+        self.window_cap > 0
+    }
+
+    /// Whether the dead-man switch is armed.
+    ///
+    /// `dms_grace_secs == 0` **disables** the switch: no heartbeat deadline is
+    /// evaluated and `status()` reports no `heartbeat_expires_at`. A positive value
+    /// is the grace period after the last heartbeat before the account freezes.
+    /// See SPEC §3 for the normative `0 = disabled` statement.
+    #[must_use]
+    pub const fn dms_enabled(&self) -> bool {
+        self.dms_grace_secs > 0
+    }
+
+    /// Whether the protocol-call rate limit is enforced.
+    ///
+    /// `protocol_calls_per_window == 0` **disables** the limit (protocol calls are
+    /// still allowlist-checked). A positive value caps protocol calls per rolling
+    /// window. See SPEC §3 for the normative `0 = disabled` statement.
+    #[must_use]
+    pub const fn protocol_calls_enabled(&self) -> bool {
+        self.protocol_calls_per_window > 0
+    }
+}
+
 /// Manual `Debug` implementation for `PolicyConfig` with stable field order.
 ///
 /// Field order is the declaration order (as of SPEC §3 table) and must not be
