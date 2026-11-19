@@ -4674,13 +4674,15 @@ fn paused_policy_blocks_host_routed_transfer_without_spending_window() {
     policy.paused = true;
     policy.window_cap = 10;
     h.install_policy(&policy);
+    let window_before = h.stored_window();
 
     let recv = h.recv.clone();
     let blocked_log = h.transfer_blocked_reason(&recv, 5);
     assert!(blocked_log.contains(GuardError::Paused.reason()));
-    assert!(
-        h.stored_window().is_none(),
-        "a paused denial must not create or consume rolling-window state"
+    assert_eq!(
+        h.stored_window(),
+        window_before,
+        "a paused denial must not change rolling-window state"
     );
     assert_eq!(h.status().window_remaining, Some(10));
 
