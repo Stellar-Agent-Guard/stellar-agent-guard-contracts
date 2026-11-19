@@ -33,6 +33,7 @@
 pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 pub fn set_policy(env: Env, config: PolicyConfig)
 pub fn reset_window(env: Env)
+pub fn increase_window_cap(env: Env, new_cap: i128)
 pub fn pause(env: Env)
 pub fn resume(env: Env)
 pub fn revoke_policy(env: Env)
