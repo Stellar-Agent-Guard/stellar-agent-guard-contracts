@@ -725,6 +725,47 @@ mod policy_engine_type {
     #[contract]
     pub struct PolicyEngine;
 
+    fn status_snapshot(env: &Env, as_of: u64) -> Status {
+        let policy = persist_get::<PolicyConfig>(env, &DataKey::Policy);
+        let policy_revision = persist_get::<u64>(env, &DataKey::PolicyRevision).unwrap_or(0);
+        let admin_frozen = persist_get::<bool>(env, &DataKey::AdminFrozen).unwrap_or(false);
+        let last_heartbeat = persist_get::<u64>(env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let (paused, window_remaining, outside_active_window, dms_grace_secs) = match &policy {
+            None => (false, None, false, 0),
+            Some(cfg) => {
+                let (mut ledger, _) = load_window(env);
+                if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
+                    ledger.prune(as_of, cfg.window_secs);
+                }
+                (
+                    cfg.paused,
+                    engine::global_window_remaining(cfg, &ledger),
+                    (cfg.active_from != 0 && as_of < cfg.active_from)
+                        || (cfg.active_until != 0 && as_of > cfg.active_until),
+                    cfg.dms_grace_secs,
+                )
+            }
+        };
+        let heartbeat_expires_at = (dms_grace_secs > 0 && last_heartbeat != 0)
+            .then(|| last_heartbeat.saturating_add(dms_grace_secs));
+
+        Status {
+            has_policy: policy.is_some(),
+            policy_revision,
+            admin_frozen,
+            heartbeat_expired: dms_grace_secs > 0
+                && last_heartbeat != 0
+                && as_of.saturating_sub(last_heartbeat) > dms_grace_secs,
+            dms_grace_secs,
+            heartbeat_expires_at,
+            last_heartbeat,
+            now: as_of,
+            paused,
+            window_remaining,
+            outside_active_window,
+        }
+    }
+
     #[contractimpl]
     #[allow(clippy::needless_pass_by_value)] // contract ABI requires owned args
     impl PolicyEngine {
@@ -1086,44 +1127,24 @@ mod policy_engine_type {
         ///   headroom is recipient-targeted; use `check_detailed` for that.
         /// - `outside_active_window` evaluates the same bounds the §4 gate uses
         ///   (`false` with no policy or an unrestricted window).
+        /// - `dms_grace_secs` reports the configured grace (zero when disabled),
+        ///   and `heartbeat_expires_at` is the recorded heartbeat plus that grace
+        ///   when both are nonzero.
         #[allow(clippy::must_use_candidate)] // public read surface
         pub fn status(env: Env) -> Status {
-            let policy = persist_get::<PolicyConfig>(&env, &DataKey::Policy);
-            let policy_revision = persist_get::<u64>(&env, &DataKey::PolicyRevision).unwrap_or(0);
-            let admin_frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
-            let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
-            let now = env.ledger().timestamp();
-            let (paused, window_remaining, outside_active_window, grace) = match &policy {
-                None => (false, None, false, 0),
-                Some(cfg) => {
-                    // Prune a local copy of the ledger so remaining headroom never
-                    // counts expired entries. No storage write: this is a read.
-                    let (mut ledger, _) = load_window(&env);
-                    if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
-                        ledger.prune(now, cfg.window_secs);
-                    }
-                    (
-                        cfg.paused,
-                        engine::global_window_remaining(cfg, &ledger),
-                        (cfg.active_from != 0 && now < cfg.active_from)
-                            || (cfg.active_until != 0 && now > cfg.active_until),
-                        cfg.dms_grace_secs,
-                    )
-                }
-            };
-            Status {
-                has_policy: policy.is_some(),
-                policy_revision,
-                admin_frozen,
-                heartbeat_expired: grace > 0
-                    && last_heartbeat != 0
-                    && now.saturating_sub(last_heartbeat) > grace,
-                last_heartbeat,
-                now,
-                paused,
-                window_remaining,
-                outside_active_window,
-            }
+            status_snapshot(&env, env.ledger().timestamp())
+        }
+
+        /// Evaluates the operational snapshot at a caller-supplied unix timestamp.
+        /// This additive read preserves the existing `status()` signature while
+        /// allowing clients to project the heartbeat and active-window gates.
+        ///
+        /// `heartbeat_expired` follows the enforcement boundary: it becomes true
+        /// strictly after `last_heartbeat + dms_grace_secs`. The expiry timestamp
+        /// is `None` when grace is disabled or no heartbeat has been recorded.
+        #[allow(clippy::must_use_candidate)] // public read surface
+        pub fn status_at(env: Env, as_of: u64) -> Status {
+            status_snapshot(&env, as_of)
         }
 
         /// Preflight / simulate a transfer (`check`): permissionless pre-flight

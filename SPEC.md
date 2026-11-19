@@ -1047,6 +1047,7 @@ pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
 pub fn status(env: Env) -> Status                     // operational snapshot (see Status block below):
                                                       // paused / window_remaining / outside_active_window
                                                       // / admin_frozen / heartbeat_expired / revision
+pub fn status_at(env: Env, as_of: u64) -> Status      // same snapshot projected at a supplied unix timestamp
 pub fn dms_health(env: Env) -> DmsHealth                  // ok, warn (>=80%), or expired
 pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
     // Dry-run §8 validation over the *candidate* `config` (issue #35):
@@ -1091,7 +1092,9 @@ pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
                    pub last_heartbeat: u64, pub now: u64, pub has_policy: bool,
                    pub policy_revision: u64,
                    pub paused: bool, pub window_remaining: Option<i128>,
-                   pub outside_active_window: bool }
+                   pub outside_active_window: bool,
+                   pub dms_grace_secs: u64,
+                   pub heartbeat_expires_at: Option<u64> }
 // Operational fields (additive; SDK/dashboard decoders must tolerate new keys):
 // - paused: the installed policy's admin kill switch (§3 `PolicyConfig.paused`);
 //   false when no policy is installed (default-deny has nothing to pause).
@@ -1104,6 +1107,14 @@ pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
 // - outside_active_window: whether `now` sits outside the policy's active
 //   window (`active_from`/`active_until`, both bounds inclusive; §4 account
 //   gate) — false with no policy or an unrestricted window (either bound 0).
+// - dms_grace_secs: configured dead-man grace in seconds; zero when disabled.
+// - heartbeat_expires_at: last_heartbeat + dms_grace_secs, or None when grace
+//   is disabled or no heartbeat has been recorded. Enforcement marks the
+//   heartbeat expired strictly after this timestamp.
+
+// `status_at(env, as_of)` evaluates `heartbeat_expired`, `now`,
+// `outside_active_window`, and window headroom using `as_of`; it does not
+// change the existing `status()` signature or mutate spend accounting.
 
 #[contracttype]
 pub enum DmsHealthStatus { Ok, Warn, Expired }

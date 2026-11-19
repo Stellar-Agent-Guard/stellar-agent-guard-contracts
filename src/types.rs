@@ -307,7 +307,8 @@ pub struct Status {
     pub heartbeat_expired: bool,
     /// Unix timestamp of the last heartbeat, or zero if none.
     pub last_heartbeat: u64,
-    /// Ledger unix timestamp used for this snapshot.
+    /// Timestamp used for this snapshot: ledger time for `status()`, or the
+    /// caller-supplied time for `status_at()`.
     pub now: u64,
     /// The installed policy's admin kill switch (`cfg.paused`). `false` when
     /// no policy is installed (default-deny has nothing to pause).
@@ -323,6 +324,11 @@ pub struct Status {
     /// `outside_active_window`). `false` when no policy is installed or the
     /// window is unrestricted (either bound 0).
     pub outside_active_window: bool,
+    /// Configured dead-man switch grace in seconds, or zero when disabled.
+    pub dms_grace_secs: u64,
+    /// Unix timestamp when the last heartbeat's grace period elapses.
+    /// `None` when the dead-man switch is disabled or no heartbeat is recorded.
+    pub heartbeat_expires_at: Option<u64>,
 }
 
 /// Permissionless policy decision returned by `check`.
