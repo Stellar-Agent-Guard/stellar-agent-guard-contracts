@@ -46,6 +46,7 @@ pub fn freeze(env: Env)
 pub fn refresh_deadman(env: Env)
 pub fn unfreeze(env: Env)
 pub fn policy(env: Env) -> Option<PolicyConfig>
+pub fn policy_version(env: Env) -> u32
 pub fn policy_hash(env: Env) -> BytesN<32>
 pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
 pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus
@@ -157,6 +158,7 @@ enum DataKey
   Admin
   PendingAdmin
   AgentPubkey
+  PolicyVersion
   Policy
   Window
   LastHeartbeat

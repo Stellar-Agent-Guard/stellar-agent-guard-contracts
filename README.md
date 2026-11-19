@@ -112,7 +112,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 246 tests, isolated (no network)
+cargo test                                      # 250 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -137,8 +137,10 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 ```
 One-time setup, `require_auth(admin)`. Stores the policy `admin` and the agent's Ed25519
 public key (32 bytes) in instance storage, and initializes `AdminFrozen = false`,
-`LastHeartbeat = 0`. Until `set_policy` runs, the account is **default-deny** — every
-authorization is rejected with `not_initialized`/`no_policy`.
+`LastHeartbeat = 0`. It also records the policy-model format version
+(`PolicyVersion`, readable via [`policy_version`](#policy_version-read)), so tooling can tell
+which `PolicyConfig` model this deployment implements. Until `set_policy` runs, the account is
+**default-deny** — every authorization is rejected with `not_initialized`/`no_policy`.
 
 Called twice, it fails with `AlreadyInitialized` — verified live:
 ```bash
@@ -450,6 +452,20 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 #    "recipients":["GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"],
 #    "window_cap":"150","window_secs":60}
 ```
+
+### `policy_version` (read)
+```rust
+pub fn policy_version(env: Env) -> u32
+```
+No auth. Returns the policy-model format version recorded in instance storage at `initialize`
+(`1` for this release), or `0` before initialization — a value that is never a valid format
+version, so the read never traps. The value is written once and never changed by `set_policy`,
+`revoke_policy`, `pause`/`resume`, or key rotation: those change policy *content*, not the
+*model*. A future change to `PolicyConfig`'s shape or meaning — additive fields included —
+bumps it, so an indexer can distinguish an upgraded deployment from the one it replaced and
+a migration runbook can assert the starting state. SDKs should refuse to construct a policy
+for a version they do not know. The version policy is recorded in
+[SPEC §7.4](SPEC.md#74-policy-format-version--migration-hook-issue-339).
 
 ### `policy_hash` (read) — cheap drift detection
 ```rust
@@ -1013,7 +1029,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-246 tests (unit + integration) cover the policy decision engine — including the regression
+250 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement

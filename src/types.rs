@@ -4,6 +4,24 @@
 
 use soroban_sdk::{contracterror, contracttype, Address, Bytes, Env, Symbol, Vec};
 
+/// The policy-model format version this contract implements (issue #339).
+///
+/// Recorded in instance storage at `initialize` and surfaced by the
+/// `policy_version()` read, so an operator, indexer, or SDK can tell which
+/// `PolicyConfig` wire model a deployed guard was built against. Bumping this
+/// constant is a deliberate, reviewed act: it must change whenever the shape
+/// or meaning of `PolicyConfig` changes (additive fields included — an older
+/// consumer cannot know a new field exists), never for a pure implementation
+/// change, and never by reusing a value.
+///
+/// Version policy: the value is a single monotonic integer. An additive-only
+/// change increments it by one and remains compatible with older consumers
+/// (which must still refuse a version they do not know); a breaking change
+/// increments it by one **and** ships as a new contract release with a
+/// documented migration. `0` is never a valid format version — the read
+/// returns it only before `initialize`.
+pub const POLICY_FORMAT_VERSION: u32 = 1;
+
 /// Warning threshold percentage for dead-man switch health evaluation (80%).
 pub const DMS_WARN_THRESHOLD_PERCENT: u64 = 80;
 
@@ -570,6 +588,9 @@ pub enum DataKey {
     PendingAdmin,
     /// Instance: the registered agent's Ed25519 public key (32 bytes).
     AgentPubkey,
+    /// Instance: the policy-model format version recorded at `initialize`
+    /// (`POLICY_FORMAT_VERSION`, issue #339); absent before initialization.
+    PolicyVersion,
     /// Persistent: current policy (`None` = default-deny).
     Policy,
     /// Persistent: rolling spend ledger for asset transfers.
@@ -874,7 +895,8 @@ mod tests {
             DataKey::Initialized
             | DataKey::Admin
             | DataKey::PendingAdmin
-            | DataKey::AgentPubkey => "instance",
+            | DataKey::AgentPubkey
+            | DataKey::PolicyVersion => "instance",
             DataKey::Policy
             | DataKey::Window
             | DataKey::LastHeartbeat
@@ -884,12 +906,13 @@ mod tests {
         }
     }
 
-    fn every_data_key() -> [DataKey; 10] {
+    fn every_data_key() -> [DataKey; 11] {
         [
             DataKey::Initialized,
             DataKey::Admin,
             DataKey::PendingAdmin,
             DataKey::AgentPubkey,
+            DataKey::PolicyVersion,
             DataKey::Policy,
             DataKey::Window,
             DataKey::LastHeartbeat,
