@@ -63,14 +63,15 @@ in the [migration guide](docs/operations/migration-guide.md).)
 This is the mechanism the rest of the Soroban spend-guard ecosystem is converging on,
 not a niche choice:
 
-- [SpendGuard](https://github.com/deegalabs/stellar-402-spendguard) ("the spending-policy
-  contract that was missing for x402 agents on Stellar") and
-  [stellarspend-contracts](https://github.com/stellarspend/stellarspend-contracts)
-  (automated budgets / spending limits) enforce limits around specific apps and payment
-  rails, not at account-authorization time.
+- [SpendGuard](https://github.com/deegalabs/stellar-402-spendguard) — "the spending-policy
+  contract that was missing for x402 agents on Stellar" — enforces limits around a specific
+  payment rail, not at account-authorization time. *(as of 2026-11-19)*
+- [stellarspend-contracts](https://github.com/stellarspend/stellarspend-contracts) —
+  automated budgets / spending limits — likewise enforces limits around specific apps, not
+  at account-authorization time. *(as of 2026-11-19)*
 - [AgentGuard](https://github.com/Cowrie-Labs/agentguard) is a policy contract agents
   call into — a guard the agent must choose to route through, rather than the host
-  intercepting every authorization.
+  intercepting every authorization. *(as of 2026-11-19)*
 - [Watchdog](https://github.com/leticarolina/watchdog) holds funds in a vault contract
   the agent never directly owns — custodial by design, with a one-time deposit step.
   Its own README names the smart-account model as the unbuilt future direction:
@@ -78,6 +79,13 @@ not a niche choice:
   > custom Soroban account contract (`__check_auth`), so the wallet itself won't sign a
   > transaction unless Watchdog's rules pass, no deposit step required, funds never leave
   > the agent's own custody."
+  >
+  > — Watchdog README, quoted as of 2026-11-19.
+
+All links in this comparison were checked on 2026-11-19: every cited repository and this
+repo's GitBook site resolved (HTTP 200). Comparative statements reflect each project's
+public documentation as of that date, and are not endorsements; later changes to those
+projects are not tracked here.
 
 Stellar Agent Guard **is** that model, built and proven: `__check_auth` enforcement,
 non-custodial, no proxy wrappers, tested end-to-end on testnet.
@@ -135,6 +143,8 @@ process.
 ## Enforcement scope — read this before relying on the caps
 
 Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces window and pause state, but per-call amount/recipient limits are not yet enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered — full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing). Elaborated with tables in [docs/enforcement-scope.md](docs/enforcement-scope.md).
+
+**Protocol allowlist entries are whole-contract.** An allowlisted protocol may request any nested authorization from the account, and `__check_auth` cannot attribute that nested call to the protocol that requested it (Soroban auth contexts carry the called contract/function, not the caller path). The guard still sees and evaluates every nested authorization independently — a nested SAC transfer is fully amount/recipient/window enforced — so a protocol can never obtain an authorization the agent could not have issued directly. It cannot, however, be granted a narrower scope than the whole contract: allowlist a protocol only if you trust its reachable call surface, not just the function you intend to use. Design answer: [SPEC §2.2](SPEC.md#22-per-call-scoping-of-a-protocol-entry-issue-344).
 
 ## Quick Start
 
@@ -563,6 +573,22 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 Note the deployed account now reads `heartbeat_expired: true` — the 60s DMS grace lapsed
 after the Phase-1 fixture runs, exactly as the design specifies: a silent account freezes
 itself with zero transactions.
+
+### `window_consumption` (read)
+```rust
+pub fn window_consumption(env: Env) -> WindowConsumption
+```
+No auth. Returns the live rolling-window consumption — `{ total, entries, oldest_expires_at }`
+— so an operator or dashboard can answer "how much of the allowance is left?" without a
+`check()` simulation ([issue #348](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/348)).
+The ledger is loaded and pruned at the current ledger timestamp, so `total` is the sum of
+non-expired global spend entries and `entries` counts those live entries (same-second spends
+coalesce, so it is an entry count, not a transaction count). `oldest_expires_at` is
+`oldest.ts + window_secs`, or `null` when the window is empty or `window_secs == 0`. With no
+policy installed the read returns `{"total":"0","entries":0,"oldest_expires_at":null}` —
+it never traps. Per-recipient override headroom stays recipient-targeted; use `check_detailed`
+for that. Like every persistent read, a submitted (non-simulated) call may extend TTLs and
+incur rent (SPEC §9.5).
 
 ### `check` — Preflight / simulate a transfer (read, permissionless)
 ```rust

@@ -42,7 +42,7 @@ pub use types::NO_POLICY_DIGEST;
 pub use types::POLICY_FORMAT_VERSION;
 pub use types::{
     AssetCap, BatchCheckResult, BatchTransfer, CheckDetail, Error, PolicyConfig, ProtocolRule,
-    RecipientCap, RecipientWindowState, ValidationOutcome,
+    RecipientCap, RecipientWindowState, ValidationOutcome, WindowConsumption,
 };
 use types::{
     CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_ASSET_CAP_ENTRIES,
@@ -1230,6 +1230,48 @@ mod policy_engine_type {
         #[allow(clippy::must_use_candidate)] // public read surface
         pub fn status_at(env: Env, as_of: u64) -> Status {
             status_snapshot(&env, as_of)
+        }
+
+        /// Rolling-window consumption (`window_consumption`): the live global
+        /// window total, the number of live entries, and when the oldest one
+        /// expires — without running a `check` simulation (issue #348).
+        ///
+        /// No auth and event-free, consistent with the other reads. The ledger
+        /// is loaded and lazily pruned at the current ledger timestamp, so
+        /// expired entries are never counted. `oldest_expires_at` is
+        /// `oldest.ts + window_secs` and is `None` when the window is empty or
+        /// `window_secs == 0` (a disabled rolling window never expires). With no
+        /// policy installed the read returns the defined empty value
+        /// `{ total: 0, entries: 0, oldest_expires_at: None }` — it never traps.
+        ///
+        /// Like every persistent read, a submitted (non-simulated) call may
+        /// refresh entry TTLs and incur rent (SPEC §9.5); simulation does not
+        /// persist those extensions.
+        #[allow(clippy::must_use_candidate)] // public read surface
+        pub fn window_consumption(env: Env) -> WindowConsumption {
+            let Some(policy) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                return WindowConsumption {
+                    total: 0,
+                    entries: 0,
+                    oldest_expires_at: None,
+                };
+            };
+            let now = env.ledger().timestamp();
+            let (mut ledger, _) = load_window(&env);
+            ledger.prune(now, policy.window_secs);
+            let oldest_expires_at = if policy.window_secs == 0 {
+                None
+            } else {
+                ledger
+                    .entries
+                    .get(0)
+                    .map(|entry| entry.ts.saturating_add(policy.window_secs))
+            };
+            WindowConsumption {
+                total: ledger.total,
+                entries: ledger.len(),
+                oldest_expires_at,
+            }
         }
 
         /// Preflight / simulate a transfer (`check`): permissionless pre-flight

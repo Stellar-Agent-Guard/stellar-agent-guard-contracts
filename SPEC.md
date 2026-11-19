@@ -191,6 +191,48 @@ protocol can spend invisibly". This strengthens, and does not widen, the §2 par
 work (protocol-specific parsers, declared-max, return-value commitments) remains open, and the
 v2 issue is referenced there rather than designed here.
 
+### 2.2 Per-call scoping of a protocol entry (issue #344)
+
+**The question.** Following §2.1: if an allowlisted protocol re-authorizes the account for a
+different sub-call, can a protocol rule be scoped to "only calls made by this contract in this
+function", shrinking the §2 gap that a protocol entry is necessarily whole-contract?
+
+**The answer (recorded finding): the sub-call is visible and enforced, but it cannot be
+attributed to the protocol that requested it — so per-call scoping of a protocol entry is not
+implementable from `auth_contexts`.** `ContractContext` carries the called contract, function
+name, and args, but no parent or path identity. `__check_auth` receives the flattened invocation
+tree in order, not parent pointers, and the client controls the transaction's declared
+invocation tree: the same nested call can be submitted as a root or under a different parent.
+Order is a hint, not an authorization fact, so a rule that matched on "the previous context"
+could be reordered past. The guard can therefore scope a rule to the *sub-call itself*
+(contract/function, whose SAC-transfer args are fully enforced), but cannot express "this
+sub-call was requested by that protocol".
+
+**What a decision shape would require.** Not a policy-schema change but a host change: the
+authorization context (or the `__check_auth` call) would have to expose a non-spoofable parent
+invocation / path index (e.g. `parent: Option<u32>` or a `sub_invocation_path`). Only then could
+`ProtocolRule` gain e.g. `scope: ProtocolScope { Any, CalledBy { parent: Address, fns: ... } }`
+and the engine match the nested context against its parent entry. That is a Soroban/CAP-level
+capability, not something this contract can add by parsing `args`; v1 does not attempt it.
+
+**What adding it later would break.** A `scope` field on `ProtocolRule` is a `PolicyConfig`
+wire-format change, so `POLICY_FORMAT_VERSION` (§7.4) must bump and SDKs must refuse to build a
+policy for a version they do not know. The SDK reason vocabulary and the frozen §7.1 error
+table need a new *appended* code/reason (e.g. `ProtocolScopeViolation`) — appended, never
+inserted. `auth_checked` events would need the parent context (e.g. `parent_index`) as an
+additive data field, which every decoder must tolerate. Default-deny classification
+(§6.3/§6.4) would need a rule for a nested context whose claimed parent is not itself
+allowlisted, and §8 validation would need a rule that `CalledBy` names a protocol entry in the
+same policy.
+
+**Residual trust assumption (the wording the README's enforcement-scope section uses).** A
+protocol allowlist entry is whole-contract: an allowlisted protocol may request any nested
+authorization from the account. The guard still sees and evaluates every nested authorization
+independently — a nested SAC transfer is fully amount/recipient/window enforced — so a protocol
+can never obtain an authorization the agent could not have issued directly. It cannot, however,
+receive a narrower grant than the whole contract, and an operator should allowlist a protocol
+only if they trust its reachable call surface, not just the function they intend to use.
+
 ---
 
 ## 3. Storage model
@@ -1233,6 +1275,9 @@ pub fn status(env: Env) -> Status                     // operational snapshot (s
                                                       // paused / window_remaining / outside_active_window
                                                       // / admin_frozen / heartbeat_expired / revision
 pub fn status_at(env: Env, as_of: u64) -> Status      // same snapshot projected at a supplied unix timestamp
+pub fn window_consumption(env: Env) -> WindowConsumption
+                                                      // live rolling-window total, entry count,
+                                                      // and oldest-entry expiry (issue #348)
 pub fn dms_health(env: Env) -> DmsHealth                  // ok, warn (>=80%), or expired
 pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
     // Dry-run §8 validation over the *candidate* `config` (issue #35):
@@ -1302,6 +1347,13 @@ pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
 // change the existing `status()` signature or mutate spend accounting.
 
 #[contracttype]
+pub struct WindowConsumption {
+    pub total: i128,                      // live (pruned) global rolling total
+    pub entries: u32,                     // number of live global spend entries
+    pub oldest_expires_at: Option<u64>,   // oldest.ts + window_secs; None if empty or window_secs == 0
+}
+
+#[contracttype]
 pub enum DmsHealthStatus { Ok, Warn, Expired }
 
 #[contracttype]
@@ -1357,6 +1409,19 @@ pub enum Error {            // values stable; see tests/fixtures
     TooManyAuthContexts = 33,
 }
 ```
+
+`window_consumption()` (issue #348) exposes the live rolling window without a
+`check()` simulation: the ledger is loaded and lazily pruned at the current
+ledger timestamp, so `total` is the sum of non-expired global spend entries and
+`entries` counts those live entries (same-second spends coalesce, so it is an
+entry count, not a transaction count). `oldest_expires_at` is
+`oldest.ts + window_secs`, or `None` when the ledger is empty or `window_secs == 0`
+(a disabled rolling window never expires). The read is auth-free and event-free
+like the rest of this block, returns the defined empty value
+`{ total: 0, entries: 0, oldest_expires_at: None }` when no policy is installed,
+and does not change spend accounting. Per-recipient override headroom and
+protocol-call counters are not projected; use `check_detailed` for
+recipient-targeted headroom.
 
 `check_detailed` loads and prunes only an in-memory copy of the rolling ledger;
 it does not change spend accounting. A submitted invocation may refresh persistent
