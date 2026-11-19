@@ -430,8 +430,52 @@ SPEC.md              # Architecture specification (mechanism is settled)
 
 Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the
 [issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues);
-each carries one `complexity: trivial|small|medium|large` label. Good first
-tasks for the Drips Stellar Wave contributor sprints.
+each carries exactly one `complexity: trivial|small|medium|large` label. Good
+first tasks for the Drips Stellar Wave contributor sprints.
+
+### Complexity labels
+
+Complexity describes the **implementation and review burden** of an issue, not
+the number of lines in its diff. A ten-line change to the authorization path can
+be more demanding than a 300-line documentation edit, because it needs deeper
+reasoning, more tests, and a more careful reviewer. When self-selecting work,
+weigh both expected effort **and** the risk of getting it wrong.
+
+| Label | Expected effort | Scope and risk |
+|---|---|---|
+| `complexity:trivial` | ≤ 0.5 day | Very small, isolated changes with minimal risk |
+| `complexity:small` | Approximately 1 day | Limited changes with straightforward validation |
+| `complexity:medium` | 2–3 days | Multiple files or components requiring meaningful testing and review |
+| `complexity:large` | Multi-day | Broad, risky, architectural, or security-sensitive changes |
+
+What the labels mean in practice:
+
+- **`complexity:trivial`** — a typo, a broken link, a narrow script fix, or a
+  documentation clarification. One area of the repository, no behavior change,
+  and a reviewer can verify it by reading the diff. Example: #116 (document
+  this complexity taxonomy).
+- **`complexity:small`** — a contained change with an obvious test story, such
+  as moving documented configuration into standalone files or tightening one
+  CI message. You touch a few files, but no enforcement semantics move.
+  Example: #150 (extract the policy presets into loadable JSON files).
+- **`complexity:medium`** — several files or components, a new CI gate, or a
+  change that needs fixtures plus reviewer judgment about edge cases. Example:
+  #68 (WASM size budget) and #128 (version-aware fixture reason vocabulary).
+- **`complexity:large`** — broad or security-sensitive work: changes to
+  `__check_auth`, the decision table, policy semantics, signature handling, or
+  cross-cutting release/reproducibility guarantees. It needs design review,
+  adversarial tests, and often SPEC updates. Examples: the reproducible-build
+  ratchet (#67) and policy-window semantics changes such as #289.
+
+Rules of thumb for self-selection:
+
+- If you cannot yet explain how the change will be verified, treat it as one
+  level harder than it first looks.
+- If the issue touches fund movement, authorization, or policy validation, the
+  risk level — not the diff size — decides the label.
+- If you are unsure between two labels, pick the smaller one and ask in the
+  issue; maintainers can widen the scope, but an underestimated `large` task is
+  hard to finish well.
 
 ## Dependency drift check
 
