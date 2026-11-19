@@ -9,7 +9,7 @@ use crate::{PolicyEngine, PolicyEngineClient};
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use soroban_sdk::auth::{Context, CustomAccountInterface};
-use soroban_sdk::testutils::{Events as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{
     self, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs, Limited, Limits,
     ScBytes, ScSymbol, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
@@ -709,4 +709,97 @@ fn window_cap_increased_event_carries_caps_and_revision() {
     assert_eq!(map_i128_field(cap_event, "old_cap"), 500);
     assert_eq!(map_i128_field(cap_event, "new_cap"), 750);
     assert_eq!(map_u64_field(cap_event, "revision"), 2);
+}
+
+/// Every event named `name` in the current invocation's log (SPEC §9 topic 0).
+fn events_named(env: &Env, name: &str) -> std::vec::Vec<xdr::ContractEvent> {
+    let want = event_name(name);
+    env.events()
+        .all()
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(
+                &e.body,
+                xdr::ContractEventBody::V0(v0) if v0.topics.first() == Some(&want)
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+/// Issue #351 decision: an empty `recipients` list with `allow_any_recipient`
+/// false is **accepted** (the paused watch-only baseline is this exact shape),
+/// and `set_policy` makes the inert state loud with one dedicated
+/// `event_policy_no_recipient` carrying `by` + `revision`. The escape
+/// hatch and the symmetric empty-`assets` case are not flagged.
+#[test]
+fn inert_recipient_policy_emits_one_warning_event() {
+    let mut h = EventAuditHarness::new();
+    let inert = PolicyConfig {
+        per_tx_cap: 0,
+        window_secs: 86_400,
+        window_cap: 0,
+        assets: vec![&h.env],
+        protocols: vec![&h.env],
+        recipients: vec![&h.env],
+        recipient_window_caps: vec![&h.env],
+        blocked_recipients: vec![&h.env],
+        asset_caps: vec![&h.env],
+        allow_any_recipient: false,
+        active_from: 0,
+        active_until: 0,
+        paused: false,
+        dms_grace_secs: 0,
+        protocol_calls_per_window: 0,
+    };
+
+    // 1. Empty allowlist, hatch off: accepted, and the warning is emitted.
+    h.set_policy(&inert);
+    let warnings = events_named(&h.env, "event_policy_no_recipient");
+    assert_eq!(
+        warnings.len(),
+        1,
+        "installing an inert-recipient policy must emit exactly one warning"
+    );
+    let event = &warnings[0];
+    let xdr::ContractEventBody::V0(v0) = &event.body;
+    assert_eq!(
+        v0.topics.len(),
+        1,
+        "event_policy_no_recipient must carry exactly 1 topic"
+    );
+    let ScVal::Map(Some(map)) = &v0.data else {
+        panic!("event_policy_no_recipient data must be a Map");
+    };
+    assert_eq!(map.0.len(), 2, "the warning carries by + revision");
+    assert_eq!(map.0[0].key, event_name("by"));
+    assert_eq!(map.0[1].key, event_name("revision"));
+    assert_eq!(
+        map_u64_field(event, "revision"),
+        1,
+        "the warning joins to the generation set_policy produced"
+    );
+
+    // 2. Empty allowlist with the escape hatch on: recipients are not required,
+    //    so the policy is not inert and nothing is warned about.
+    let mut hatch = inert.clone();
+    hatch.allow_any_recipient = true;
+    h.set_policy(&hatch);
+    assert!(
+        events_named(&h.env, "event_policy_no_recipient").is_empty(),
+        "allow_any_recipient admits any destination; no warning is warranted"
+    );
+
+    // 3. Symmetric scenario: empty `assets` is inert for SAC transfers too
+    //    (every transfer classifies as UnknownContract), but it is a different
+    //    documented shape (SPEC §8) and is deliberately not flagged here.
+    let mut no_assets = inert.clone();
+    no_assets.assets = vec![&h.env];
+    no_assets.recipients = vec![&h.env, Address::generate(&h.env)];
+    h.set_policy(&no_assets);
+    assert!(
+        events_named(&h.env, "event_policy_no_recipient").is_empty(),
+        "empty assets is the symmetric inert case, not the no-recipient warning"
+    );
 }
