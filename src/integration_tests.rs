@@ -6632,8 +6632,8 @@ fn increase_window_cap_preserves_total_and_blocks_at_new_cap() {
     h.increase_window_cap(150);
 
     assert_eq!(event_count(&h.env, "event_window_cap_increased"), 1);
-    let rev = last_event_revision(&h.env, "event_window_cap_increased");
-    assert_eq!(rev, 2);
+    let event_revision = last_event_revision(&h.env, "event_window_cap_increased");
+    assert_eq!(event_revision, 2);
     let client = PolicyEngineClient::new(&h.env, &h.guard);
     assert_eq!(client.policy().unwrap().window_cap, 150);
     assert_ne!(client.policy_hash(), hash_before);
