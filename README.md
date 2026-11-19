@@ -1083,6 +1083,7 @@ block a contributor can copy (see also
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings   # -D warnings makes the Cargo.toml lint groups a gate
 cargo test
+cargo test --release                                         # same suite under [profile.release] (issue #121)
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo build --release --target wasm32v1-none
 scripts/verify-readme.sh
@@ -1094,11 +1095,23 @@ cargo test --manifest-path tools/agent-tx/Cargo.toml
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
 
+The suite runs twice on purpose: `cargo test` in the dev profile and
+`cargo test --release` in the release profile. The contract ships as
+`--release` wasm, and release codegen is not debug codegen — optimizations change
+panic paths, and release builds do not check arithmetic overflow by default.
+This crate keeps `overflow-checks = true` in `[profile.release]` and
+`cargo test --release` compiles the test binaries with those exact settings
+(`opt-level = "z"`, LTO, `panic = "abort"`, `overflow-checks = true`), so the
+behaviour that is tested and the behaviour that is shipped are the same. The
+second run costs about 2 seconds on a warm `target` cache; a cold cache adds
+roughly two minutes of dependency compilation once (issue #121).
+
 Every push runs these gates on GitHub Actions (`.github/workflows/ci.yml`, job `ci`):
-format → unwrap/expect guard → clippy (`-D warnings`) → unit + integration tests →
-public-API docs (`-D warnings`) → contract wasm build → README claim audit → docs link
-check → `agent-tx` format, clippy, tests, and build. The unwrap/expect guard is a grep
-over the enforcement sources and has no separate local command.
+format → unwrap/expect guard → clippy (`-D warnings`) → unit + integration tests
+(dev and release profiles) → public-API docs (`-D warnings`) → contract wasm build →
+README claim audit → docs link check → `agent-tx` format, clippy, tests, and build.
+The unwrap/expect guard is a grep over the enforcement sources and has no separate
+local command.
 
 A second job, `msrv`, reads `rust-version` from `Cargo.toml`
 (currently `1.91.0`), installs that release with the `wasm32v1-none` target, and runs

@@ -83,6 +83,17 @@ jobs:
       - name: Unit + integration tests
         run: cargo test
 
+      # Issue #121: the artifact that ships is `--release` wasm, so the suite has
+      # to pass under release codegen too, not only under the dev profile.
+      # `cargo test --release` compiles the test binaries with the
+      # `[profile.release]` settings (`opt-level = "z"`, LTO, `panic = "abort"`,
+      # `overflow-checks = true`), so arithmetic and panic-path behaviour match
+      # the shipped build. Cost is small next to the gates around it: ~2s of test
+      # execution on a warm `target` cache (~2min once, when the release
+      # dependency graph compiles cold), and the cargo cache above is shared.
+      - name: Unit + integration tests (release profile)
+        run: cargo test --release
+
       - name: Public API documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
