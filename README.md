@@ -450,17 +450,37 @@ the XDR bytes of the same policy value your SDK builds for `set_policy`.
 ### `status` (read)
 ```rust
 pub fn status(env: Env) -> Status
+pub fn status_at(env: Env, as_of: u64) -> Status
 ```
 No auth. Returns `{ has_policy, admin_frozen, heartbeat_expired, last_heartbeat, now }` plus
 the additive operational fields `paused` (the policy's kill switch; `false` with no policy),
 `window_remaining` (global `window_cap - spent` on the pruned ledger; `null` when the global
 cap is disabled — mirrors `check_detailed`'s `remaining_window` for recipients without an
 override), and `outside_active_window` (`now` outside the policy's `active_from`/`active_until`
-bounds, both inclusive; `false` with no policy or an unrestricted window). After
+bounds, both inclusive; `false` with no policy or an unrestricted window), `dms_grace_secs`,
+and `heartbeat_expires_at` (`last_heartbeat + dms_grace_secs`, or `null` when DMS is disabled
+or no heartbeat is recorded). The new `status_at` read evaluates the same snapshot at the
+caller-supplied Unix timestamp without changing the existing `status()` signature. At the
+exact expiry timestamp, `heartbeat_expired` remains false; it becomes true strictly afterward,
+matching the enforcement gate. For example, with a heartbeat at `1000` and a 60-second grace,
+`status_at(1060)` reports `heartbeat_expires_at: 1060` and `heartbeat_expired: false`, while
+`status_at(1061)` reports `heartbeat_expired: true`. After
 `active_until` passes, even `heartbeat` is blocked (`outside_active_window`) and
 `unfreeze` cannot revive it — only an admin `set_policy` with a renewed window restores the
 account. When submitted on-ledger, this read may extend persistent-entry TTLs and incur rent;
 simulation does not persist those extensions (SPEC §9.5).
+
+For example, the projected snapshot at the exact 60-second boundary is:
+```json
+{
+  "dms_grace_secs": 60,
+  "heartbeat_expires_at": 1060,
+  "heartbeat_expired": false,
+  "last_heartbeat": 1000,
+  "now": 1060
+}
+```
+
 Verified live:
 ```bash
 # Live, testnet protocol 28, 2026-09-08: the fixture account's 60s DMS grace
