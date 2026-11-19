@@ -88,7 +88,9 @@ pub struct ContractContext {
 ```
 
 The host invokes `__check_auth` once per authorization the account must approve, supplying the
-contexts of the calls being authorized. `type Signature = BytesN<64>` (single registered agent
+contexts of the calls being authorized. `auth_contexts` is the flattened invocation tree for
+this account: a nested `require_auth` performed by an allowlisted protocol appears as its own
+context, in tree order — measured and pinned in §2.1 (issue #340). `type Signature = BytesN<64>` (single registered agent
 Ed25519 key; a `Vec` of keys / threshold signatures is a v2 item — see [Multi-Sig Threshold Models](docs/research/multi-sig-threshold-models.md)). Signature verification:
 `env.crypto().ed25519_verify(registered_pubkey, signature_payload (32B), presented_sig)`, then
 policy evaluation. CAP-71 delegation (`env.custom_account().get_delegated_signers()` /
@@ -145,6 +147,50 @@ the real host authorization path (`contract_creation_denied_through_real_host_pa
 
 **Research note (v2):** The decomposition of "fine-grained non-SAC enforcement" into honest sub-strategies (protocol-specific parsers, declared-max, return-value commitments) is documented in [Non-SAC Enforcement](docs/research/non-sac-enforcement.md). Count-based protocol call rate limiting (v1) is now implemented; opt-in protocol parsers remain a secondary track.
 
+### 2.1 Nested / sub-invocation authorizations (issue #340)
+
+**The question.** v1 evaluates the contexts it is given. The v2 fine-grained enforcement question
+(for non-SAC protocol calls) depended on whether a protocol's own nested `require_auth` on the
+account is delivered to `__check_auth` as a separate context, collapsed into the parent, or not
+surfaced at all. If nested authorizations were invisible, an allowlisted protocol could pull a
+further authorization from the account that the guard never evaluated — a materially sharper
+statement of this section's enforcement boundary.
+
+**The answer (recorded finding): nested authorizations are visible, not collapsed and not
+absent.** When an allowlisted protocol performs a nested `require_auth` on the guarded account,
+the nested call arrives in `auth_contexts` as its own entry, in invocation-tree order (parent
+first, then each nested call), and the guard classifies and evaluates it exactly like a top-level
+context. The host requires the nested call to be declared in the transaction's
+authorization tree (`SorobanAuthorizedInvocation.sub_invocations`); a nested authorization that
+is **not** declared fails host authorization rather than reaching the guard unexamined. So there
+is no path by which a protocol obtains an approval the guard did not evaluate.
+
+**Evidence (reproducible, not a one-off trace).** The committed host-routed tests
+`nested_authorization_is_delivered_as_a_separate_auth_context` and
+`nested_authorization_is_evaluated_against_policy` (`src/integration_tests.rs`) drive the real
+host authorization path: a `MockNestedRouter` protocol call is authorized as the root context and
+performs a nested SAC `transfer` from the same account, declared as a sub-invocation. The first
+test observes **two** separate `auth_checked` events (one per context — a collapsed or hidden
+context would produce one), and the second observes the guard rejecting the whole authorization
+with `recipient_not_allowed` when only the nested transfer violates the recipient allowlist. The
+experiment was run against `soroban-env-host` 27.0.1 (the host line pinned by the SDK, i.e. the
+same auth-assembly code testnet protocol 28 runs). It is pinned as a test rather than a one-off
+testnet transaction so CI re-checks it on every change; exercising it on a live network would
+require deploying a probe protocol and a custom-account auth entry for an account whose agent key
+is not held by this repository.
+
+**Consequence for the scope claim above — scope is unchanged, one reassurance is added.** v1
+still does not apply per-call amount/recipient limits to **non-SAC** calls (the arguments of an
+arbitrary protocol call are not a trustworthy description of value moved). But nesting is not a
+bypass for the limits it *does* enforce: a nested SAC `transfer` is classified as an asset
+transfer and is fully enforced (allowlists, caps, rolling window), as the second test demonstrates.
+A protocol that wants to move an allowlisted asset out of the account must therefore do so through
+a context the guard evaluates; the honest statement of the boundary is "amount/recipient
+enforcement is per SAC-transfer context, wherever that context appears in the tree", not "a
+protocol can spend invisibly". This strengthens, and does not widen, the §2 paragraph — the v2
+work (protocol-specific parsers, declared-max, return-value commitments) remains open, and the
+v2 issue is referenced there rather than designed here.
+
 ---
 
 ## 3. Storage model
@@ -158,6 +204,7 @@ TTL on every write; see §9.5).
 | `Admin` | `Address` | instance | policy admin; set once at `initialize`, rotated via §7.2 |
 | `PendingAdmin` | `Address` | instance | proposed admin awaiting `confirm_admin_rotation`; absent = no rotation pending |
 | `AgentPubkey` | `BytesN<32>` | instance | the agent's Ed25519 public key |
+| `PolicyVersion` | `u32` | instance | policy-model format version written at `initialize` (`POLICY_FORMAT_VERSION`, issue #339); absent before initialization. Read via `policy_version()` (never moved by `set_policy`, `revoke_policy`, or a pause) |
 | `Policy` | `PolicyConfig` | persistent | current policy (`None` = default-deny) |
 | `Window` | `WindowState` | persistent | rolling spend ledger for asset transfers (global + per-recipient) |
 | `LastHeartbeat` | `u64` | persistent | unix seconds of last agent heartbeat (0 = never) |
@@ -760,6 +807,57 @@ telemetry that distinguishes the two halves of an `unfreeze`. What each rejectio
 the operator's own interfaces — RPC diagnostics, Horizon, the CLI — is mapped in
 [docs/functions/check-auth.md](docs/functions/check-auth.md#what-an-operator-sees-when-this-rejects-issue-425).
 
+### 5.3 Clock basis for the grace — timestamp, not ledger sequence (issue #341)
+
+Rule #2 compares `dms_grace_secs` against `env.ledger().timestamp()`. Ledger **sequence** is the
+quantity the host orders by and contract code can forge neither, so this section records why the
+timestamp basis is kept, what each basis does under the failure modes that matter, and what a
+future switch would cost.
+
+| Condition | Timestamp basis (current) | Ledger-sequence basis (rejected) |
+|---|---|---|
+| **Missed close** (one or more ledgers skipped) | Close time advances to real time on the next close, so the grace can elapse across the gap: the account freezes even though the agent could not have submitted a heartbeat. Fail-closed. | Sequence does not advance across the gap, so the grace pauses. The account stays live through the outage. Fail-open. |
+| **Long close / slow cadence** | Grace is fixed in wall-clock time, independent of how often ledgers close. Predictable for operators. | A grace expressed in ledgers stretches in wall-clock terms when closes are slow; the same configured value means different real durations on different networks. |
+| **Network partition from the agent's perspective** (the network keeps closing; the agent cannot reach it) | Grace elapses and the account freezes. This is the intended meaning of silence. | Ledgers keep closing, so the grace also elapses. No practical difference. |
+| **Operator misconfiguration of the grace value** | Seconds are the policy model's native unit (`window_secs`, `active_from`/`active_until`), so a value is readable and comparable at a glance. `MAX_DMS_GRACE_SECS` rejects nonsense above ~10 years. | Requires cadence arithmetic (≈5 s/ledger). A small value is catastrophic in a way seconds are not: a dozen ledgers of grace freezes the account on a single missed close. The existing `MAX_DMS_GRACE_SECS` bound would also no longer be the right unit. |
+
+**Recorded decision: keep the timestamp basis.** Both bases fail under some condition; the choice
+is which way to fail. The dead-man switch exists to bound *silence*, and wall-clock silence is the
+threat model: a network outage in which the agent cannot transact is, for the account's users,
+indistinguishable from a dead agent, and freezing is the safe answer (the admin `unfreeze` path
+already exists and is documented in §5.1). A sequence basis would let downtime silently extend
+availability, which is the wrong default for a spend guard. The secondary reasons are structural:
+
+- **One clock in the policy model.** `window_secs`, `active_from`, `active_until`, `status()`'s
+  `now`/`last_heartbeat`/`heartbeat_expires_at`, `status_at(as_of)`, and the `heartbeat` event's
+  `expires_at` are all unix seconds. A sequence-based DMS would introduce a second clock and make
+  `status_at` unable to project the DMS gate without a new ledger-sequence parameter.
+- **Storage and events stay intelligible.** `LastHeartbeat` is a `u64` unix timestamp and the
+  heartbeat event records `at + dms_grace_secs` as a deadline. A sequence basis would change the
+  meaning of both fields, and a bare `u64` could no longer be interpreted without knowing which
+  basis wrote it.
+- **Validation remains in the same unit as the rest of the policy.** `dms_grace_secs` shares
+  `MAX_WINDOW_SECS`; a sequence basis would need a new bound and a new name.
+
+**If it ever changes, the migration cost is a format-version change, not a field edit.** A switch
+would add a distinct storage key (for example `LastHeartbeatLedger`) rather than reinterpreting
+`LastHeartbeat`, because an existing timestamp and a ledger sequence are both `u64` and
+indistinguishable; it would change the meaning of `PolicyConfig.dms_grace_secs` (a breaking
+semantic change, so `POLICY_FORMAT_VERSION` bumps per §7.4), the `heartbeat` event payload, the
+`status` fields, and every SDK/dashboard projection. Doing it in place without a version would
+silently reinterpret live state — the exact failure the §7.4 version exists to prevent. **This
+decision closes the clock-basis question for v1; it does not close the dead-man design.** The
+remaining dead-man items (multi-key liveness, heartbeat delegation, and richer telemetry) are
+unchanged and tracked separately.
+
+**Interaction with `window_secs` if the two bases diverge.** Today both use the same clock, so a
+heartbeat and a rolling-window prune agree on "now". If a future change moved only the DMS to
+ledger sequence, the two would advance independently: a slow-close period would age the spend
+window at a different rate than the DMS grace, and an account could be admissible for spending
+while its liveness clock says expired (or vice versa). Any such change must move both or
+explicitly document the split; this section records that keeping them on one clock is the
+reason the question is closed in favor of the timestamp.
+
 ---
 
 ## 6. Per-context classification and rule application
@@ -1018,7 +1116,8 @@ below.
 // ── Lifecycle ─────────────────────────────────────────────────────────────
 pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
     // require_auth(admin). Exactly once (AlreadyInitialized otherwise). Stores
-    // Admin and AgentPubkey; no policy yet -> account is default-deny until set_policy.
+    // Admin, AgentPubkey, and PolicyVersion = POLICY_FORMAT_VERSION (§7.4); no
+    // policy yet -> account is default-deny until set_policy.
 
 ### 7.1 Error code ↔ CheckResult variant ↔ reason symbol mapping
 
@@ -1128,6 +1227,8 @@ pub fn unfreeze(env: Env)    // require_auth(Admin); clears AdminFrozen, LastHea
 
 // ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ──
 pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
+pub fn policy_version(env: Env) -> u32                // policy-model format version (issue #339);
+                                                      // 0 before initialize, never traps
 pub fn status(env: Env) -> Status                     // operational snapshot (see Status block below):
                                                       // paused / window_remaining / outside_active_window
                                                       // / admin_frozen / heartbeat_expired / revision
@@ -1340,6 +1441,41 @@ exists to drift. Notes:
 - Out of scope: sibling repositories. The SDK/dashboard drift-check flow is tracked in its
   own repository.
 
+### 7.4 Policy format version — migration hook (issue #339)
+
+`policy_version()` returns the `POLICY_FORMAT_VERSION` constant recorded in instance storage at
+`initialize` (SPEC §3, `DataKey::PolicyVersion`). It is a pure read — no auth, no event, no
+write — and it reports `0` before initialization, a value that is never a valid format version.
+
+Why it exists: before this read, nothing on-chain recorded which `PolicyConfig` model a
+deployed guard implements. Two deployments built from different contract versions were
+indistinguishable to an operator or indexer unless it decoded every storage entry and inferred
+the shape. A single instance-storage write at `initialize` makes version-gated tooling possible
+at the cheapest possible cost: an SDK can refuse to construct a policy the deployed contract
+would reject, and a migration runbook can assert the starting state before touching it.
+
+**Version policy (recorded decision).** The format version is a **single monotonic integer**,
+written once at `initialize` and never changed after deployment (a policy edit, revoke, pause,
+resume, or key rotation does not touch it — those change policy *content*, not the *model*).
+
+- **Any change to the shape or meaning of `PolicyConfig` bumps it by one** — additive fields
+  included. Additive-only changes keep the contract ABI compatible (older callers that omit a
+  field need not break, when the new field has a defined default), but they still bump the
+  version because an older consumer cannot know the field exists. This is what keeps an
+  upgraded deployment distinguishable from the one it replaced.
+- **A breaking change** (renaming, removing, retyping, or changing the meaning of a field;
+  changing an enum's wire ordinals) also bumps it by one **and** ships as a new contract
+  release with an explicit migration note. The version is never reused and never decremented.
+- **A pure implementation change** — bug fix, gas optimization, refactor, or a change that
+  leaves the `PolicyConfig` shape and semantics untouched — does **not** bump it.
+- **Consumers must treat an unknown higher version as an unknown policy model.** Refusing to
+  submit a policy, flagging the account for review, and logging the observed version is the
+  graceful path; silently editing a policy whose model you do not know is the unsafe one.
+
+The constant is asserted in the test suite (`policy_format_version_is_recorded_at_initialize`),
+so bumping it is a deliberate act that also forces this section and the §3 storage row to be
+reviewed in the same change.
+
 ---
 
 ## 8. Config validation (`set_policy`)
@@ -1499,6 +1635,43 @@ off-chain. Rotations record both endpoints (outgoing and incoming) so an auditor
 "when did key K stop being authoritative" from the append-only event log; the full public key is
 never repeated in event data (it is already public at `initialize`). SDK/dashboard decoders must
 render the `BytesN<8>` data fields as hex — a cross-repo follow-up tracked in those repositories.
+
+### 9.1 Reason-symbol vocabulary — compatibility policy (issue #342)
+
+Reason symbols are the contract's most depended-upon **string** surface: they are published as the
+`reason` topic of every `auth_checked` event, as the payload of `CheckResult::Blocked`, and in the
+SPEC §7.1 table. SDKs, dashboards, and operator runbooks key off them. This section records what
+is promised, because nothing else on-chain commits to it.
+
+**Recorded decision: the vocabulary is a *published, additive-first compatibility surface* — not a
+separately versioned API, and not a free-to-change string.** In practical terms:
+
+- **Additive changes are non-breaking and expected.** A new `Error` variant / reason symbol may
+  appear in a release (the error enum already follows "append, never insert", and the
+  discriminants are frozen — §7.1). Consumers must accept a reason they have never seen.
+- **Removing or renaming an existing reason is breaking**, as is changing *which condition* emits
+  an existing reason (a consumer that alerts on `window_cap_exceeded` must not silently start
+  receiving it for a different gate). A breaking vocabulary change ships with a contract release
+  and an updated `tests/fixtures/auth-checked-vocabulary.json`; it is **not** versioned per event.
+- **There is no per-event vocabulary version field.** Adding one would cost bytes on every
+  decision and break the topic-filtering contract that makes `auth_checked` cheap to consume. The
+  version a consumer is talking to is the deployed contract release (and, for the policy model
+  specifically, `policy_version()` — §7.4). The canonical snapshot a consumer can pin is the
+  committed vocabulary fixture plus the §7.1 table, not a value in event data.
+- **Unknown reason = treat as blocked.** This is the one required consumer behavior: fail closed,
+  log the raw symbol, and surface it for review; never crash, never treat an unrecognized symbol
+  as `allowed`, and never assume the reason set is finite or that an enum mirror is exhaustive.
+  The numeric `Error(Contract, #N)` code in diagnostics is stable and can be matched when the
+  symbol is unfamiliar; §7.1 is the mapping.
+
+This is deliberately "in between" the two options the issue names: consumers get a real
+compatibility promise (no silent renames; additive growth), but they are not handed a version
+number they could gate on, because the cost of carrying it on every event outweighs the benefit
+when the release already identifies the vocabulary. Consumers that need a hard gate should pin
+the fixture and the contract release they were built against.
+
+The operator-facing consequence — an unknown symbol is still a denial, and the diagnostic event
+is where it is legible — is cross-referenced from SECURITY.md.
 
 ### 9.5 Persistent storage TTL liveness
 

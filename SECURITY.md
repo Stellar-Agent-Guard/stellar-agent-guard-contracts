@@ -227,6 +227,13 @@ reason") requires knowing which surface produced which observation:
   event and no `fn_call … __check_auth` diagnostic line at all — the absence of
   both is what distinguishes a signature failure from a policy denial.
 
+**Reason symbols are a published, additive-first compatibility surface.** A reason you have never
+seen is still a denial: treat an unknown symbol as **blocked**, log the raw symbol (and the
+`Error(Contract, #N)` code from the diagnostics), and do not crash or assume it means `allowed`.
+New reasons may be added in a release; existing reasons are not renamed or repurposed without a
+breaking contract release. The full policy — and why there is no per-event version field — is
+SPEC §9.1 (issue #342).
+
 The full mapping — observable error → policy reason → reversal path, with a
 verbatim live capture and the rejection classes — is
 [`docs/functions/check-auth.md`](docs/functions/check-auth.md#what-an-operator-sees-when-this-rejects-issue-425).

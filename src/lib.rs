@@ -39,6 +39,7 @@ use soroban_sdk::{
 };
 pub use types::MAX_AUTH_CONTEXTS;
 pub use types::NO_POLICY_DIGEST;
+pub use types::POLICY_FORMAT_VERSION;
 pub use types::{
     AssetCap, BatchCheckResult, BatchTransfer, CheckDetail, Error, PolicyConfig, ProtocolRule,
     RecipientCap, RecipientWindowState, ValidationOutcome,
@@ -797,6 +798,10 @@ mod policy_engine_type {
 
         /// Registers the policy `admin` and the agent's Ed25519 public key.
         /// One-time; the account is default-deny until a policy is installed.
+        ///
+        /// Also records [`POLICY_FORMAT_VERSION`] in instance storage, so the
+        /// deployed policy-model version is readable (`policy_version`) without
+        /// consulting the policy, and a migration can assert the starting state.
         pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>) {
             let already: Option<bool> = env.storage().instance().get(&DataKey::Initialized);
             if already.unwrap_or(false) {
@@ -807,6 +812,9 @@ mod policy_engine_type {
             env.storage()
                 .instance()
                 .set(&DataKey::AgentPubkey, &agent_pubkey);
+            env.storage()
+                .instance()
+                .set(&DataKey::PolicyVersion, &POLICY_FORMAT_VERSION);
             env.storage().instance().set(&DataKey::Initialized, &true);
             persist_set(&env, &DataKey::AdminFrozen, &false);
             persist_set(&env, &DataKey::LastHeartbeat, &0u64);
@@ -1113,6 +1121,21 @@ mod policy_engine_type {
         #[allow(clippy::must_use_candidate)] // public read surface
         pub fn policy(env: Env) -> Option<PolicyConfig> {
             persist_get(&env, &DataKey::Policy)
+        }
+
+        /// The policy-model format version this contract implements (issue
+        /// #339): the [`POLICY_FORMAT_VERSION`] value recorded in instance
+        /// storage at `initialize`. Returns `0` before initialization (never a
+        /// valid format version) and never traps, so indexers and SDKs can read
+        /// it permissionlessly and refuse to construct a policy a deployed
+        /// contract would reject. Changes only with a contract upgrade; see
+        /// SPEC §3 (storage table) and §7 (version policy).
+        #[must_use]
+        pub fn policy_version(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&DataKey::PolicyVersion)
+                .unwrap_or(0)
         }
 
         /// Canonical encoding fingerprint for cheap policy drift detection

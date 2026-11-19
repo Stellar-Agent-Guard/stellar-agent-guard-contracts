@@ -530,6 +530,21 @@ impl MockProtocol {
     }
 }
 
+/// Issue #340 research probe: an allowlisted protocol whose function pulls a
+/// *second* authorization from the guarded account for a nested SAC transfer.
+/// The guarded account authorizes `route` (its root context) and, inside that
+/// frame, `MockAsset::transfer` calls `account.require_auth()` again.
+#[contract]
+pub struct MockNestedRouter;
+
+#[contractimpl]
+impl MockNestedRouter {
+    pub fn route(env: &Env, account: &Address, asset: &Address, to: &Address, amount: i128) {
+        account.require_auth();
+        MockAssetClient::new(env, asset).transfer(account, to, &amount);
+    }
+}
+
 /// Admin account contract: approves every authorization it is asked to
 /// verify (`Signature = ()`, no key material needed in tests).
 #[contract]
@@ -751,6 +766,20 @@ impl Harness {
         fn_name: &str,
         args: std::vec::Vec<Val>,
     ) -> SorobanAuthorizedInvocation {
+        self.invocation_with_subs(contract, fn_name, args, std::vec::Vec::new())
+    }
+
+    /// Build an invocation with an explicit sub-invocation tree. The host
+    /// requires the declared tree to match the calls that actually execute, so
+    /// a nested `require_auth` must be declared here as a child of the frame
+    /// that performs it (issue #340).
+    fn invocation_with_subs(
+        &self,
+        contract: &Address,
+        fn_name: &str,
+        args: std::vec::Vec<Val>,
+        subs: std::vec::Vec<SorobanAuthorizedInvocation>,
+    ) -> SorobanAuthorizedInvocation {
         let sc_args: std::vec::Vec<ScVal> = args
             .into_iter()
             .map(|v| xdr::ScVal::from_val(&self.env, &v))
@@ -761,7 +790,7 @@ impl Harness {
                 function_name: ScSymbol::try_from(fn_name.as_bytes().to_vec()).unwrap(),
                 args: xdr::VecM::try_from(sc_args).unwrap(),
             }),
-            sub_invocations: xdr::VecM::default(),
+            sub_invocations: xdr::VecM::try_from(subs).unwrap(),
         }
     }
 
@@ -1188,6 +1217,23 @@ impl Harness {
             .any(|e| match &e.body {
                 xdr::ContractEventBody::V0(v0) => v0.topics.get(1) == Some(&want),
             })
+    }
+
+    /// Count allowed `auth_checked` events (one per admitted auth context).
+    fn emitted_allowed_auth_count(&self) -> usize {
+        let allowed = symbol_val("allowed");
+        let event_name = symbol_val("event_auth_checked");
+        self.env
+            .events()
+            .all()
+            .events()
+            .iter()
+            .filter(|event| match &event.body {
+                xdr::ContractEventBody::V0(v0) => {
+                    v0.topics.first() == Some(&event_name) && v0.topics.get(1) == Some(&allowed)
+                }
+            })
+            .count()
     }
 
     /// Count blocked `auth_checked` events with the requested reason topic.
@@ -1653,6 +1699,138 @@ fn lifecycle_initialize_once_then_status() {
     assert!(!st.admin_frozen);
     assert!(!st.heartbeat_expired);
     assert_eq!(st.now, 0);
+}
+
+/// Issue #339: a freshly initialized account reports the policy-model format
+/// version it was built against, and the constant itself is pinned so a bump
+/// is a deliberate, reviewed act rather than a silent release change.
+#[test]
+fn policy_format_version_is_recorded_at_initialize() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    assert_eq!(client.policy_version(), crate::POLICY_FORMAT_VERSION);
+    let stored: Option<u32> = h.env.as_contract(&h.guard, || {
+        h.env.storage().instance().get(&DataKey::PolicyVersion)
+    });
+    assert_eq!(
+        stored,
+        Some(crate::POLICY_FORMAT_VERSION),
+        "initialize must write the format version to instance storage"
+    );
+    assert_eq!(
+        crate::POLICY_FORMAT_VERSION,
+        1,
+        "bumping POLICY_FORMAT_VERSION is a deliberate change: update SPEC §3/§7, \
+         its version-policy paragraph, and this assertion together"
+    );
+}
+
+/// Issue #339: the read never traps and reports `0` (never a valid format
+/// version) on an account that has not been initialized.
+#[test]
+fn policy_format_version_is_zero_before_initialize() {
+    let env = Env::default();
+    let guard = env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&env, &guard);
+
+    assert_eq!(client.policy_version(), 0);
+}
+
+// ── Issue #340 research spike: nested / sub-invocation authorizations ────
+//
+// Does the host collapse a protocol's nested `require_auth` on the account
+// into the parent context, hide it, or deliver it as a separate context to
+// `__check_auth`? `MockNestedRouter::route` is an allowlisted protocol call
+// that performs a second `require_auth` from the same account for a nested
+// SAC transfer. The declared auth tree is `route` -> `transfer`.
+
+/// Builds the auth tree for `MockNestedRouter::route(guard, asset, to, amount)`
+/// with the nested `MockAsset::transfer(guard, to, amount)` declared as a
+/// sub-invocation, exactly as the host requires for the nested authorization.
+fn nested_route_invocation(
+    h: &Harness,
+    router: &Address,
+    to: &Address,
+    amount: i128,
+) -> SorobanAuthorizedInvocation {
+    let nested = h.transfer_invocation(&h.guard, to, amount);
+    h.invocation_with_subs(
+        router,
+        "route",
+        std::vec![
+            h.guard.clone().into_val(&h.env),
+            h.asset.clone().into_val(&h.env),
+            to.clone().into_val(&h.env),
+            amount.into_val(&h.env),
+        ],
+        std::vec![nested],
+    )
+}
+
+fn policy_allowing_router(h: &Harness, router: &Address) -> PolicyConfig {
+    let mut policy = h.base_policy();
+    policy.protocols = vec![
+        &h.env,
+        ProtocolRule {
+            contract: router.clone(),
+            fns: Some(vec![&h.env, Symbol::new(&h.env, "route")]),
+            paused: false,
+        },
+    ];
+    policy
+}
+
+/// The nested `require_auth` is **visible**: the host delivers it as its own
+/// entry in `auth_contexts` (one guard decision, and therefore one
+/// `auth_checked` event, per context). A collapsed or hidden nested context
+/// would produce exactly one allowed event for this invocation.
+#[test]
+fn nested_authorization_is_delivered_as_a_separate_auth_context() {
+    let mut h = Harness::new();
+    let router = h.env.register(MockNestedRouter, ());
+    h.install_policy(&policy_allowing_router(&h, &router));
+
+    let recv = h.recv.clone();
+    let root = nested_route_invocation(&h, &router, &recv, 10);
+    let entry = h.guard_entry(&root);
+    h.enforce(entry);
+    MockNestedRouterClient::new(&h.env, &router).route(&h.guard, &h.asset, &recv, &10);
+
+    assert_eq!(
+        h.emitted_allowed_auth_count(),
+        2,
+        "the outer protocol call and its nested SAC transfer must each be \
+         evaluated as a separate context (issue #340)"
+    );
+}
+
+/// The nested context is not merely visible — it is **enforced**. The outer
+/// protocol call is allowlisted, but the nested transfer targets a recipient
+/// outside the allowlist, so the whole authorization must be rejected with the
+/// nested context's reason. This is the property that makes fine-grained v2
+/// enforcement possible.
+#[test]
+fn nested_authorization_is_evaluated_against_policy() {
+    let mut h = Harness::new();
+    let router = h.env.register(MockNestedRouter, ());
+    h.install_policy(&policy_allowing_router(&h, &router));
+
+    let other = h.other.clone();
+    let root = nested_route_invocation(&h, &router, &other, 10);
+    let entry = h.guard_entry(&root);
+    h.enforce(entry);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        MockNestedRouterClient::new(&h.env, &router).route(&h.guard, &h.asset, &other, &10);
+    }));
+    let log = match res {
+        Err(payload) => panic_message(payload.as_ref()),
+        Ok(()) => panic!("the nested transfer to a non-allowlisted recipient must be blocked"),
+    };
+    assert!(
+        log.contains("recipient_not_allowed"),
+        "the nested context must be judged by the guard's policy, but the host log was: {log}"
+    );
 }
 
 #[test]
