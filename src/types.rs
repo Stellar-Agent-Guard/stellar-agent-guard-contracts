@@ -21,7 +21,11 @@ pub enum DmsHealthStatus {
 
 /// Hard bound on rolling-window entries. Above this, the engine merges the two
 /// oldest entries forward (conservative over-count) — see SPEC §3.1.
-pub const MAX_WINDOW_ENTRIES: usize = 8192;
+///
+/// The width is `u32` because that is what `soroban_sdk::Vec::len()` returns and
+/// what `Ledger::len()` exposes, so the bound and the backstop comparison in
+/// `window.rs` need no `as` casts (issue #338).
+pub const MAX_WINDOW_ENTRIES: u32 = 8192;
 
 /// Hard bound on auth contexts evaluated in one authorization (SPEC §4/§6).
 /// Sixty-four admits large DEX batches while bounding worst-case decision work.
@@ -114,6 +118,17 @@ pub enum ValidationOutcome {
 }
 
 /// Per-policy rolling spend ledger for SAC asset transfers and protocol call counts.
+///
+/// # Wire format
+///
+/// **Field order and field names are part of the on-chain wire format.** As a
+/// `#[contracttype]`, this struct is encoded as an `ScVal` map keyed by these names,
+/// its generated decoder reads entries positionally against the sorted field list,
+/// and its XDR shape follows declaration order. Renaming, reordering, inserting, or
+/// removing a field therefore changes the stored `Window` value's shape for every
+/// consumer. Treat such an edit as a wire-format change and regenerate
+/// `tests/snapshots/abi_snapshot.txt` (`UPDATE_SNAPSHOTS=1 cargo test --test abi_snapshot`)
+/// in the same PR. See SPEC §3.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowState {
@@ -140,6 +155,11 @@ pub struct RecipientWindowState {
     pub entries: Vec<SpendEntry>,
 }
 
+/// One global or per-recipient rolling-window spend record.
+///
+/// **Field order and field names are part of the on-chain wire format.** This is a
+/// `#[contracttype]`: renaming or reordering `ts`/`amount` changes the persisted
+/// `Window` encoding and every off-chain decoder that reads it. See SPEC §3.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpendEntry {
@@ -182,6 +202,21 @@ pub struct AssetCap {
 }
 
 /// The policy an admin installs on the account. See SPEC §3/§4.
+///
+/// # Wire format — field order and names are part of the ABI
+///
+/// **Field order and field names are part of the on-chain wire format.** This is a
+/// `#[contracttype]`, so Soroban encodes it as an `ScVal` map keyed by these field
+/// names, its generated decoder reads entries positionally against the sorted field
+/// list, and its XDR shape follows declaration order. Renaming a field, reordering
+/// the declaration, or adding/removing one therefore changes the bytes hashed by
+/// `policy_hash` and the shape every hard-coded encoder/decoder sees — that is a
+/// breaking wire-format change even when it compiles cleanly.
+///
+/// The encoding is pinned by `tests/policyconfig_scval_encoding.rs` and SPEC §3.2, and
+/// the human-visible surface by `tests/snapshots/abi_snapshot.txt` (regenerate with
+/// `UPDATE_SNAPSHOTS=1 cargo test --test abi_snapshot`). Keep `policy.schema.json` in
+/// step in the same PR (CONTRIBUTING, coding standard 10).
 #[contracttype]
 #[derive(Clone, PartialEq, Eq)]
 pub struct PolicyConfig {
@@ -223,6 +258,55 @@ pub struct PolicyConfig {
     pub protocol_calls_per_window: u32,
 }
 
+impl PolicyConfig {
+    /// Whether the global per-transaction cap is enforced.
+    ///
+    /// `per_tx_cap == 0` is the **disabled** sentinel: no per-call ceiling applies.
+    /// A positive value is the maximum a single asset-transfer call may move.
+    ///
+    /// This method and its siblings below are the normative definition of the
+    /// `0 = disabled` convention (SPEC §3). The decision engine, `status()`, and
+    /// policy validation read the convention only through them, so an off-chain
+    /// reimplementation (SDK, dashboard) should match them instead of comparing the
+    /// raw field.
+    #[must_use]
+    pub const fn per_tx_cap_enabled(&self) -> bool {
+        self.per_tx_cap > 0
+    }
+
+    /// Whether the global rolling-window spend cap is enforced.
+    ///
+    /// `window_cap == 0` **disables** the rolling spend cap. Per-recipient override
+    /// caps in `recipient_window_caps` are independent of this flag: they are
+    /// enabled by a positive `RecipientCap::cap` and are never disabled by a zero
+    /// global cap. See SPEC §3 for the normative `0 = disabled` statement.
+    #[must_use]
+    pub const fn window_cap_enabled(&self) -> bool {
+        self.window_cap > 0
+    }
+
+    /// Whether the dead-man switch is armed.
+    ///
+    /// `dms_grace_secs == 0` **disables** the switch: no heartbeat deadline is
+    /// evaluated and `status()` reports no `heartbeat_expires_at`. A positive value
+    /// is the grace period after the last heartbeat before the account freezes.
+    /// See SPEC §3 for the normative `0 = disabled` statement.
+    #[must_use]
+    pub const fn dms_enabled(&self) -> bool {
+        self.dms_grace_secs > 0
+    }
+
+    /// Whether the protocol-call rate limit is enforced.
+    ///
+    /// `protocol_calls_per_window == 0` **disables** the limit (protocol calls are
+    /// still allowlist-checked). A positive value caps protocol calls per rolling
+    /// window. See SPEC §3 for the normative `0 = disabled` statement.
+    #[must_use]
+    pub const fn protocol_calls_enabled(&self) -> bool {
+        self.protocol_calls_per_window > 0
+    }
+}
+
 /// Manual `Debug` implementation for `PolicyConfig` with stable field order.
 ///
 /// Field order is the declaration order (as of SPEC §3 table) and must not be
@@ -257,6 +341,12 @@ impl core::fmt::Debug for PolicyConfig {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// A protocol contract and optional function allowlist.
+///
+/// **Field order and field names are part of the on-chain wire format.** This is a
+/// `#[contracttype]` map keyed by these names, decoded positionally against the
+/// sorted field list: renaming or reordering `contract`, `fns`, or `paused` changes
+/// the persisted policy encoding and every off-chain decoder. See SPEC §3/§3.2 and
+/// `tests/snapshots/abi_snapshot.txt`.
 pub struct ProtocolRule {
     /// Contract permitted for non-SAC calls.
     pub contract: Address,
@@ -291,8 +381,15 @@ pub enum ParsedCall {
 }
 
 /// Operational snapshot returned by the auth-free `status()` read (SPEC §7).
-/// Additive-growth contract: new fields may be appended, but existing fields
-/// are never renamed or removed (see docs/research/wire-format.md).
+///
+/// # Wire format
+///
+/// Additive-growth contract: new fields may be appended, but existing fields are
+/// never renamed or removed. **Field order and field names are part of the on-chain
+/// wire format** — this is a `#[contracttype]` map keyed by these names, decoded
+/// positionally against the sorted field list, so a rename or a reorder is a
+/// breaking change for every consumer even though it compiles. See
+/// `docs/research/wire-format.md`, SPEC §3, and `tests/snapshots/abi_snapshot.txt`.
 #[allow(clippy::struct_excessive_bools)] // wire-format snapshot: the bool field set is fixed by the public ABI, not a design choice
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -495,6 +592,14 @@ pub enum DataKey {
 /// off-chain SDKs, indexers, and telemetry decode errors using these exact numeric codes
 /// (`Error(Contract, #N)`).
 ///
+/// The numbers are **public ABI, not an implementation detail**: `Error(Contract, #N)`
+/// appears in transaction results, published evidence (`tests/fixtures/README.md` and
+/// `docs/functions/`), the SDK's `REASON_CODES`, and operator runbooks. New variants are
+/// therefore **appended at the end of their numeric group**, never inserted between
+/// existing codes, and an assigned discriminant is never renumbered, repurposed, or
+/// deleted. Renumbering is only permissible with an explicit version note in SPEC §7
+/// recording the date, the reason, and the old → new mapping for every consumer.
+///
 /// Variants are partitioned into three numeric groups:
 /// - Generic / lifecycle (`1..=9`, next free: `7`)
 /// - Account-level gates (`10..=19`, next free: `15`)
@@ -504,6 +609,12 @@ pub enum DataKey {
 /// full end-to-end contributor workflow (touching the enum, reason mappings, decision table,
 /// SPEC §4/§6/§7, event vocabulary, and tests), see the checklist in `docs/contributing.md`
 /// (`#how-to-add-a-new-error-variant-end-to-end`) and `CONTRIBUTING.md`.
+///
+/// Enforcement lives with the rule: `tests/abi_snapshot.rs` pins every
+/// code/variant/reason triple in `tests/snapshots/abi_snapshot.txt`,
+/// `error_code_discriminant_stability_spec_7` (below) pins the raw values, and
+/// `scripts/check-spec-coverage.sh` (the deny-list coverage check documented in
+/// CONTRIBUTING) reports this enum and the SPEC §7 table drifting apart.
 #[allow(missing_docs)] // individual ABI variants are described below
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
