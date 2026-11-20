@@ -370,12 +370,414 @@ fn parse_call_inner(
     }
 }
 
-// ── Decision ─────────────────────────────────────────────────────────────
+// ── Pure decision core (SPEC §4) ─────────────────────────────────────────
+
+/// Storage-free, event-free core of the SPEC §4 decision table.
+///
+/// Everything here works from values the [`super::decide`] shell has already
+/// loaded and parsed: there is no `Env`, no host conversion, no storage read,
+/// and no ledger mutation. The returned `DecisionPlan` describes exactly the
+/// writes the shell must apply, in order, when every context allows.
+pub mod pure {
+    use super::{
+        checked_window_projection, contains_addr, contains_sym, effective_per_tx_cap,
+        recipient_override_cap, AccountState,
+    };
+    use crate::types::{Error, ParsedCall, PolicyConfig};
+    use soroban_sdk::{symbol_short, Address, Symbol};
+
+    /// A per-context decision, aliased so callers need only this module.
+    pub type Verdict = super::Decision;
+
+    /// Read-only snapshot of the ledger values the decision table reads.
+    ///
+    /// The shell prunes the live ledger first, then projects exactly these
+    /// values here so the core never needs a host vector or a mutable ledger.
+    #[derive(Clone, Copy, Debug)]
+    pub struct LedgerView<'a> {
+        /// Pruned global rolling-window total.
+        pub total: i128,
+        /// Pruned totals of the tracked per-recipient ledgers, paired with
+        /// their recipient addresses.
+        pub recipient_totals: &'a [(Address, i128)],
+        /// Pruned rolling protocol-call counter.
+        pub protocol_call_total: u32,
+    }
+
+    impl LedgerView<'_> {
+        /// Rolling total tracked for `recipient`, or zero when untracked.
+        #[must_use]
+        pub fn recipient_total(&self, recipient: &Address) -> i128 {
+            for (tracked, total) in self.recipient_totals {
+                if tracked == recipient {
+                    return *total;
+                }
+            }
+            0
+        }
+    }
+
+    /// Outcome of the gates that apply to the whole batch before parsing.
+    pub enum GateOutcome<'a> {
+        /// A gate fired; the verdicts are the complete, ordered batch result.
+        Blocked(alloc::vec::Vec<Verdict>),
+        /// Every gate passed, carrying the installed policy to evaluate.
+        Proceed(&'a PolicyConfig),
+    }
+
+    fn block_all(error: Error, context_count: usize) -> alloc::vec::Vec<Verdict> {
+        let mut verdicts = alloc::vec::Vec::new();
+        for _ in 0..context_count {
+            verdicts.push(Verdict::Blocked(error));
+        }
+        verdicts
+    }
+
+    /// Evaluate the SPEC §4 batch gates in their documented order.
+    ///
+    /// The shell calls this before parsing or pruning, so a blocked batch does
+    /// no work beyond the gate checks; `decide` calls it as its first step so
+    /// the pure API is complete on its own.
+    #[must_use]
+    pub fn gate<'a>(
+        policy: Option<&'a PolicyConfig>,
+        state: &AccountState,
+        now: u64,
+        context_count: usize,
+    ) -> GateOutcome<'a> {
+        if context_count > crate::types::MAX_AUTH_CONTEXTS {
+            // One aggregate verdict, never one per oversized context.
+            return GateOutcome::Blocked(block_all(Error::TooManyAuthContexts, 1));
+        }
+        if state.admin_frozen {
+            return GateOutcome::Blocked(block_all(Error::AdminFrozen, context_count));
+        }
+        let Some(cfg) = policy else {
+            return GateOutcome::Blocked(block_all(Error::NoPolicy, context_count));
+        };
+        let account_error = if cfg.dms_enabled()
+            && state.last_heartbeat != 0
+            && now.saturating_sub(state.last_heartbeat) > cfg.dms_grace_secs
+        {
+            Some(Error::HeartbeatExpired)
+        } else if cfg.paused {
+            Some(Error::Paused)
+        } else if (cfg.active_from != 0 && now < cfg.active_from)
+            || (cfg.active_until != 0 && now > cfg.active_until)
+        {
+            Some(Error::OutsideActiveWindow)
+        } else {
+            None
+        };
+        match account_error {
+            Some(error) => GateOutcome::Blocked(block_all(error, context_count)),
+            None => GateOutcome::Proceed(cfg),
+        }
+    }
+
+    /// A ledger write the shell commits only after every context allows.
+    ///
+    /// Effects are produced in commit order: global spends, recipient spends,
+    /// protocol calls.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum CommitEffect {
+        /// Append a global rolling-window spend.
+        AdmitSpend {
+            /// Ledger second the spend is recorded at.
+            ts: u64,
+            /// Positive admitted amount.
+            amount: i128,
+        },
+        /// Append a per-recipient rolling-window spend.
+        AdmitRecipientSpend {
+            /// Ledger second the spend is recorded at.
+            ts: u64,
+            /// Recipient whose window is debited.
+            recipient: Address,
+            /// Positive admitted amount.
+            amount: i128,
+        },
+        /// Append several protocol calls to the rolling counter.
+        AdmitProtocolCalls {
+            /// Ledger second the calls are recorded at.
+            ts: u64,
+            /// Number of admitted calls.
+            count: u32,
+        },
+    }
+
+    /// Complete result of one pure evaluation.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct DecisionPlan {
+        /// One verdict per submitted context, in submission order.
+        pub verdicts: alloc::vec::Vec<Verdict>,
+        /// Staged ledger effects; empty unless every context allowed.
+        pub effects: alloc::vec::Vec<CommitEffect>,
+    }
+
+    /// Values the pure core needs, already loaded and parsed by the shell.
+    #[derive(Clone, Copy)]
+    pub struct EvalInputs<'a> {
+        /// Installed policy, when one is present.
+        pub policy: Option<&'a PolicyConfig>,
+        /// Account-level flags the batch gates read.
+        pub state: &'a AccountState,
+        /// Ledger timestamp used by the gates and by admissions.
+        pub now: u64,
+        /// Number of auth contexts in the batch.
+        pub context_count: usize,
+        /// Pre-parsed calls, in the same order as the original contexts.
+        pub calls: &'a [ParsedCall],
+        /// Read-only view of the already-pruned ledger.
+        pub ledger: LedgerView<'a>,
+    }
+
+    /// Running per-request state; staged values become effects only on success.
+    struct Staging<'a> {
+        cfg: &'a PolicyConfig,
+        now: u64,
+        ledger: LedgerView<'a>,
+        pending: i128,
+        global_spends: alloc::vec::Vec<(u64, i128)>,
+        recipients: alloc::vec::Vec<Address>,
+        recipient_amounts: alloc::vec::Vec<i128>,
+        protocol_calls: u32,
+    }
+
+    impl<'a> Staging<'a> {
+        fn new(cfg: &'a PolicyConfig, now: u64, ledger: LedgerView<'a>) -> Self {
+            Self {
+                cfg,
+                now,
+                ledger,
+                pending: 0,
+                global_spends: alloc::vec::Vec::new(),
+                recipients: alloc::vec::Vec::new(),
+                recipient_amounts: alloc::vec::Vec::new(),
+                protocol_calls: 0,
+            }
+        }
+
+        fn evaluate(&mut self, call: &ParsedCall) -> Verdict {
+            let heartbeat = symbol_short!("heartbeat");
+            match call {
+                ParsedCall::SelfCall { fname } => {
+                    if fname == &heartbeat {
+                        Verdict::Allowed
+                    } else {
+                        Verdict::Blocked(Error::SelfFunctionNotAllowed)
+                    }
+                }
+                ParsedCall::CreateContract => Verdict::Blocked(Error::CreateContractNotAllowed),
+                ParsedCall::Unknown { .. } => Verdict::Blocked(Error::UnknownContract),
+                ParsedCall::AssetOther { asset, .. } => {
+                    if matches!(self.cfg.asset_caps.iter().find(|cap| cap.asset == *asset), Some(cap) if cap.paused)
+                    {
+                        Verdict::Blocked(Error::AssetNotAllowed)
+                    } else {
+                        Verdict::Blocked(Error::AssetFnNotAllowed)
+                    }
+                }
+                ParsedCall::AssetTransfer { asset, to, amount } => {
+                    self.evaluate_transfer(asset, to, *amount)
+                }
+                ParsedCall::Protocol { contract, fname } => self.evaluate_protocol(contract, fname),
+            }
+        }
+
+        fn evaluate_transfer(&mut self, asset: &Address, to: &Address, amount: i128) -> Verdict {
+            if matches!(self.cfg.asset_caps.iter().find(|cap| cap.asset == *asset), Some(cap) if cap.paused)
+            {
+                return Verdict::Blocked(Error::AssetNotAllowed);
+            }
+            if amount <= 0 {
+                return Verdict::Blocked(Error::InvalidAmount);
+            }
+            if contains_addr(&self.cfg.blocked_recipients, to) {
+                return Verdict::Blocked(Error::RecipientBlocked);
+            }
+            if !self.cfg.allow_any_recipient && !contains_addr(&self.cfg.recipients, to) {
+                return Verdict::Blocked(Error::RecipientNotAllowed);
+            }
+            if effective_per_tx_cap(self.cfg, asset).is_some_and(|cap| amount > cap) {
+                return Verdict::Blocked(Error::PerTxCapExceeded);
+            }
+
+            // Window accounting: the global cap plus an optional per-recipient
+            // override keyed by the destination. All configured assets share
+            // one global total. Projections are computed before any staging.
+            let recip_cap = recipient_override_cap(self.cfg, to);
+            let mut staged_recip: i128 = 0;
+            let mut staged_idx: Option<usize> = None;
+            if recip_cap.is_some() {
+                // Index loop rather than `.enumerate()`: the adapter's checked
+                // index increment pulls an `attempt to add with overflow`
+                // diagnostic into the WASM. This mirrors the original shell.
+                for i in 0..self.recipients.len() {
+                    if let Some(recipient) = self.recipients.get(i) {
+                        if recipient == to {
+                            staged_idx = Some(i);
+                            staged_recip = self.recipient_amounts.get(i).copied().unwrap_or(0);
+                            break;
+                        }
+                    }
+                }
+            }
+            // Checked sums: an overflow is an explicit stable block, never an
+            // arithmetic trap, and never a silent clamp past the configured cap.
+            let global_projected =
+                checked_window_projection(self.ledger.total, self.pending, amount);
+            let recip_projected =
+                checked_window_projection(self.ledger.recipient_total(to), staged_recip, amount);
+            let global_over = self.cfg.window_cap_enabled()
+                && match global_projected {
+                    Some(projected) => projected > self.cfg.window_cap,
+                    None => true,
+                };
+            let recip_over = match recip_cap {
+                Some(cap) => match recip_projected {
+                    Some(projected) => projected > cap,
+                    None => true,
+                },
+                None => false,
+            };
+            if global_over || recip_over {
+                return Verdict::Blocked(Error::WindowCapExceeded);
+            }
+            if self.cfg.window_cap_enabled() {
+                self.pending = self.pending.saturating_add(amount);
+                self.global_spends.push((self.now, amount));
+            }
+            if recip_cap.is_some() {
+                let next = staged_recip.saturating_add(amount);
+                if let Some(idx) = staged_idx {
+                    if let Some(slot) = self.recipient_amounts.get_mut(idx) {
+                        *slot = next;
+                    }
+                } else {
+                    self.recipients.push(to.clone());
+                    self.recipient_amounts.push(next);
+                }
+            }
+            Verdict::Allowed
+        }
+
+        fn evaluate_protocol(&mut self, contract: &Address, fname: &Symbol) -> Verdict {
+            let mut found = false;
+            let mut paused = false;
+            let mut fn_ok = true;
+            for i in 0..self.cfg.protocols.len() {
+                if let Some(rule) = self.cfg.protocols.get(i) {
+                    if rule.contract == *contract {
+                        found = true;
+                        paused = rule.paused;
+                        fn_ok = match &rule.fns {
+                            None => true,
+                            Some(fns) => contains_sym(fns, fname),
+                        };
+                        break;
+                    }
+                }
+            }
+            if !found || paused {
+                Verdict::Blocked(Error::ProtocolNotAllowed)
+            } else if !fn_ok {
+                Verdict::Blocked(Error::FunctionNotAllowed)
+            } else if self.cfg.protocol_calls_enabled() {
+                let projected_calls = self
+                    .ledger
+                    .protocol_call_total
+                    .saturating_add(self.protocol_calls)
+                    .saturating_add(1);
+                if projected_calls > self.cfg.protocol_calls_per_window {
+                    Verdict::Blocked(Error::ProtocolCallRateExceeded)
+                } else {
+                    self.protocol_calls = self.protocol_calls.saturating_add(1);
+                    Verdict::Allowed
+                }
+            } else {
+                Verdict::Allowed
+            }
+        }
+
+        fn into_effects(self) -> alloc::vec::Vec<CommitEffect> {
+            let mut effects = alloc::vec::Vec::new();
+            for (ts, amount) in self.global_spends {
+                effects.push(CommitEffect::AdmitSpend { ts, amount });
+            }
+            for i in 0..self.recipients.len() {
+                if let (Some(recipient), Some(amount)) =
+                    (self.recipients.get(i), self.recipient_amounts.get(i))
+                {
+                    effects.push(CommitEffect::AdmitRecipientSpend {
+                        ts: self.now,
+                        recipient: recipient.clone(),
+                        amount: *amount,
+                    });
+                }
+            }
+            if self.protocol_calls > 0 {
+                effects.push(CommitEffect::AdmitProtocolCalls {
+                    ts: self.now,
+                    count: self.protocol_calls,
+                });
+            }
+            effects
+        }
+    }
+
+    /// Evaluate the full SPEC §4 table over already-parsed calls.
+    ///
+    /// Effects are returned only when every context allows; otherwise the
+    /// plan carries the complete verdict list and no effects at all.
+    #[must_use]
+    pub fn decide(inputs: EvalInputs<'_>) -> DecisionPlan {
+        let cfg = match gate(
+            inputs.policy,
+            inputs.state,
+            inputs.now,
+            inputs.context_count,
+        ) {
+            GateOutcome::Blocked(verdicts) => {
+                return DecisionPlan {
+                    verdicts,
+                    effects: alloc::vec::Vec::new(),
+                };
+            }
+            GateOutcome::Proceed(cfg) => cfg,
+        };
+
+        let mut staging = Staging::new(cfg, inputs.now, inputs.ledger);
+        let mut verdicts = alloc::vec::Vec::new();
+        let mut all_passed = true;
+        for call in inputs.calls {
+            let verdict = staging.evaluate(call);
+            if matches!(verdict, Verdict::Blocked(_)) {
+                all_passed = false;
+            }
+            verdicts.push(verdict);
+        }
+        DecisionPlan {
+            verdicts,
+            effects: if all_passed {
+                staging.into_effects()
+            } else {
+                alloc::vec::Vec::new()
+            },
+        }
+    }
+}
+
+// ── Decision: thin Env shell around the pure core ────────────────────────
 
 /// Evaluates the SPEC §4 decision table over every auth context, returning one
 /// [`Decision`] per context. Oversized batches return one aggregate blocking
 /// decision before any context is evaluated. Window admissions are staged and
 /// committed to `ledger` only when every context is allowed.
+///
+/// This shell gates, parses, prunes, and commits. The decision itself lives in
+/// [`pure::decide`], which has no `Env` and performs no storage access, event
+/// emission, or ledger mutation.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)] // by-value host Vec avoids slice/coercion limits
 pub fn decide(
     env: &Env,
@@ -386,230 +788,62 @@ pub fn decide(
     now: u64,
     contexts: soroban_sdk::Vec<Context>,
 ) -> alloc::vec::Vec<Decision> {
-    let mut verdicts = alloc::vec::Vec::new();
-
-    if contexts.len() as usize > crate::types::MAX_AUTH_CONTEXTS {
-        verdicts.push(Decision::Blocked(Error::TooManyAuthContexts));
-        return verdicts;
-    }
-
-    if state.admin_frozen {
-        for _ in 0..contexts.len() {
-            verdicts.push(Decision::Blocked(Error::AdminFrozen));
-        }
-        return verdicts;
-    }
-
-    let Some(cfg) = policy else {
-        for _ in 0..contexts.len() {
-            verdicts.push(Decision::Blocked(Error::NoPolicy));
-        }
-        return verdicts;
+    // The context-count gate runs before any parsing or pruning, and the rest
+    // of the gates keep their documented order (pure::gate owns both).
+    let cfg = match pure::gate(policy, state, now, contexts.len() as usize) {
+        pure::GateOutcome::Blocked(verdicts) => return verdicts,
+        pure::GateOutcome::Proceed(cfg) => cfg,
     };
 
-    let account_error = if cfg.dms_enabled()
-        && state.last_heartbeat != 0
-        && now.saturating_sub(state.last_heartbeat) > cfg.dms_grace_secs
-    {
-        Some(Error::HeartbeatExpired)
-    } else if cfg.paused {
-        Some(Error::Paused)
-    } else if (cfg.active_from != 0 && now < cfg.active_from)
-        || (cfg.active_until != 0 && now > cfg.active_until)
-    {
-        Some(Error::OutsideActiveWindow)
-    } else {
-        None
-    };
-
-    if let Some(e) = account_error {
-        for _ in 0..contexts.len() {
-            verdicts.push(Decision::Blocked(e));
-        }
-        return verdicts;
-    }
-
-    // ── Per-context rules (SPEC §6) ──────────────────────────────────────
-    // Window: prune expired entries once up front, then check every transfer
-    // against the running total (current total + amounts already admitted in
-    // this request). Admission is staged and committed only after every
-    // context passes. Per-recipient overrides run alongside the global window.
-    // Protocol call rate limiting uses the same lazy pruning semantics.
+    // Prune expired entries once up front, then project the pruned ledger into
+    // a read-only view. Admission is staged inside the pure core and committed
+    // below only when every context passes.
     if cfg.window_cap_enabled()
         || !cfg.recipient_window_caps.is_empty()
         || cfg.protocol_calls_enabled()
     {
         ledger.prune(now, cfg.window_secs);
     }
-    let mut pending: i128 = 0;
-    let mut admission: Vec<crate::types::SpendEntry> = Vec::new(env);
-    // Running per-recipient totals staged in this request. Parallel Vecs keep
-    // iteration deterministic and avoid pulling `Map` into the pure engine.
-    let mut pending_recipients: Vec<Address> = Vec::new(env);
-    let mut pending_recipient_amounts: Vec<i128> = Vec::new(env);
-    let mut pending_protocol_calls: u32 = 0;
-    let mut all_passed = true;
-
+    let mut calls = alloc::vec::Vec::new();
     for ctx in contexts.iter() {
-        let call = parse_call(env, self_addr, &ctx, cfg);
-        let ctx_decision = match call {
-            ParsedCall::SelfCall { fname } => {
-                if fname == Symbol::new(env, "heartbeat") {
-                    Decision::Allowed
-                } else {
-                    Decision::Blocked(Error::SelfFunctionNotAllowed)
-                }
-            }
-            ParsedCall::CreateContract => Decision::Blocked(Error::CreateContractNotAllowed),
-            ParsedCall::Unknown { .. } => Decision::Blocked(Error::UnknownContract),
-            ParsedCall::AssetOther { asset, .. } => {
-                if matches!(cfg.asset_caps.iter().find(|cap| cap.asset == asset), Some(cap) if cap.paused)
-                {
-                    Decision::Blocked(Error::AssetNotAllowed)
-                } else {
-                    Decision::Blocked(Error::AssetFnNotAllowed)
-                }
-            }
-            ParsedCall::AssetTransfer { asset, to, amount } => {
-                if matches!(cfg.asset_caps.iter().find(|cap| cap.asset == asset), Some(cap) if cap.paused)
-                {
-                    Decision::Blocked(Error::AssetNotAllowed)
-                } else if amount <= 0 {
-                    Decision::Blocked(Error::InvalidAmount)
-                } else if contains_addr(&cfg.blocked_recipients, &to) {
-                    Decision::Blocked(Error::RecipientBlocked)
-                } else if !cfg.allow_any_recipient && !contains_addr(&cfg.recipients, &to) {
-                    Decision::Blocked(Error::RecipientNotAllowed)
-                } else if effective_per_tx_cap(cfg, &asset).is_some_and(|cap| amount > cap) {
-                    Decision::Blocked(Error::PerTxCapExceeded)
-                } else {
-                    // Window accounting: global cap plus an optional
-                    // per-recipient override keyed by the destination.
-                    // The rolling window aggregates every asset listed in
-                    // `cfg.assets` into a single shared total (`ledger.total`).
-                    // Projections are computed first; staging happens only
-                    // when this context clears both caps.
-                    let recip_cap = recipient_override_cap(cfg, &to);
-                    let mut staged_recip: i128 = 0;
-                    let mut staged_idx: Option<u32> = None;
-                    if recip_cap.is_some() {
-                        for i in 0..pending_recipients.len() {
-                            if let Some(r) = pending_recipients.get(i) {
-                                if r == to {
-                                    staged_idx = Some(i);
-                                    staged_recip = pending_recipient_amounts.get(i).unwrap_or(0);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    // Cumulative against the current windows: existing totals +
-                    // amounts staged earlier in this same request. The sums are
-                    // overflow-checked (`None` = would exceed `i128`), so a
-                    // near-`i128::MAX` amount or accumulated total is a
-                    // deliberate `WindowCapExceeded`, never an arithmetic trap.
-                    let global_projected = checked_window_projection(ledger.total, pending, amount);
-                    let recip_projected = checked_window_projection(
-                        ledger.recipient_total(&to),
-                        staged_recip,
-                        amount,
-                    );
-                    let global_over = cfg.window_cap_enabled()
-                        && match global_projected {
-                            Some(projected) => projected > cfg.window_cap,
-                            None => true,
-                        };
-                    let recip_over = match recip_cap {
-                        Some(cap) => match recip_projected {
-                            Some(projected) => projected > cap,
-                            None => true,
-                        },
-                        None => false,
-                    };
-                    if global_over || recip_over {
-                        Decision::Blocked(Error::WindowCapExceeded)
-                    } else {
-                        if cfg.window_cap_enabled() {
-                            pending = pending.saturating_add(amount);
-                            admission.push_back(crate::types::SpendEntry { ts: now, amount });
-                        }
-                        if recip_cap.is_some() {
-                            let next = staged_recip.saturating_add(amount);
-                            if let Some(idx) = staged_idx {
-                                pending_recipient_amounts.set(idx, next);
-                            } else {
-                                pending_recipients.push_back(to.clone());
-                                pending_recipient_amounts.push_back(next);
-                            }
-                        }
-                        Decision::Allowed
-                    }
-                }
-            }
-            ParsedCall::Protocol { contract, fname } => {
-                let mut found = false;
-                let mut paused = false;
-                let mut fn_ok = true;
-                for i in 0..cfg.protocols.len() {
-                    if let Some(rule) = cfg.protocols.get(i) {
-                        if rule.contract == contract {
-                            found = true;
-                            paused = rule.paused;
-                            fn_ok = match &rule.fns {
-                                None => true,
-                                Some(fns) => contains_sym(fns, &fname),
-                            };
-                            break;
-                        }
-                    }
-                }
-                if !found || paused {
-                    Decision::Blocked(Error::ProtocolNotAllowed)
-                } else if !fn_ok {
-                    Decision::Blocked(Error::FunctionNotAllowed)
-                } else if cfg.protocol_calls_enabled() {
-                    // Protocol call rate limiting: check if admitting this call
-                    // would exceed the per-window cap.
-                    let projected_calls = ledger
-                        .protocol_call_total
-                        .saturating_add(pending_protocol_calls)
-                        .saturating_add(1);
-                    if projected_calls > cfg.protocol_calls_per_window {
-                        Decision::Blocked(Error::ProtocolCallRateExceeded)
-                    } else {
-                        pending_protocol_calls = pending_protocol_calls.saturating_add(1);
-                        Decision::Allowed
-                    }
-                } else {
-                    Decision::Allowed
-                }
-            }
-        };
-
-        if let Decision::Blocked(_) = &ctx_decision {
-            all_passed = false;
-        }
-        verdicts.push(ctx_decision);
+        calls.push(parse_call(env, self_addr, &ctx, cfg));
     }
+    let mut recipient_totals = alloc::vec::Vec::new();
+    for i in 0..ledger.recipients.len() {
+        if let Some(r) = ledger.recipients.get(i) {
+            recipient_totals.push((r.recipient, r.total));
+        }
+    }
+    let plan = pure::decide(pure::EvalInputs {
+        policy: Some(cfg),
+        state,
+        now,
+        context_count: calls.len(),
+        calls: &calls,
+        ledger: pure::LedgerView {
+            total: ledger.total,
+            recipient_totals: &recipient_totals,
+            protocol_call_total: ledger.protocol_call_total,
+        },
+    });
 
-    // ── Commit staged window admissions (all contexts admissible) ────────
-    if all_passed {
-        for e in admission.iter() {
-            ledger.admit(e.ts, e.amount);
-        }
-        for i in 0..pending_recipients.len() {
-            if let (Some(recipient), Some(amount)) =
-                (pending_recipients.get(i), pending_recipient_amounts.get(i))
-            {
-                ledger.admit_for_recipient(env, now, recipient, amount);
+    for effect in &plan.effects {
+        match effect {
+            pure::CommitEffect::AdmitSpend { ts, amount } => ledger.admit(*ts, *amount),
+            pure::CommitEffect::AdmitRecipientSpend {
+                ts,
+                recipient,
+                amount,
+            } => ledger.admit_for_recipient(env, *ts, recipient.clone(), *amount),
+            pure::CommitEffect::AdmitProtocolCalls { ts, count } => {
+                for _ in 0..*count {
+                    ledger.admit_protocol_call(*ts);
+                }
             }
-        }
-        for _ in 0..pending_protocol_calls {
-            ledger.admit_protocol_call(now);
         }
     }
 
-    verdicts
+    plan.verdicts
 }
 
 #[cfg(test)]
@@ -2800,5 +3034,69 @@ mod tests {
             ledger, before,
             "zero-context authorization must not admit any spend or protocol calls"
         );
+    }
+
+    #[test]
+    fn pure_decide_emits_spend_effect_when_context_allows() {
+        let env = Env::default();
+        let mut policy = base_policy(&env);
+        policy.window_cap = 100;
+        let call = ParsedCall::AssetTransfer {
+            asset: addr(&env, 1),
+            to: addr(&env, 2),
+            amount: 7,
+        };
+
+        let plan = pure::decide(pure::EvalInputs {
+            policy: Some(&policy),
+            state: &alive(),
+            now: 1_000,
+            context_count: 1,
+            calls: &[call],
+            ledger: pure::LedgerView {
+                total: 0,
+                recipient_totals: &[],
+                protocol_call_total: 0,
+            },
+        });
+
+        assert_eq!(plan.verdicts.len(), 1);
+        assert_eq!(plan.verdicts[0], Decision::Allowed);
+        assert_eq!(plan.effects.len(), 1);
+        assert_eq!(
+            plan.effects[0],
+            pure::CommitEffect::AdmitSpend {
+                ts: 1_000,
+                amount: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn pure_decide_blocks_without_effects_on_invalid_amount() {
+        let env = Env::default();
+        let policy = base_policy(&env);
+        let call = ParsedCall::AssetTransfer {
+            asset: addr(&env, 1),
+            to: addr(&env, 2),
+            amount: 0,
+        };
+
+        let plan = pure::decide(pure::EvalInputs {
+            policy: Some(&policy),
+            state: &alive(),
+            now: 1_000,
+            context_count: 1,
+            calls: &[call],
+            ledger: pure::LedgerView {
+                total: 0,
+                recipient_totals: &[],
+                protocol_call_total: 0,
+            },
+        });
+
+        assert_eq!(plan.verdicts.len(), 1);
+        assert_eq!(plan.verdicts[0], Decision::Blocked(Error::InvalidAmount));
+        assert_eq!(plan.effects, alloc::vec![]);
     }
 }

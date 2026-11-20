@@ -577,6 +577,10 @@ the v1 engine never emits — the JSON records the engine's behavior in its `not
 audit (see [`docs/scenario-matrix.md`](docs/scenario-matrix.md) findings F-2/F-3); correcting this
 prose is a semantics call for a maintainer, not a doc-generation side effect.
 
+The decision table is a pure function of `(policy, flags, time, contexts)`: the Env shell loads
+state and parses host contexts, while `engine::pure::decide` in `src/engine.rs` evaluates the table
+without storage access, host conversion, event emission, or ledger mutation.
+
 Note the dead-man auto-freeze (`#2`) applies even to `heartbeat` from the registered key: a
 heartbeat arriving after the grace window expired cannot revive the account — revival is the
 admin's `unfreeze` (§7). This is the precise freeze/reversal boundary. The dead-man gate is evaluated against the pre-transaction heartbeat for every context in the transaction, including the heartbeat self-call.
@@ -1718,8 +1722,9 @@ Not guarded by v1 (documented, not hidden):
 - fine-grained amount/recipient limits on non-SAC protocol calls (§2, v2 item)
 - a live attacker who keeps the agent key heartbeating (caps still bind them; the switch only
   fires on silence)
-- admin compromise (admin can freeze and rewrite policy/keys — that is its function; it still
-  cannot move funds)
+- admin compromise (admin can freeze and rewrite policy/keys — that is its function; it has no
+  fund-moving entrypoint and cannot sign as the agent, but it **can** install a permissive
+  policy and rotate the agent key to one it controls — see §10.4)
 - **admin-key loss while the dead-man switch is armed** — arming `dms_grace_secs > 0` makes
   the admin key a liveness dependency for the entire balance. The grace freeze is reversed
   only by an admin `unfreeze` (§5, §5.1), and `propose_admin_rotation` requires the current
@@ -1769,9 +1774,9 @@ transaction will execute under this account. What the binding therefore covers:
   (`set_policy`, `revoke_policy`, `freeze`, `unfreeze`, `rotate_agent_key`) runs under
   `require_auth(Admin)` — a different address, a different auth entry, a different
   payload — and an agent-signed entry never satisfies it
-  (`agent_signature_does_not_confer_admin_authority`). The converse is the
-  admin-compromise bullet above: the admin cannot produce the agent's signature either,
-  so it may widen policy but still cannot move funds.
+  (`agent_signature_does_not_confer_admin_authority`). The converse is specified in §10.4:
+  the admin cannot produce the agent's signature either, so an admin-signed guard payload
+  fails before any policy is read, even after a hostile policy widening.
 
 **Leaked payload + sig, mid-flight.** Anyone holding `(payload, sig)` before inclusion
 can submit **exactly** tx A themselves — front-running the already-authorized
@@ -1908,6 +1913,60 @@ The asymmetry worth stating to a stakeholder: this is a *cheap* attack — no fu
 the account, no state — and a *bounded* one — it cannot escalate into a spend, a policy change,
 or a locked budget. Its cost is measured in operator attention, and its remedy is one
 `rotate_agent_key`.
+
+### 10.4 Admin compromise — control compromise, not fund movement
+
+**What the admin key can reach.** The admin is a policy-control key: `set_policy`, `pause`,
+`resume`, `reset_window`, `increase_window_cap`, `revoke_policy`, `freeze`, `unfreeze`,
+`rotate_agent_key`, and the `propose_admin_rotation` / `cancel_admin_rotation` half of admin
+handover all run under `require_auth(Admin)` (§7). An attacker holding that key can therefore:
+
+- grief availability indefinitely with `freeze()` or `pause()` (and can undo its own grief
+  with `unfreeze()` / `resume()`),
+- widen or refresh a budget with `set_policy`, `increase_window_cap`, `reset_window`, or a
+  `revoke_policy` followed by a fresh `set_policy` (§7, issue #289),
+- install `allow_any_recipient = true` with disabled caps, and
+- re-bind `AgentPubkey` with `rotate_agent_key` to a key the attacker controls.
+
+That last power is why admin compromise is a **control** compromise: once the attacker's key
+is registered as the agent key, its policy-respecting spends are valid by definition. Describing
+the threat as "the admin cannot touch funds" would be false; the accurate claim is narrower and
+is made in §1: no admin *entrypoint* moves value, and an admin signature never substitutes for
+the agent's signature at `__check_auth`.
+
+**What the admin key cannot reach by itself.** There is no `sweep`, `withdraw`, or arbitrary
+transfer entrypoint in the ABI. Admin credentials address `DataKey::Admin`, while the guard's
+custom-account auth entry addresses the guard; `__check_auth` verifies that entry's signature
+against `DataKey::AgentPubkey` before loading any policy state (§10.2). An Ed25519 key held by
+the admin therefore traps at `failed ED25519 verification` even if the admin first installs the
+most permissive policy the validator accepts. This is pinned by
+`admin_key_cannot_authorize_guarded_transfer` (`src/integration_tests.rs`): after
+`allow_any_recipient = true` and with caps disabled, a transfer signed by an admin-held key
+moves no balance, consumes no window, and emits no allowed decision; the same transfer signed
+by the registered key succeeds. Rotation is different — and deliberately so: after
+`rotate_agent_key`, the new key *is* the registered agent key, so its authorization is the
+contract working as designed, not a bypass of signature verification.
+
+**Mitigations and response.**
+
+- Treat admin-key custody as the boundary it is: hardware-backed or multisig custody, kept
+  separate from the agent key and from the heartbeat automation. Monitor `policy_set`,
+  `frozen` / `unfrozen`, `agent_rotated`, and admin-rotation events; an unexpected one is the
+  signal, because a hostile admin's writes are indistinguishable from legitimate ones at the
+  contract level (§9).
+- An honest admin's `freeze()` is an auditable first response, but it is reversible by the
+  hostile admin; it cannot be the recovery by itself. The "rotate_admin" action in the issue
+  wording maps to the implemented two-step handover:
+  `propose_admin_rotation(new_admin)` from the current admin, then
+  `confirm_admin_rotation()` from the proposed admin. Confirmation proves the replacement key
+  is live, so a typo cannot lock out policy management; `cancel_admin_rotation()` abandons a
+  pending proposal (§7.2, [`docs/functions/admin-rotation.md`](docs/functions/admin-rotation.md)).
+- If the agent key is also exposed, rotate it from a clean admin session with
+  `rotate_agent_key`, re-attest the installed policy, and resume only after the window and
+  heartbeat state are understood. The operational sequence is in
+  [`docs/key-rotation.md`](docs/key-rotation.md), including the suspected-leak and admin-key
+  loss incident variants. A lost admin key cannot be rotated out (§10), so custody is a
+  precondition, not a cleanup step.
 
 ---
 

@@ -39,6 +39,9 @@ Deployment is not the standard contract flow: the WASM is uploaded, the contract
 created, `initialize` is called, a policy is installed, and `status` verifies the result.
 The ordered sequence with copy-pasteable commands, expected output, and the most likely
 failure of each step is the [deployment runbook](operations/deployment-runbook.md).
+For a single testnet walkthrough that starts from fresh keys and ends at the first
+agent-signed heartbeat (including pubkey derivation and the shared fixture policy),
+see [`examples/QUICKSTART.md`](../examples/QUICKSTART.md) — testnet-only, unaudited software.
 
 ## Run tests
 
@@ -69,7 +72,9 @@ src/
   types.rs             # Policy model, storage keys, errors, parsed-call enum
   integration_tests.rs # Host-routed tests incl. real Ed25519 auth signatures
 examples/
+  QUICKSTART.md        # Fresh-keys → initialize → policy → first heartbeat (testnet)
   agent_pubkey.rs      # Derive raw Ed25519 pubkey from a Stellar secret key
+  agent-loop.md        # Steady-state heartbeat cadence and blocked-reason handling
 tools/
   agent-tx/            # Sign+submit helper for the custom-account address
 tests/fixtures/        # Real testnet evidence (tx hashes, contract IDs, events)

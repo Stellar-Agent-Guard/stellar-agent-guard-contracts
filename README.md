@@ -143,7 +143,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 250 tests, isolated (no network)
+cargo test                                      # 253 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -153,6 +153,12 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
   --network testnet --source-account guard_admin --send=no -- status
 # → {"admin_frozen":false,"has_policy":true,"heartbeat_expired":true,"last_heartbeat":1788855212,"now":1788863857}
 ```
+
+For the full one-page operator sequence — generate admin/agent keys, derive the
+agent pubkey, deploy, `initialize`, install the shared fixture policy, and send
+the first agent-signed heartbeat — see
+[`examples/QUICKSTART.md`](examples/QUICKSTART.md). It is testnet-only and
+includes the unaudited-software warning.
 
 ## Public functions
 
@@ -359,8 +365,11 @@ read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
   --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7
 ```
 
-For the full steady-state loop an agent must run (heartbeat cadence, per-transfer
-pre-flight, blocked-reason handling, DMS stop conditions), see
+For the one-shot setup that produces this heartbeat — keys → pubkey → deploy →
+`initialize` → policy → first heartbeat — see
+[`examples/QUICKSTART.md`](examples/QUICKSTART.md). For the full steady-state
+loop an agent must run (heartbeat cadence, per-transfer pre-flight,
+blocked-reason handling, DMS stop conditions), see
 [`examples/agent-loop.md`](examples/agent-loop.md).
 The TypeScript equivalent is the SDK's
 [agent-runtime guide issue](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
@@ -1069,7 +1078,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-250 tests (unit + integration) cover the policy decision engine — including the regression
+253 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement

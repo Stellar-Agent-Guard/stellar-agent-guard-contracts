@@ -3162,6 +3162,67 @@ fn agent_signature_does_not_confer_admin_authority() {
     h.unfreeze();
 }
 
+/// SPEC §10.4: a compromised admin can widen the policy through its own
+/// `require_auth(Admin)` path, but admin key material presented as the guard's
+/// custom-account credential still has to satisfy `__check_auth`'s Ed25519
+/// check against `AgentPubkey`. Even a maximally permissive policy cannot turn
+/// an admin-signed guard auth entry into fund movement.
+#[test]
+fn admin_key_cannot_authorize_guarded_transfer() {
+    let mut h = Harness::new();
+    let recipient = h.other.clone();
+
+    // The hostile admin's first move: remove the recipient allowlist. With no
+    // caps configured, this policy admits the transfer under the decision
+    // table — the only remaining gate is signature verification.
+    let mut widened = h.base_policy();
+    widened.allow_any_recipient = true;
+    h.install_policy(&widened);
+    h.set_time(1_000);
+
+    // `MockAdmin`'s own account has a void signature, so model the key an
+    // attacker actually holds as a separate Ed25519 key and present it in the
+    // *guard's* auth entry, where the contract can only compare it to the
+    // registered agent key.
+    let admin_key = SigningKey::from_bytes(&[45u8; 32]);
+    assert_ne!(
+        admin_key.verifying_key().to_bytes(),
+        h.agent.verifying_key().to_bytes()
+    );
+    let transfer_root = h.transfer_invocation(&h.guard, &recipient, 5);
+    let entry = h.guard_entry_with(&admin_key, &transfer_root);
+    h.enforce(entry);
+
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        MockAssetClient::new(&h.env, &h.asset).transfer(&h.guard, &recipient, &5);
+    }));
+    let err = res.expect_err("admin key material must not authorize the guard account");
+    let msg = panic_message(&*err);
+    assert!(
+        msg.contains("failed ED25519 verification"),
+        "rejection must happen at signature verification, not at a policy gate: {msg}"
+    );
+
+    // The widened policy admitted no value, consumed no window, and emitted no
+    // allowed decision: the transaction aborted before any of that.
+    assert_eq!(h.balance(&h.guard), 1_000_000_000);
+    assert_eq!(h.balance(&recipient), 0);
+    assert_eq!(h.emitted_allowed_auth_count(), 0);
+    // The first `set_policy` seeds an empty ledger; the rejected transfer must
+    // not add an entry to it.
+    let window = h
+        .stored_window()
+        .expect("installing the first policy seeds an empty window");
+    assert_eq!(window.total, 0);
+    assert!(window.entries.is_empty());
+
+    // Control: the same widened transfer is authorized when the registered
+    // agent signs it, so the rejection above was the wrong key, not a policy
+    // decision.
+    h.transfer(&recipient, 5);
+    assert_eq!(h.balance(&recipient), 5);
+}
+
 #[test]
 fn rotate_agent_key_event_carries_old_and_new_fingerprints() {
     let h = Harness::new();
