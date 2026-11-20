@@ -421,6 +421,12 @@ pub struct Status {
     /// Whether the configured heartbeat grace has elapsed.
     pub heartbeat_expired: bool,
     /// Unix timestamp of the last heartbeat, or zero if none.
+    ///
+    /// This public ABI field predates the `Option<u64>` storage encoding (issue
+    /// #295) and is kept as a plain `u64` for wire stability: an epoch-zero
+    /// heartbeat also reads as `0` here. Do not derive a DMS decision from this
+    /// field — the engine and `heartbeat_expired` use the stored `Option`, where
+    /// the two states are distinct.
     pub last_heartbeat: u64,
     /// Timestamp used for this snapshot: ledger time for `status()`, or the
     /// caller-supplied time for `status_at()`.
@@ -595,7 +601,11 @@ pub enum DataKey {
     Policy,
     /// Persistent: rolling spend ledger for asset transfers.
     Window,
-    /// Persistent: unix seconds of last agent heartbeat (0 = never).
+    /// Persistent: unix seconds of the last agent heartbeat, stored as
+    /// `Option<u64>`: `None` = never heartbeated, `Some(t)` = the last
+    /// attestation (issue #295). The `Option` keeps "never" distinct from a
+    /// heartbeat stamped at ledger timestamp 0, which is a real attestation and
+    /// arms the dead-man switch. See SPEC §3.
     LastHeartbeat,
     /// Persistent: admin-initiated freeze flag.
     AdminFrozen,

@@ -74,7 +74,7 @@ fn base_policy(env: &Env) -> PolicyConfig {
 fn alive() -> AccountState {
     AccountState {
         admin_frozen: false,
-        last_heartbeat: 0,
+        last_heartbeat: None,
     }
 }
 
@@ -115,7 +115,7 @@ fn main() {
     let mut ledger = Ledger::empty(&env);
     let frozen_state = AccountState {
         admin_frozen: true,
-        last_heartbeat: 0,
+        last_heartbeat: None,
     };
     measure_decide(&env, "Gate 1: AdminFrozen", || {
         decide(
@@ -134,7 +134,7 @@ fn main() {
     p2.dms_grace_secs = 100;
     let expired_state = AccountState {
         admin_frozen: false,
-        last_heartbeat: 500,
+        last_heartbeat: Some(500),
     };
     measure_decide(&env, "Gate 2: HeartbeatExpired", || {
         decide(

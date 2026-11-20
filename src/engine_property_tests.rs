@@ -179,7 +179,7 @@ fn decide_matches_specification_truth_table() {
                     let config = policy(&env, row.paused, row.outside_window, row.dms_expired);
                     let account_state = AccountState {
                         admin_frozen: row.admin_frozen,
-                        last_heartbeat: u64::from(row.dms_expired),
+                        last_heartbeat: row.dms_expired.then_some(1),
                     };
                     let contexts = vec![&env, context(&env, self_call_ok, kind, valid_detail)];
                     let mut ledger = Ledger::empty(&env);

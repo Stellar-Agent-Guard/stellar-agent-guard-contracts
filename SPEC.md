@@ -207,7 +207,7 @@ TTL on every write; see §9.5).
 | `PolicyVersion` | `u32` | instance | policy-model format version written at `initialize` (`POLICY_FORMAT_VERSION`, issue #339); absent before initialization. Read via `policy_version()` (never moved by `set_policy`, `revoke_policy`, or a pause) |
 | `Policy` | `PolicyConfig` | persistent | current policy (`None` = default-deny) |
 | `Window` | `WindowState` | persistent | rolling spend ledger for asset transfers (global + per-recipient) |
-| `LastHeartbeat` | `u64` | persistent | unix seconds of last agent heartbeat (0 = never) |
+| `LastHeartbeat` | `Option<u64>` | persistent | unix seconds of the last agent heartbeat: `Some(t)` = last attestation (may be `0`), `None` = never heartbeated (issue #295). The `Option` is what keeps "never" distinct from a heartbeat at ledger timestamp 0 — `Some(0)` arms the dead-man switch, `None` never does |
 | `AdminFrozen` | `bool` | persistent | admin-initiated freeze flag |
 | `PolicyRevision` | `u64` | persistent | policy sequence number; incremented on every `set_policy`/`revoke_policy` and on a `pause()`/`resume()` that actually flips `paused` (issues #289/#290), stamped into `policy_set`/`policy_revoked`/`paused`/`resumed`/`auth_checked` events (§9, issue #38) |
 
@@ -559,7 +559,7 @@ ledger time, which Soroban code cannot forge):
 |---|---|---|
 | 0 | authorization contains more than `MAX_AUTH_CONTEXTS` contexts | **Block** (`Reason::TooManyAuthContexts`) before evaluating any context |
 | 1 | `AdminFrozen` is set | **Block** (`Reason::AdminFrozen`) |
-| 2 | dead-man switch enabled AND `LastHeartbeat != 0` AND `now - LastHeartbeat > dms_grace_secs` | **Block** (`Reason::HeartbeatExpired`) — automatic freeze, derived lazily, no background write |
+| 2 | dead-man switch enabled AND `LastHeartbeat` is set (`Some`) AND `now - LastHeartbeat > dms_grace_secs` | **Block** (`Reason::HeartbeatExpired`) — automatic freeze, derived lazily, no background write |
 | 3 | no `Policy` stored (revoked or never set) | **Block** (`Reason::NoPolicy`) — default deny |
 | 4 | `paused` | **Block** (`Reason::Paused`) |
 | 5 | `active_from != 0 && now < active_from`, or `active_until != 0 && now > active_until` | **Block** (`Reason::OutsideActiveWindow`) |
@@ -700,12 +700,15 @@ gate can continue to deny authorization.
   not `>= grace`), expiry blocks the transfer *and* the heartbeat, a blocked heartbeat leaves the
   clock untouched, and `unfreeze` re-arms it so the new window expires on its own terms. It also
   pins the two degenerate encodings: `dms_grace_secs == 0` (switch disabled — no amount of silence
-  expires the account, `dms_health` returns `Ok` without consulting the clock) and
-  `LastHeartbeat == 0` (never armed — rule #2's `!= 0` clause means the gate can never fire on the
-  sentinel, while `dms_health` reports `Expired`; a first heartbeat replaces the sentinel and the
-  grace binds from then on). Read that asymmetry as intended: the gate defaults to *not* freezing an
-  account it holds no attestation for, and the advisory view is where the missing attestation is
-  surfaced. Measured: see `dms_timeline_edge_matrix` (scenario B).
+  expires the account, `dms_health` returns `Ok` without consulting the clock) and the never-armed
+  state, stored as `None` (issue #295). Rule #2 fires for **any** recorded heartbeat, including
+  `Some(0)` — a policy installed at ledger timestamp 0, which the local test environment defaults
+  to. `None` means no attestation exists at all (only reachable before a first install or after
+  `revoke_policy`, where the no-policy gate applies first), and `dms_health` reports `Expired` for
+  it while the gate stays closed. Read that asymmetry as intended: the gate defaults to *not*
+  freezing an account it holds no attestation for, and the advisory view is where the missing
+  attestation is surfaced. Measured: see `dms_timeline_edge_matrix` (scenario B, which installs at
+  ledger timestamp 0 and expires on schedule).
 
 ### 5.1 Reversal boundaries — which gate is cleared by what
 
@@ -832,7 +835,8 @@ availability, which is the wrong default for a spend guard. The secondary reason
   `now`/`last_heartbeat`/`heartbeat_expires_at`, `status_at(as_of)`, and the `heartbeat` event's
   `expires_at` are all unix seconds. A sequence-based DMS would introduce a second clock and make
   `status_at` unable to project the DMS gate without a new ledger-sequence parameter.
-- **Storage and events stay intelligible.** `LastHeartbeat` is a `u64` unix timestamp and the
+- **Storage and events stay intelligible.** `LastHeartbeat` holds a unix timestamp (an
+  `Option<u64>` whose `Some` value is the timestamp, per §3) and the
   heartbeat event records `at + dms_grace_secs` as a deadline. A sequence basis would change the
   meaning of both fields, and a bare `u64` could no longer be interpreted without knowing which
   basis wrote it.
