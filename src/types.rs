@@ -383,6 +383,16 @@ pub enum ParsedCall {
         asset: Address,
         to: Address,
         amount: i128,
+        /// The allowance holder from a `transfer_from` call (`args[1]`);
+        /// `None` for a plain `transfer`.
+        ///
+        /// `parse_call` decodes this slot, so a malformed spender is denied as
+        /// malformed args instead of being silently ignored (issue #293). The
+        /// policy itself does not restrict the spender: it governs the
+        /// destination and amount of the move, and the guarded account's own
+        /// signature is what authorizes the context. SPEC §6.2 records that
+        /// semantic.
+        spender: Option<Address>,
     },
     /// A call on an allowlisted asset that is not `transfer`/`transfer_from`
     /// (e.g. `mint`, `burn`) — never allowed for the account as authorizer.
