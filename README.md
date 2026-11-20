@@ -143,7 +143,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 250 tests, isolated (no network)
+cargo test                                      # 257 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -467,6 +467,16 @@ budget: it does not refund what was spent while paused.
 > account-level `AdminFrozen` brake that binds even a policyless account — and note that
 > `unfreeze` also re-arms the dead-man-switch clock (warning above), while `resume` touches
 > nothing but the flag.
+
+### `self_lock` (agent)
+```rust
+pub fn self_lock(env: Env)   // agent only — sets AdminFrozen = true
+```
+The agent can stop its own spending when the admin key is unavailable (issue #306). It
+routes through `__check_auth`, so the registered agent's signature is verified and the
+normal account gates apply. It is strictly a capability *reduction*: no funds move, and
+the agent cannot clear the flag — only the admin's `unfreeze` revives the account. It
+emits `event_self_locked`. See [SPEC §5](SPEC.md#5-dead-man-switch--precise-definition).
 
 ### `policy` (read)
 ```rust
@@ -832,8 +842,8 @@ its own commit so the hash change is reviewable on its own.
 ┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
 │ Load PolicyConfig,   │◀───│ Contexts >64 block   │◀───│ Load instance +      │
 │ AdminFrozen,         │    │ before gates; else   │    │ persistent state     │
-│ LastHeartbeat, now   │    │ admin → DMS → pause  │    │ (agent key, policy,  │
-└──────────┬───────────┘    │ → active window      │    │ window, heartbeat)   │
+│ LastHeartbeat, now   │    │ no policy → frozen → │    │ (agent key, policy,  │
+└──────────┬───────────┘    │ DMS → pause → window │    │ window, heartbeat)   │
            │                └──────────────────────┘    └──────────────────────┘
            ▼
 ┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
@@ -877,15 +887,17 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    ledger time are loaded. No policy stored ⇒ `NoPolicy` — the account is default-deny.
 3. **Context-count bound.** After loading the snapshot, `decide` rejects more than
    `MAX_AUTH_CONTEXTS` (64) contexts as one aggregate block before account gates or parsing.
-4. **Account-level gates** (in this order): admin freeze, dead-man switch (grace elapsed
-   since last heartbeat), pause, active window. Any one firing rejects the transaction
-   regardless of what the call is. Every context in the transaction is evaluated against
+4. **Account-level gates** (in this order): no policy (default deny), admin freeze
+   (admin `freeze` or agent `self_lock`), dead-man switch (grace elapsed since last
+   heartbeat), pause, active window. Any one firing rejects the transaction regardless
+   of what the call is. The order is stated once in [SPEC §4](SPEC.md#4-policy-semantics--decision-table);
+   this walkthrough references that table. Every context in the transaction is evaluated against
    the pre-transaction snapshot, so the dead-man gate evaluates the pre-transaction
    heartbeat for every context in the transaction, including the heartbeat self-call — a
    bundle of `[heartbeat, transfer]` against an expired account is judged against the
    expired state and blocked, never updating `LastHeartbeat`.
-4. **Per-context classification.** `parse_call` turns each `Context` into a typed call:
-   `SelfCall` (only `heartbeat` is allowed), `CreateContract` (denied in v1),
+5. **Per-context classification.** `parse_call` turns each `Context` into a typed call:
+   `SelfCall` (only `heartbeat` and `self_lock` are allowed), `CreateContract` (denied in v1),
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).
 6. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
@@ -1069,7 +1081,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-250 tests (unit + integration) cover the policy decision engine — including the regression
+257 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement

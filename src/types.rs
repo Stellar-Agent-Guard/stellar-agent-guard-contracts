@@ -121,6 +121,10 @@ pub enum PolicyRuleId {
     AssetCapUnknownAsset,
     /// The same asset appears twice in `asset_caps`.
     DuplicateAssetCap,
+    /// A contract appears in both `assets` and `protocols` (issue #296).
+    /// Appended last so the previously documented variant ordinals stay
+    /// wire-stable.
+    AssetProtocolOverlap,
 }
 
 /// Result of the `validate_policy` read (issue #35): whether a candidate
