@@ -572,10 +572,11 @@ engine can actually return for each row and which test pins each one. `tests/dec
 fails `cargo test` — and therefore CI — if this table, the JSON, the `README` walkthrough, the
 `Error` enum, and the engine's branches disagree. Edit a decision row in `decision-table.json`
 first, then paste the rendered line back into the table above; never edit only the SPEC side.
-Where this table and the engine still disagree — SPEC row 7 names `Reason::AssetNotAllowed`, which
-the v1 engine never emits — the JSON records the engine's behavior in its `note` and points at the
-audit (see [`docs/scenario-matrix.md`](docs/scenario-matrix.md) findings F-2/F-3); correcting this
-prose is a semantics call for a maintainer, not a doc-generation side effect.
+Row 7's reason list is complete for both variants that used to be unreachable: `AssetNotAllowed`
+is emitted for a SAC transfer on an unlisted asset (§6.2) and for a paused `asset_caps` entry, and
+`ProtocolNotAllowed` for a protocol rule marked `paused` (issue #291). The JSON records which
+engine branch and which test pins each reason (see also [`docs/scenario-matrix.md`](docs/scenario-matrix.md)
+findings F-2/F-3).
 
 Note the dead-man auto-freeze (`#2`) applies even to `heartbeat` from the registered key: a
 heartbeat arriving after the grace window expired cannot revive the account — revival is the
@@ -1010,9 +1011,20 @@ An asset contract listed in `assets` invoked with any other function — in part
 administrative and custody-altering functions `mint`, `burn`, `clawback`, `set_admin`, `pause`,
 and `unpause`, none of which the account should ever call as authorizer — is blocked with the
 single dedicated reason `AssetFnNotAllowed` (one code for the whole class, so a compromised agent
-probing token custody is one alertable signal rather than several). The same function names on a
-contract that is *not* listed in `assets` are never parsed as asset calls and stay `UnknownContract` — an agent cannot silently move balances on an unregistered SAC. This keeps
-the "we know what we're enforcing" promise exact.
+probing token custody is one alertable signal rather than several).
+
+**Unlisted assets are `AssetNotAllowed`, not `UnknownContract` (issue #291).** A contract that is
+not in `assets` (and not an allowlisted protocol) but is invoked through the standard SAC transfer
+ABI — `transfer` with exactly 3 arguments or `transfer_from` with exactly 4 — is classified as an
+*unlisted asset* and blocked with `AssetNotAllowed` (code 20). The distinction matters to
+operators: `asset_not_allowed` means "this token is missing from the asset allowlist", while
+`unknown_contract` means "the agent addressed a contract the policy knows nothing about".
+Everything else on an unlisted contract — `mint`, `burn`, `clawback`, `set_admin`, `pause`,
+`unpause`, any other function name, or a `transfer`-shaped call with the wrong arity — stays
+`UnknownContract`, so a call whose meaning we cannot pin is still default-denied and an agent
+cannot silently move balances on an unregistered SAC. Protocol membership is checked first: an
+allowlisted protocol that happens to expose a `transfer`-shaped function is governed by its
+protocol rule, not by the asset allowlist.
 
 **Measured worst case: evaluation ≈ 338,315 CPU instructions per context.** Rules 1 and 2 are the only
 steps whose cost depends on a policy list length, and §8 caps every recipient list at
@@ -1055,7 +1067,9 @@ not in a rule's `fns` allowlist (when present) are blocked `FunctionNotAllowed`.
 ### 6.4 Anything else — blocked
 
 A context whose contract is not the account itself, not in `assets`, and not in `protocols`
-is blocked (`UnknownContract`). Host-function contract creation contexts (`CreateContractHostFn`
+is blocked (`UnknownContract`) — except a call through the standard SAC transfer ABI (`transfer`
+with 3 arguments, `transfer_from` with 4), which is an unlisted asset and is blocked
+`AssetNotAllowed` (§6.2, issue #291). Host-function contract creation contexts (`CreateContractHostFn`
 and `CreateContractWithCtorHostFn`) are mapped by `parse_call` to `ParsedCall::CreateContract`
 and blocked with `CreateContractNotAllowed` (code 28). The account is **default-deny**: adding
 a protocol is an explicit policy act, and contract creation by the agent is disallowed.
@@ -1140,11 +1154,11 @@ The rule has three enforcement mechanisms, so a slip is caught rather than revie
 | 12 | `NoPolicy` | `no_policy` | Yes | Account-level gate evaluated in `check()`. |
 | 13 | `Paused` | `paused` | Yes | Account-level gate evaluated in `check()`. |
 | 14 | `OutsideActiveWindow` | `outside_active_window` | Yes | Account-level gate evaluated in `check()`. |
-| 20 | `AssetNotAllowed` | `asset_not_allowed` | Yes | Evaluated in `check()` asset parameter validation. |
+| 20 | `AssetNotAllowed` | `asset_not_allowed` | Yes | Emitted for a SAC `transfer`/`transfer_from` on a contract missing from `assets` (an unlisted asset, §6.2, issue #291) and for an `asset_caps` entry marked `paused`. Reachable from both the auth path and `check()`'s asset parameter. |
 | 21 | `RecipientNotAllowed` | `recipient_not_allowed` | Yes | Evaluated in `check()` recipient parameter validation. |
 | 22 | `PerTxCapExceeded` | `per_tx_cap_exceeded` | Yes | Evaluated against `check()` amount parameter. |
 | 23 | `WindowCapExceeded` | `window_cap_exceeded` | Yes | Evaluated against rolling window ledger in `check()`. |
-| 24 | `ProtocolNotAllowed` | `protocol_not_allowed` | No | Auth-path only: non-SAC protocol calls do not use `check()`. |
+| 24 | `ProtocolNotAllowed` | `protocol_not_allowed` | No | Auth-path only: a protocol rule marked `paused` is denied with this code (and non-SAC protocol calls do not use `check()`). |
 | 25 | `FunctionNotAllowed` | `function_not_allowed` | No | Auth-path only: restricted functions apply to auth contexts, not `check()`. |
 | 32 | `AssetFnNotAllowed` | `asset_fn_not_allowed` | No | Auth-path only: non-transfer functions on listed SAC contracts. |
 | 26 | `UnknownContract` | `unknown_contract` | No | Auth-path only: unlisted contracts are encountered in auth contexts. |

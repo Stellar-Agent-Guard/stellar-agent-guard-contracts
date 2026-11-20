@@ -387,6 +387,12 @@ pub enum ParsedCall {
     /// A call on an allowlisted asset that is not `transfer`/`transfer_from`
     /// (e.g. `mint`, `burn`) — never allowed for the account as authorizer.
     AssetOther { asset: Address, fname: Symbol },
+    /// A call that uses the standard SAC `transfer`/`transfer_from` ABI on a
+    /// contract that is in neither `assets` nor `protocols` — an *unlisted
+    /// asset* (issue #291). Denied with `AssetNotAllowed` rather than
+    /// `UnknownContract`, so telemetry can distinguish "this token is missing
+    /// from the asset allowlist" from "the agent touched a foreign contract".
+    UnlistedAsset { contract: Address, fname: Symbol },
     /// A call on an allowlisted protocol contract.
     Protocol { contract: Address, fname: Symbol },
     /// A call to this account's own functions (e.g. `heartbeat`).
