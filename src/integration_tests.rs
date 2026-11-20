@@ -1206,16 +1206,21 @@ impl Harness {
 
     /// Did the guard emit an `auth_checked` event with `result = allowed`?
     /// `#[contractevent]` prepends the event name to the topic list, so the
-    /// `result` topic (SPEC §9) is at index 1.
+    /// `result` topic (SPEC §9) is at index 1 and the reason at index 2. An
+    /// allowed decision carries the real `ok` reason symbol, never an empty one
+    /// (issue #300).
     fn emitted_allowed_auth(&self) -> bool {
         let want = ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("allowed")).unwrap());
+        let reason = symbol_val("ok");
         self.env
             .events()
             .all()
             .events()
             .iter()
             .any(|e| match &e.body {
-                xdr::ContractEventBody::V0(v0) => v0.topics.get(1) == Some(&want),
+                xdr::ContractEventBody::V0(v0) => {
+                    v0.topics.get(1) == Some(&want) && v0.topics.get(2) == Some(&reason)
+                }
             })
     }
 

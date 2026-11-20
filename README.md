@@ -650,7 +650,9 @@ host invokes it automatically on every authorization the account must approve. S
 4. Run the decision table (`decide`) — account-level gates first, then a per-context
    decision loop, then commit window admissions only if every context passed.
 5. Return `Ok(())` to approve the transaction, or `Err(reason)` to reject it — and emit
-   the `auth_checked` event either way. **Observability caveat:** a blocked decision rolls
+   the `auth_checked` event either way, with real topics in both cases:
+   `[event_auth_checked, allowed, ok]` on approval and
+   `[event_auth_checked, blocked, <reason>]` on denial (SPEC §9). **Observability caveat:** a blocked decision rolls
    back with its transaction, so its `auth_checked` event never becomes a committed ledger
    event — blocks reach observers via simulation diagnostics and the SDK telemetry listener
    (dual-stream), not via raw RPC `getEvents`. See
