@@ -1052,6 +1052,13 @@ defensible v1 enforcement that does not overclaim — it directly addresses runa
 (the threat case this project exists to stop) within what the host actually exposes. Functions
 not in a rule's `fns` allowlist (when present) are blocked `FunctionNotAllowed`.
 
+**One scan per context (issue #297).** `parse_call` classifies a contract as a protocol call by
+scanning `policy.protocols` once, and returns the index of the matched rule alongside the parsed
+call. `decide` reads `policy.protocols[index]` directly to apply `fns` and `paused` — it does not
+loop the vector a second time on the authorization hot path, and the two reads cannot disagree
+about which rule matched. The vector is operator-bounded by `MAX_POLICY_PROTOCOLS` (§8), so this
+is one bounded scan per protocol context.
+
 ### 6.4 Anything else — blocked
 
 A context whose contract is not the account itself, not in `assets`, and not in `protocols`
