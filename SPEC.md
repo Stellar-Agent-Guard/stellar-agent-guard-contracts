@@ -977,7 +977,18 @@ Context whose `contract == env.current_contract_address()`. Allowed function set
 calls whose semantics and arguments are known:
 
 - `transfer` args: `(from, to, amount)` — the account is `from`; recipient = args[1], amount = args[2].
-- `transfer_from` args: `(from, spender, to, amount)` — the account is `from`; recipient = args[2], amount = args[3].
+- `transfer_from` args: `(from, spender, to, amount)` — the account is `from` and the spender;
+  recipient = args[2], amount = args[3].
+
+**Party binding (issue #10).** Classification is not based on contract and function name alone.
+After exact-arity validation, `args[0]` must decode to an `Address` equal to
+`env.current_contract_address()`; for `transfer_from`, `args[1]` must also decode to that same
+address. A context naming another `from` — including one where the guarded account appears only as
+`to` — or another spender is not a transfer this account is making, so it is classified as
+`Unknown` and denied with the existing stable `UnknownContract` reason. This is a deliberate
+deny-vs-`Unknown` choice: it adds no reason code, event topic, or decision-table row, while keeping
+default-deny. Malformed or non-address party fields take the same `Unknown` path, and no recipient
+or amount from such a context is ever scored against the window.
 
 Note on multi-asset batches: the window total is a unit-less sum across assets until per-asset caps
 land; operators should use single-asset policies for meaningful windows.

@@ -808,6 +808,22 @@ impl Harness {
         self.invocation(&self.asset, "transfer", args)
     }
 
+    fn transfer_from_invocation(
+        &self,
+        from: &Address,
+        spender: &Address,
+        to: &Address,
+        amount: i128,
+    ) -> SorobanAuthorizedInvocation {
+        let args = std::vec![
+            from.clone().into_val(&self.env),
+            spender.clone().into_val(&self.env),
+            to.clone().into_val(&self.env),
+            amount.into_val(&self.env),
+        ];
+        self.invocation(&self.asset, "transfer_from", args)
+    }
+
     fn heartbeat_invocation(&self) -> SorobanAuthorizedInvocation {
         self.invocation(&self.guard, "heartbeat", std::vec![])
     }
@@ -1387,6 +1403,60 @@ impl Harness {
         let signature: Val = BytesN::<64>::from_array(&self.env, &sig).into_val(&self.env);
         self.env
             .try_invoke_contract_check_auth::<GuardError>(guard, &payload, signature, &contexts)
+    }
+
+    /// Build a raw SAC `transfer` auth context with an explicit `from` party.
+    fn transfer_context(&self, from: &Address, to: &Address, amount: i128) -> Context {
+        let args = vec![
+            &self.env,
+            from.clone().into_val(&self.env),
+            to.clone().into_val(&self.env),
+            amount.into_val(&self.env),
+        ];
+        Context::Contract(ContractContext {
+            contract: self.asset.clone(),
+            fn_name: Symbol::new(&self.env, "transfer"),
+            args,
+        })
+    }
+
+    /// Build a raw SAC `transfer_from` auth context with explicit parties.
+    fn transfer_from_context(
+        &self,
+        from: &Address,
+        spender: &Address,
+        to: &Address,
+        amount: i128,
+    ) -> Context {
+        let args = vec![
+            &self.env,
+            from.clone().into_val(&self.env),
+            spender.clone().into_val(&self.env),
+            to.clone().into_val(&self.env),
+            amount.into_val(&self.env),
+        ];
+        Context::Contract(ContractContext {
+            contract: self.asset.clone(),
+            fn_name: Symbol::new(&self.env, "transfer_from"),
+            args,
+        })
+    }
+
+    /// Sign a host-computed invocation and invoke `__check_auth` over exactly
+    /// the supplied contexts. Used for call shapes the mock asset cannot route
+    /// itself (a non-guard `from`, or `transfer_from`).
+    fn invoke_check_auth_context(
+        &mut self,
+        root: &SorobanAuthorizedInvocation,
+        context: Context,
+    ) -> Result<(), Result<GuardError, InvokeError>> {
+        let nonce = self.guard_nonce;
+        self.guard_nonce += 1;
+        let payload = self.payload(nonce, root);
+        let sig = self.agent.sign(&payload).to_bytes();
+        let contexts = vec![&self.env, context];
+        let guard = self.guard.clone();
+        self.invoke_check_auth_raw(&guard, &payload, &sig, &contexts)
     }
 
     /// Invoke `__check_auth` with explicit raw payload and raw signature bytes.
@@ -7068,4 +7138,106 @@ fn empty_auth_contexts_approves_without_emitting_auth_checked() {
     assert_eq!(allowed_res, Ok(()));
     assert_eq!(event_count(&h.env, "event_auth_checked"), 0);
     assert_eq!(h.stored_window().unwrap().total, 40);
+}
+
+// ── Issue #10: the guarded account must be the transfer's `from` ───────────
+//
+// These are host-routed through `try_invoke_contract_check_auth`, so the
+// contexts cross the real custom-account verification path. `MockAsset` can
+// only route `transfer(from, to, amount)` where `from` is the caller; raw
+// contexts cover the crafted/unusual routings that motivated the issue. The
+// host discards events emitted by a failed `__check_auth` frame, so blocked
+// cases assert the exact error and the absence of state changes.
+
+#[test]
+fn transfer_from_the_guard_is_parsed_and_scored() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+
+    // The normal host-routed path: MockAsset calls `guard.require_auth()` with
+    // the guard in args[0], so it must remain an AssetTransfer and debit the
+    // rolling window.
+    let recv = h.recv.clone();
+    h.transfer(&recv, 5);
+
+    assert_eq!(h.stored_window().unwrap().total, 5);
+    assert_eq!(h.balance(&h.recv), 5);
+}
+
+#[test]
+fn transfer_naming_the_guard_as_to_is_unknown_and_not_scored() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    policy.allow_any_recipient = true;
+    h.install_policy(&policy);
+
+    let root = h.transfer_invocation(&h.other, &h.guard, 5);
+    let context = h.transfer_context(&h.other, &h.guard, 5);
+    let result = h.invoke_check_auth_context(&root, context);
+
+    assert_eq!(result, Err(Ok(GuardError::UnknownContract)));
+    let window = h
+        .stored_window()
+        .expect("set_policy persists an empty window");
+    assert_eq!(window.total, 0);
+    assert!(window.entries.is_empty());
+    assert_eq!(h.balance(&h.guard), 1_000_000_000);
+}
+
+#[test]
+fn transfer_with_an_unrelated_from_is_unknown_and_not_scored() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+
+    let root = h.transfer_invocation(&h.other, &h.recv, 5);
+    let context = h.transfer_context(&h.other, &h.recv, 5);
+    let result = h.invoke_check_auth_context(&root, context);
+
+    assert_eq!(result, Err(Ok(GuardError::UnknownContract)));
+    let window = h
+        .stored_window()
+        .expect("set_policy persists an empty window");
+    assert_eq!(window.total, 0);
+    assert!(window.entries.is_empty());
+    assert_eq!(h.balance(&h.recv), 0);
+}
+
+#[test]
+fn transfer_from_with_a_non_self_spender_is_unknown_and_not_scored() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+
+    let root = h.transfer_from_invocation(&h.guard, &h.other, &h.recv, 5);
+    let context = h.transfer_from_context(&h.guard, &h.other, &h.recv, 5);
+    let result = h.invoke_check_auth_context(&root, context);
+
+    assert_eq!(result, Err(Ok(GuardError::UnknownContract)));
+    let window = h
+        .stored_window()
+        .expect("set_policy persists an empty window");
+    assert_eq!(window.total, 0);
+    assert!(window.entries.is_empty());
+}
+
+#[test]
+fn transfer_from_with_the_guard_as_spender_is_parsed_and_scored() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+
+    let root = h.transfer_from_invocation(&h.guard, &h.guard, &h.recv, 5);
+    let context = h.transfer_from_context(&h.guard, &h.guard, &h.recv, 5);
+    let result = h.invoke_check_auth_context(&root, context);
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(h.emitted_allowed_auth_count(), 1);
+    assert_eq!(h.stored_window().unwrap().total, 5);
 }

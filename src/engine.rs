@@ -5,7 +5,7 @@
 use crate::types::{Error, ParsedCall, PolicyConfig};
 use crate::window::Ledger;
 use soroban_sdk::auth::{Context, ContractContext};
-use soroban_sdk::{Address, Env, Symbol, TryFromVal, Vec};
+use soroban_sdk::{Address, Env, Symbol, TryFromVal, Val, Vec};
 
 /// Account-level state the account gates (SPEC §4 rows 1–2) are evaluated against.
 pub struct AccountState {
@@ -288,6 +288,12 @@ fn parse_call(env: &Env, self_addr: &Address, ctx: &Context, cfg: &PolicyConfig)
     parse_call_inner(env, self_addr, ctx, cfg)
 }
 
+/// True when a raw SAC party field decodes to the guarded account itself.
+#[allow(clippy::must_use_candidate)]
+fn is_self_party(env: &Env, self_addr: &Address, val: Val) -> bool {
+    Address::try_from_val(env, &val).is_ok_and(|party| &party == self_addr)
+}
+
 #[allow(clippy::must_use_candidate)]
 fn parse_call_inner(
     env: &Env,
@@ -323,6 +329,24 @@ fn parse_call_inner(
                 // understand (SPEC section 6.2). Falling through to Unknown = default deny.
                 let expected_arity: u32 = if fn_name == &fn_transfer { 3 } else { 4 };
                 if args.len() != expected_arity {
+                    return ParsedCall::Unknown {
+                        contract: contract.clone(),
+                        fname: fn_name.clone(),
+                    };
+                }
+                // The guarded account must be the source of the funds. For
+                // `transfer_from` it must also be the spender: this engine does
+                // not authorize a third party spending an allowance from some
+                // other holder. A mismatch is not a partially-understood SAC
+                // transfer, so it falls through to Unknown/default-deny (issue #10).
+                let from_is_self = args
+                    .get(0u32)
+                    .is_some_and(|from| is_self_party(env, self_addr, from));
+                let spender_is_self = fn_name != &fn_transfer_from
+                    || args
+                        .get(1u32)
+                        .is_some_and(|spender| is_self_party(env, self_addr, spender));
+                if !from_is_self || !spender_is_self {
                     return ParsedCall::Unknown {
                         contract: contract.clone(),
                         fname: fn_name.clone(),
@@ -750,7 +774,19 @@ mod tests {
 
     fn transfer_ctx(env: &Env, asset: u8, to: u8, amount: i128) -> Context {
         let mut args: Vec<Val> = Vec::new(env);
-        args.push_back(addr(env, 9).into_val(env)); // from (ignored)
+        args.push_back(self_addr(env).into_val(env)); // from: the guard
+        args.push_back(addr(env, to).into_val(env));
+        args.push_back(amount.into_val(env));
+        Context::Contract(ContractContext {
+            contract: addr(env, asset),
+            fn_name: Symbol::new(env, "transfer"),
+            args,
+        })
+    }
+
+    fn transfer_ctx_with_from(env: &Env, asset: u8, from: u8, to: u8, amount: i128) -> Context {
+        let mut args: Vec<Val> = Vec::new(env);
+        args.push_back(addr(env, from).into_val(env));
         args.push_back(addr(env, to).into_val(env));
         args.push_back(amount.into_val(env));
         Context::Contract(ContractContext {
@@ -844,8 +880,8 @@ mod tests {
         let sa = self_addr(&env);
         let mut p = base_policy(&env);
         p.allow_any_recipient = true;
-        // from=9, spender=7, recipient=2, amount=5.
-        let ctx = transfer_from_ctx(&env, 1, 9, 7, 2, 5);
+        // from=self, spender=self, recipient=2, amount=5.
+        let ctx = transfer_from_ctx(&env, 1, 200, 200, 2, 5);
 
         let parsed = parse_call(&env, &sa, &ctx, &p);
         assert!(
@@ -866,13 +902,14 @@ mod tests {
     fn transfer_from_checks_the_recipient_not_the_spender() {
         let env = Env::default();
         let sa = self_addr(&env);
-        // Allowlist is [addr(2)]; the spender addr(7) is deliberately NOT listed.
+        // Allowlist is [addr(2)]; recipient must still be read from args[2]
+        // even when args[1] is the guard itself.
         let mut p = base_policy(&env);
         p.window_cap = 100;
         let mut l = Ledger::empty(&env);
-        // Recipient args[2]=addr(2) is allowlisted even though spender
-        // args[1]=addr(7) is not.
-        let ctx = vec![&env, transfer_from_ctx(&env, 1, 9, 7, 2, 5)];
+        // Recipient args[2]=addr(2) is allowlisted; an off-by-one that read
+        // args[1] would compare the guard address instead.
+        let ctx = vec![&env, transfer_from_ctx(&env, 1, 200, 200, 2, 5)];
 
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
         assert!(matches!(d.first().unwrap(), Decision::Allowed));
@@ -883,18 +920,19 @@ mod tests {
     fn transfer_from_swapped_offsets_would_block_the_wrong_address() {
         let env = Env::default();
         let sa = self_addr(&env);
-        // Allowlist is [addr(2)].
-        let p = base_policy(&env);
+        let mut p = base_policy(&env);
+        p.allow_any_recipient = true;
+        p.blocked_recipients = vec![&env, addr(&env, 7)];
         let mut l = Ledger::empty(&env);
-        // Swap the middle two: the *unlisted* addr(7) is now args[2] (recipient)
-        // and the allowlisted addr(2) is args[1] (spender). An off-by-one that
-        // read the recipient from args[1] would (wrongly) allow this.
-        let ctx = vec![&env, transfer_from_ctx(&env, 1, 9, 2, 7, 5)];
+        // The spender is the guard at args[1] and the blocked addr(7) is the
+        // recipient at args[2]. An off-by-one that read the recipient from
+        // args[1] would miss the denylist and wrongly admit the transfer.
+        let ctx = vec![&env, transfer_from_ctx(&env, 1, 200, 200, 7, 5)];
 
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
         assert!(matches!(
             d.first().unwrap(),
-            Decision::Blocked(Error::RecipientNotAllowed)
+            Decision::Blocked(Error::RecipientBlocked)
         ));
     }
 
@@ -908,12 +946,95 @@ mod tests {
         let mut l = Ledger::empty(&env);
         // The amount lives at args[3]=50 and exceeds the cap; args[2] is an
         // address, not a number, so an off-by-one would not see 50 here.
-        let ctx = vec![&env, transfer_from_ctx(&env, 1, 9, 7, 2, 50)];
+        let ctx = vec![&env, transfer_from_ctx(&env, 1, 200, 200, 2, 50)];
 
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
         assert!(matches!(
             d.first().unwrap(),
             Decision::Blocked(Error::PerTxCapExceeded)
+        ));
+    }
+
+    #[test]
+    fn transfer_requires_the_guard_to_be_from() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        let mut l = Ledger::empty(&env);
+        let ctx = transfer_ctx_with_from(&env, 1, 9, 2, 5);
+
+        assert!(
+            matches!(parse_call(&env, &sa, &ctx, &p), ParsedCall::Unknown { .. }),
+            "a transfer whose from is not the guard must not be an AssetTransfer"
+        );
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, vec![&env, ctx]);
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::UnknownContract)
+        ));
+        assert_eq!(l.total, 0, "an unrelated transfer must not be scored");
+    }
+
+    #[test]
+    fn transfer_with_the_guard_as_recipient_is_unknown() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.allow_any_recipient = true;
+        let mut l = Ledger::empty(&env);
+        // Account-as-`to`: even a permissive recipient policy must not turn a
+        // third party's transfer into a scored AssetTransfer.
+        let ctx = transfer_ctx_with_from(&env, 1, 9, 200, 5);
+
+        assert!(matches!(
+            parse_call(&env, &sa, &ctx, &p),
+            ParsedCall::Unknown { .. }
+        ));
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, vec![&env, ctx]);
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::UnknownContract)
+        ));
+        assert_eq!(l.total, 0);
+    }
+
+    #[test]
+    fn transfer_from_requires_the_guard_to_be_from() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        let mut l = Ledger::empty(&env);
+        // from is a third party even though the spender is the guard.
+        let ctx = transfer_from_ctx(&env, 1, 9, 200, 2, 5);
+
+        assert!(matches!(
+            parse_call(&env, &sa, &ctx, &p),
+            ParsedCall::Unknown { .. }
+        ));
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, vec![&env, ctx]);
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::UnknownContract)
+        ));
+    }
+
+    #[test]
+    fn transfer_from_requires_the_guard_to_be_spender() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        let mut l = Ledger::empty(&env);
+        // from is the guard but a third party is the spender.
+        let ctx = transfer_from_ctx(&env, 1, 200, 9, 2, 5);
+
+        assert!(matches!(
+            parse_call(&env, &sa, &ctx, &p),
+            ParsedCall::Unknown { .. }
+        ));
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, vec![&env, ctx]);
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::UnknownContract)
         ));
     }
 
@@ -1894,7 +2015,7 @@ mod tests {
         extra: u32,
     ) -> Context {
         let mut args: Vec<Val> = Vec::new(env);
-        args.push_back(addr(env, 9).into_val(env));
+        args.push_back(self_addr(env).into_val(env));
         args.push_back(addr(env, to).into_val(env));
         args.push_back(amount.into_val(env));
         for i in 0..extra {
@@ -1915,8 +2036,8 @@ mod tests {
         count: u32,
     ) -> Context {
         let mut args: Vec<Val> = Vec::new(env);
-        args.push_back(addr(env, 9).into_val(env));
-        args.push_back(addr(env, 8).into_val(env));
+        args.push_back(self_addr(env).into_val(env));
+        args.push_back(self_addr(env).into_val(env));
         args.push_back(addr(env, to).into_val(env));
         args.push_back(amount.into_val(env));
         if count < 4 {
@@ -1960,7 +2081,7 @@ mod tests {
         let p = base_policy(&env);
         let mut l = Ledger::empty(&env);
         let mut args: Vec<Val> = Vec::new(&env);
-        args.push_back(addr(&env, 9).into_val(&env));
+        args.push_back(self_addr(&env).into_val(&env));
         args.push_back(addr(&env, 2).into_val(&env));
         let ctx = vec![
             &env,
