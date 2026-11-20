@@ -463,6 +463,99 @@ Two notes that matter when these rows are used to triage a live incident:
   `auth_checked` event — worked through in SPEC §6.0 and pinned by
   `mixed_multi_context_batch_reports_the_first_failing_context` (`src/engine.rs`).
 
+## Re-verifying these fixtures against live Horizon
+
+Run the read-only checker from the repository root; it needs `bash`, `curl`,
+and `jq`:
+
+```bash
+./scripts/verify-fixtures-live.sh
+# fail instead of reporting gaps when historical events are unavailable:
+./scripts/verify-fixtures-live.sh --require-events
+# override the endpoints recorded in index.json:
+./scripts/verify-fixtures-live.sh --horizon https://horizon-testnet.stellar.org \
+  --rpc https://soroban-testnet.stellar.org
+```
+
+The script reads [`index.json`](index.json) (`schema_version: 1` only) and
+queries Horizon for every recorded non-null transaction hash: existence,
+`successful: true`, expected ledger, expected UTC time, and the historical
+ledger's `protocol_version`. It has no write path and is intentionally **not**
+part of the required CI gate — public network availability is a compatibility
+signal, not a build input.
+
+Guard events are re-queried through Soroban RPC `getEvents` only while the
+fixture ledger is inside the RPC retention window; Horizon does not serve
+contract events. The four blocked scenarios have `tx: null` because their
+`auth_checked` events were rolled back with the failed simulation, so they are
+reported as informational diagnostic-only gaps rather than silently skipped or
+counted as failures. With `--require-events`, an event that cannot be queried
+becomes a hard failure, which is useful for a fresh fixture but not for these
+historical ledgers.
+
+### Recorded live run
+
+The two `# Live` lines below are this README's block-convention annotation;
+the remaining text is verbatim script output from 2026-11-20. Live values are
+historical: they describe the fixtures at capture time, not today.
+
+```text
+# Live, testnet protocol 28, 2026-11-20: every indexed transaction still exists
+# and is successful; historical ledgers still report protocol 28.
+Fixture live re-verification
+============================
+Horizon: https://horizon-testnet.stellar.org
+RPC: https://soroban-testnet.stellar.org
+Event mode: advisory (retention gaps are informational)
+
+[PASS] setup:upload_guard_wasm tx=d43edd086ac9b376371f33b72ad89b37a9b6b4d43bf34dfea9717a29688b887c successful=true ledger=4565105 created_at=2026-09-08T06:31:52Z
+[INFO] setup:upload_guard_wasm index ledger was null; live ledger=4565105 created_at=2026-09-08T06:31:52Z
+[PASS] historical ledger 4565105 protocol_version=28 matches index
+[PASS] setup:create_guard_contract tx=a968bc517af34b0cb1ed53a4523d1cb8b9e562e9a9b1e8367acfabcbf18211b1 successful=true ledger=4565106 created_at=2026-09-08T06:31:57Z
+[INFO] setup:create_guard_contract index ledger was null; live ledger=4565106 created_at=2026-09-08T06:31:57Z
+[PASS] historical ledger 4565106 protocol_version=28 matches index
+[PASS] setup:create_token_sac tx=19f1e36cf4c67feab4e6eb490b4ef424a7fbcc978fcbfa2cad96a079e93ec828 successful=true ledger=4565108 created_at=2026-09-08T06:32:07Z
+[INFO] setup:create_token_sac index ledger was null; live ledger=4565108 created_at=2026-09-08T06:32:07Z
+[PASS] historical ledger 4565108 protocol_version=28 matches index
+[PASS] setup:mint_to_guard tx=bdeab1808f83c8db3c7a8cf675690afa7039a7aaae5e92fdc9fb7d6700adfeb2 successful=true ledger=4565110 created_at=2026-09-08T06:32:17Z
+[INFO] setup:mint_to_guard index ledger was null; live ledger=4565110 created_at=2026-09-08T06:32:17Z
+[PASS] historical ledger 4565110 protocol_version=28 matches index
+[PASS] setup:initialize_guard tx=cb17b7b1c65bff74b6bc99f67fe3cf1070c7a28f14bdd71527ba60c9d4a81264 successful=true ledger=4565112 created_at=2026-09-08T06:32:27Z
+[INFO] setup:initialize_guard index ledger was null; live ledger=4565112 created_at=2026-09-08T06:32:27Z
+[PASS] historical ledger 4565112 protocol_version=28 matches index
+[PASS] setup:policy_scenarios_1_to_4 tx=6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174 successful=true ledger=4565121 created_at=2026-09-08T06:33:12Z
+[INFO] setup:policy_scenarios_1_to_4 index ledger was null; live ledger=4565121 created_at=2026-09-08T06:33:12Z
+[PASS] historical ledger 4565121 protocol_version=28 matches index
+[PASS] setup:trustline_recipient tx=81479a058dd03457fb91e7b129f941eef64e0bc0752a7f0a5fb3928d5f644fb4 successful=true ledger=4565144 created_at=2026-09-08T06:35:07Z
+[INFO] setup:trustline_recipient index ledger was null; live ledger=4565144 created_at=2026-09-08T06:35:07Z
+[PASS] historical ledger 4565144 protocol_version=28 matches index
+[PASS] setup:policy_dms_grace_60s tx=1ddad388f914e267b282855ddc8e5478fabfb8542e7798e4402447e5341e3f9a successful=true ledger=4566309 created_at=2026-09-08T08:12:12Z
+[INFO] setup:policy_dms_grace_60s index ledger was null; live ledger=4566309 created_at=2026-09-08T08:12:12Z
+[PASS] historical ledger 4566309 protocol_version=28 matches index
+[PASS] setup:unfreeze_dms_reversal tx=dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5 successful=true ledger=4566325 created_at=2026-09-08T08:13:32Z
+[INFO] setup:unfreeze_dms_reversal index ledger was null; live ledger=4566325 created_at=2026-09-08T08:13:32Z
+[PASS] historical ledger 4566325 protocol_version=28 matches index
+[PASS] scenario 1 tx=4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8 successful=true ledger=4566285 created_at=2026-09-08T08:10:12Z
+[PASS] historical ledger 4566285 protocol_version=28 matches index
+[INFO] RPC event retention oldest=5708352 latest=5829311
+[INFO] scenario 1: event topics not re-queried; ledger 4566285 outside RPC retention 5708352-5829311
+[INFO] scenario 2 (blocked): no tx hash; topics ["event_auth_checked","blocked","per_tx_cap_exceeded"] are diagnostic-only and were never committed
+[INFO] scenario 3 (blocked): no tx hash; topics ["event_auth_checked","blocked","window_cap_exceeded"] are diagnostic-only and were never committed
+[INFO] scenario 4 (blocked): no tx hash; topics ["event_auth_checked","blocked","recipient_not_allowed"] are diagnostic-only and were never committed
+[INFO] scenario 5 (blocked): no tx hash; topics ["event_auth_checked","blocked","heartbeat_expired"] are diagnostic-only and were never committed
+[PASS] scenario 5 reversal tx=dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5 successful=true ledger=4566325 created_at=2026-09-08T08:13:32Z
+[INFO] scenario 5 reversal index ledger was null; live ledger=4566325 created_at=2026-09-08T08:13:32Z
+[INFO] scenario 5 reversal: event topics not re-queried; ledger unknown outside RPC retention 5708352-5829311
+[PASS] scenario 5 post_reversal tx=b39457afa59f20d6ac90cd137e917c7efd51e27af4913c6c6308a6e5d0eff512 successful=true ledger=4566327 created_at=2026-09-08T08:13:42Z
+[PASS] historical ledger 4566327 protocol_version=28 matches index
+[INFO] scenario 5 post_reversal: event topics not re-queried; ledger 4566327 outside RPC retention 5708352-5829311
+[PASS] supplemental debug-era transfer (non-canonical bring-up run) tx=6f5dd410d62e8d83b4d70330d3541ac40678f05b545a4584cbf8e4dce6d07d9b successful=true ledger=4565852 created_at=2026-09-08T07:34:07Z
+[PASS] historical ledger 4565852 protocol_version=28 matches index
+[INFO] supplemental debug-era transfer (non-canonical bring-up run): event topics not re-queried; ledger 4565852 outside RPC retention 5708352-5829311
+
+Summary: 25 passed, 0 failed, 19 informational
+```
+
 ## How to re-run
 
 1. `cargo build --release --target wasm32v1-none` (contract) and

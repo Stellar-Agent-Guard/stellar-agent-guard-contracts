@@ -1583,6 +1583,9 @@ pub use policy_engine_type::PolicyEngineClient;
 #[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
 #[allow(missing_docs)] // Test-only helper re-exports are not contract API.
 pub mod testutils {
+    pub use crate::engine::pure::{
+        decide as decide_pure, CommitEffect, DecisionPlan, EvalInputs, LedgerView, Verdict,
+    };
     pub use crate::engine::{
         contains_addr, decide, parse_call, worst_case_transfer_policy, worst_case_transfer_target,
         AccountState, Decision,
