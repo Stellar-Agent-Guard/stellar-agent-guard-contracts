@@ -30,6 +30,8 @@ fn auth_checked_fixture_covers_every_error_variant_and_allowed() {
     let expected_data = json!({
         "type": "Map",
         "fields": [
+            {"name": "contract", "type": "Option<Address>"},
+            {"name": "fn_name", "type": "Option<Symbol>"},
             {"name": "context_index", "type": "u32"},
             {"name": "revision", "type": "u64"}
         ]

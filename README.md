@@ -2,17 +2,17 @@
 <img src="assets/logo.jpeg" alt="Stellar Agent Guard" width="700"/>
 </p>
 <p align="center">
-<a href="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/ci.yml">
-<img src="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/ci.yml/badge.svg" alt="CI"/>
+<a href="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/ci.yml">
+<img src="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/ci.yml/badge.svg" alt="CI"/>
 </a>
-<a href="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/host-watch.yml">
-  <img src="https://github.com/aigbagbobila/stellar-agent-guard-contracts/actions/workflows/host-watch.yml/badge.svg" alt="Futurenet host watch"/>
+<a href="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/host-watch.yml">
+  <img src="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/host-watch.yml/badge.svg" alt="Futurenet host watch"/>
 </a>
 <a href="LICENSE-MIT">
 <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"/>
 </a>
 <a href="https://www.rust-lang.org/">
-<img src="https://img.shields.io/badge/rust-1.85%2B-blue" alt="Rust 1.85+"/>
+<img src="https://img.shields.io/badge/rust-1.91%2B-blue" alt="Rust 1.91+"/>
 </a>
 <a href="https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/">....
 <img src="https://img.shields.io/badge/docs-GitBook-blue" alt="Documentation"/>
@@ -21,7 +21,7 @@
 
 # Stellar Agent Guard — Contracts
 
-📚 **[Documentation](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/)**
+📚 **[Documentation](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/)** • **[SPEC ↔ GitBook Cross-Reference](docs/README.md#spec--gitbook-cross-reference-map)**
 
 **Non-custodial, account-level spending firewall for autonomous AI agents on Stellar.**
 
@@ -56,7 +56,9 @@ Ed25519 public key is registered at `initialize`, and from then on the agent's a
 routed by the host through `__check_auth`, which verifies the agent's signature over the
 transaction auth payload and then evaluates the policy decision table over every auth
 context. Funds never leave the agent's own account — there is no deposit step, no vault,
-no `top_up`.
+no `top_up`. (Adopting the guard for an agent that already holds funds does require a
+one-time move of the balance to the contract address; that transfer of custody is covered
+in the [migration guide](docs/operations/migration-guide.md).)
 
 This is the mechanism the rest of the Soroban spend-guard ecosystem is converging on,
 not a niche choice:
@@ -80,10 +82,55 @@ not a niche choice:
 Stellar Agent Guard **is** that model, built and proven: `__check_auth` enforcement,
 non-custodial, no proxy wrappers, tested end-to-end on testnet.
 
+### Why non-custodial, concretely
+
+"Non-custodial" is a claim about what each party can reach, not only about where the
+balance sits. The contract exposes no sweep, withdraw, or arbitrary-transfer admin
+function — but that alone does not tell a reviewer what a compromised admin, SDK, or RPC
+can do. Concretely:
+
+| Party | Can reach | Cannot reach |
+|---|---|---|
+| **Registered agent key** | Move funds inside the policy (caps, rolling window, allowlists, pause/freeze/default-deny all run inside `__check_auth`). Can stop heartbeating and let the account self-freeze. | Exceed the policy, change policy, unfreeze itself, rotate its own key, or authorize a call outside the allowlists. A leaked agent key is bounded by the policy, not by the account balance. |
+| **Policy admin key** | Rewrite policy, pause/resume, freeze/unfreeze, rotate the agent key, hand over admin. | No entrypoint transfers value. But be plain about the consequence: an admin-key attacker can install a permissive policy and rotate the agent key to one it controls, so admin-key compromise is a **control compromise** and must be treated as equivalent to control of the balance. The no-fund-moving property describes the ABI, not a defence against a hostile admin (SPEC §1, §10). |
+| **SDK / RPC endpoint** | Return wrong or stale pre-flight results, censor or reorder submissions, and broadcast an already-signed payload (which is bound to its exact amount, recipient, and invocation, and is re-evaluated against policy on-chain). | Forge the agent's signature, alter a signed invocation, bypass `__check_auth`, or change policy without admin auth. Pre-flight is advisory; the on-chain decision is authoritative (SPEC §10.1). |
+| **Any third party without a key** | Read `policy`, `policy_hash`, `status`, `check*`; submit a transaction the agent already signed. | Spend, change policy, freeze, or write state. Reads are permissionless; writes are authenticated. |
+
+The enforcement boundary is part of the same argument: caps, allowlists, and the rolling
+window bind **SAC transfers** fully; arbitrary protocol calls are default-deny by
+contract/function, but per-call amount and recipient limits are a v2 item. Read
+[Enforcement scope](#enforcement-scope--read-this-before-relying-on-the-caps) and
+[SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing)
+together with this table — "non-custodial account" is not the same claim as "every call is
+amount-limited."
+
+What this argument does **not** cover is listed rather than implied: non-SAC amount limits,
+a live agent key that keeps heartbeating, admin-key compromise, and availability griefing
+by an agent-key holder are all in
+[SPEC §10](SPEC.md#10-threat-model-what-this-does-and-does-not-do). The admin key's role in
+liveness once `dms_grace_secs > 0` is in the same section and in the
+[incident playbook](docs/operations/incident-playbook-admin-key-lost.md).
+
 > ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do
 > not deploy to mainnet without an independent audit. See [SECURITY.md](SECURITY.md).
 >
 > For future contract versions, review the policy on [Enforcement-Equivalent Upgrades](#enforcement-equivalent-upgrade-policy).
+>
+## Maintainers
+
+Security review: `@aigbagbobila`
+
+Changes to the enforcement path — `src/engine.rs`, `src/window.rs`, `src/lib.rs`,
+`src/types.rs`, the rest of `src/`, `.github/workflows/`, and `SECURITY.md` — are
+owned by the maintainer and require one approving review from a security-literate
+reviewer before merge. This is enforced automatically via
+[`.github/CODEOWNERS`](.github/CODEOWNERS); it is not left to reviewer memory.
+
+A README typo and a policy-semantics change do not get the same review: anything
+under `src/` or touching the CI/security files routes to the maintainer.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full review and contribution
+process.
 
 ## Enforcement scope — read this before relying on the caps
 
@@ -93,12 +140,15 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 
 ```bash
 # Build the contract and run the test suite
-git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
+git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 68 tests, isolated (no network)
+cargo test                                      # 250 tests, isolated (no network)
 
-# Read live state from the Phase-1 testnet deployment (no auth, simulation only)
+# Read live state from the Phase-1 testnet deployment (no auth, simulation only).
+# Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
+# (heartbeat_expired: true) — the designed end state after the 60s grace lapsed.
+# The read still succeeds because reads are permissionless.
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --network testnet --source-account guard_admin --send=no -- status
 # → {"admin_frozen":false,"has_policy":true,"heartbeat_expired":true,"last_heartbeat":1788855212,"now":1788863857}
@@ -118,11 +168,16 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 ```
 One-time setup, `require_auth(admin)`. Stores the policy `admin` and the agent's Ed25519
 public key (32 bytes) in instance storage, and initializes `AdminFrozen = false`,
-`LastHeartbeat = 0`. Until `set_policy` runs, the account is **default-deny** — every
-authorization is rejected with `not_initialized`/`no_policy`.
+`LastHeartbeat = 0`. It also records the policy-model format version
+(`PolicyVersion`, readable via [`policy_version`](#policy_version-read)), so tooling can tell
+which `PolicyConfig` model this deployment implements. Until `set_policy` runs, the account is
+**default-deny** — every authorization is rejected with `not_initialized`/`no_policy`.
 
 Called twice, it fails with `AlreadyInitialized` — verified live:
 ```bash
+# Live, testnet protocol 28, 2026-09-08: the fixture account was already
+# initialized, so this second call is rejected — demonstrates the retry hazard
+# below, not a failed deployment.
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --network testnet --source-account guard_admin --send=no -- \
   initialize --admin GD5S5O2MZ6FSMFH6QILG37KSQNRVR3RPSWBTTV4JOUJ7J6TWLLL5LAVS \
@@ -145,15 +200,24 @@ The Phase-1 deployment's real `initialize` transaction:
 ```rust
 pub fn set_policy(env: Env, config: PolicyConfig)
 ```
-Admin-only (`require_auth(Admin)`). Replaces the policy, resets the rolling window, and
-starts the dead-man-switch clock at install time (a fresh policy gets full grace). The
-`PolicyConfig` fields:
+Admin-only (`require_auth(Admin)`). Replaces the policy. A policy *edit* — any `set_policy`
+while a policy is already installed — **preserves the rolling window and the
+dead-man-switch clock** ([issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289)):
+pausing, tightening, or widening a policy no longer hands the agent a fresh budget or a
+fresh grace period. Only a *first* install (no policy stored, including an install after
+`revoke_policy`) seeds an empty window and arms the dead-man-switch clock at install time
+(a fresh policy gets full grace). To zero the window explicitly, call
+[`reset_window`](#reset_window) below. The `PolicyConfig` fields:
+
+Tooling can validate this CLI JSON shape against the checked-in
+[`policy.schema.json`](policy.schema.json); the contract remains the authoritative validator.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `per_tx_cap` | `i128` | per asset-transfer call cap; `0` = disabled |
+| `asset_caps` | `Vec<AssetCap>` | optional per-asset `per_tx_cap` overrides (asset + cap); unlisted assets fall back to the global `per_tx_cap` |
 | `window_secs` | `u64` | rolling window width in seconds (default 86_400) |
-| `window_cap` | `i128` | rolling cap within `window_secs`; `0` = disabled |
+| `window_cap` | `i128` | rolling cap within `window_secs` (shared across all assets in `assets`); `0` = disabled |
 | `assets` | `Vec<Address>` | SAC token contracts whose transfers get parsed and enforced |
 | `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`) |
 | `recipients` | `Vec<Address>` | allowed SAC transfer destinations |
@@ -169,6 +233,10 @@ Config is validated **before** anything is written; invalid config fails with
 fixture policy installs cleanly (emits `EventPolicySet`), and an invalid active window
 (`active_until <= active_from`) is rejected with `Error(Contract, #4)`:
 ```bash
+# Live, testnet protocol 28, 2026-09-08: simulated against the deployed account
+# while it was DMS-frozen. The admin write is still admitted — the dead-man gate
+# guards agent authorizations, not admin policy writes — and emits EventPolicySet.
+# Simulation does not persist this call.
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --network testnet --source-account guard_admin --send=no -- set_policy --config '{
     "active_from": 0, "active_until": 0, "allow_any_recipient": false,
@@ -187,11 +255,50 @@ than 256 `blocked_recipients` or per-recipient cap entries), empty per-protocol 
 lists, or the self-address in `assets`/`protocols`/`recipients`/`blocked_recipients`
 all fail with `InvalidConfig`.
 
+Per-asset caps are additive: an absent `asset_caps` entry (or an empty
+vector) leaves the global `per_tx_cap` in force for every asset, so existing
+policies encode byte-identically. A `asset_caps` entry whose asset is not
+listed in `assets` is rejected with `InvalidConfig` rather than silently
+ignored, and every per-asset cap must be `>= 0`. Window accounting stays a
+single rolling window: an admitted transfer is compared against the asset's
+*effective* per-tx cap (override if present, else the global `per_tx_cap`),
+and the shared `window_cap` still bounds total spend across assets.
+
 **Not sure where to start?** Copy-paste presets for common operator personas —
 day-trader agent, payments bot, watch-only + heartbeat, max security — each with
 rationale, explicit "what it does NOT protect against", and unaudited/mainnet/DMS-grace
 warnings, are in [`docs/policy-templates.md`](docs/policy-templates.md). A CI test
 installs every preset documented there, so the examples stay valid.
+
+### `reset_window`
+```rust
+pub fn reset_window(env: Env)
+```
+Admin-only. Explicitly zeroes the rolling spend window — the admin-attested reset that
+`set_policy` no longer performs implicitly ([issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289)).
+Idempotent (resetting an absent or already-empty window is a no-op that still records the
+admin action); it does not touch the policy, `PolicyRevision`, or the dead-man-switch
+clock. Emits `EventWindowReset`. Reach for it only when a fresh budget is actually
+intended (e.g. after raising `window_cap` mid-incident); a pause, a tightening, or any
+routine policy edit leaves the window intact.
+
+### `increase_window_cap`
+```rust
+pub fn increase_window_cap(env: Env, new_cap: i128)
+```
+Admin-only. Raises the installed policy's global `window_cap` **in place** without
+resetting the rolling spend ledger or touching the dead-man-switch clock
+([issue #349](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/349),
+companion to `set_policy`'s window-preservation and explicit `reset_window` in
+[issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289)
+and [issue #305](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/305)).
+Prunes the loaded ledger against `now` to evaluate the live rolling total, rejects
+`NoPolicy` when no policy is installed, and rejects `InvalidConfig` if
+`new_cap <= cfg.window_cap` (not an increase, including `<= 0`), if `new_cap` is below
+the current live total (silently setting a cap below already-spent volume would block the
+account with no recourse), or if the updated policy violates SPEC §8 (e.g.
+`window_secs == 0` or `per_tx_cap > new_cap`). Increments `PolicyRevision` and emits
+`EventWindowCapIncreased` carrying `by`, `old_cap`, `new_cap`, and `revision`.
 
 ### `revoke_policy`
 ```rust
@@ -208,9 +315,9 @@ Admin-only. Re-binds the agent's Ed25519 public key. The admin never gains fund-
 power — it can only replace the key the account will authenticate. Verified live
 (simulation): emits `EventAgentRotated`.
 
-Full operational runbook — scheduled rotation, suspected-leak ordering
-(freeze → rotate → unfreeze), rollback, and the admin-key handover
-ceremony: [`docs/key-rotation.md`](docs/key-rotation.md).
+Full operational runbook — scheduled hygiene, lost-key recovery (handling DMS
+expiration via `unfreeze`), suspected-leak ordering (freeze → rotate → unfreeze),
+rollback, and the admin-key handover ceremony: [`docs/key-rotation.md`](docs/key-rotation.md).
 
 ### `propose_admin_rotation` / `confirm_admin_rotation` / `cancel_admin_rotation`
 ```rust
@@ -238,15 +345,18 @@ nothing else**: `heartbeat` does `require_auth` on the contract itself, so it ro
 through `__check_auth`, which verifies the agent's Ed25519 signature over the auth
 payload. It records `LastHeartbeat = now` and emits `EventHeartbeat`. A heartbeat arriving
 after the grace window expired is rejected (`heartbeat_expired`) — silence cannot
-self-revive; only the admin's `unfreeze` restores the account.
+self-revive; only the admin's `unfreeze` restores the account. After `active_until`
+passes, even `heartbeat` is blocked (`outside_active_window`) and `unfreeze` cannot revive
+it — only an admin `set_policy` with a renewed window restores the account.
 
 The `stellar` CLI cannot invoke it, because it cannot sign Soroban auth entries whose
 address is a contract. Use the repo's submission helper instead:
 ```bash
 cd tools/agent-tx && cargo build --release
+# Read without echo so the secret is not saved in shell history.
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
 ./target/release/agent-tx heartbeat \
-  --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
-  --agent-secret S...   # the registered agent's Ed25519 secret (AGENT_SECRET env also works)
+  --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7
 ```
 
 For the full steady-state loop an agent must run (heartbeat cadence, per-transfer
@@ -266,11 +376,13 @@ guarantee of the eventual inclusion fee.
 
 ```bash
 cd tools/agent-tx && cargo build --release
+# Read without echo so the secret is not saved in shell history.
+read -rsp "Agent secret: " AGENT_SECRET; echo; export AGENT_SECRET
 ./target/release/agent-tx preflight \
   --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --asset CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7 \
   --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX \
-  --amount 1100 --secret "$AGENT_SECRET"
+  --amount 1100
 # BLOCKED (pre-broadcast, enforced simulation)
 # diagnostic event: auth_checked, blocked, per_tx_cap_exceeded
 # broadcast: no
@@ -278,11 +390,12 @@ cd tools/agent-tx && cargo build --release
 
 The example exceeds the fixture policy's `per_tx_cap: 1000`. Exit codes:
 `0` means signed simulation admitted the call, `1` means signed simulation
-blocked it, and `2` means the unsigned simulation was inconclusive. `--secret`
-is optional (or supplied via `AGENT_SECRET`): without it the tool retrieves the
+blocked it, and `2` means the unsigned simulation was inconclusive. The secret
+is optional: without `AGENT_SECRET` the tool retrieves the
 registered public key and estimates a fee, but cannot sign the custom-account
 authorization, so it cannot establish whether `__check_auth` will admit the
-transfer. See [`tools/agent-tx/README.md`](tools/agent-tx/README.md) for details.
+transfer. The command above prompts without echo so the secret is not saved in
+shell history. See [`tools/agent-tx/README.md`](tools/agent-tx/README.md) for details.
 
 ### `freeze` / `unfreeze`
 ```rust
@@ -294,6 +407,17 @@ pub fn unfreeze(env: Env)    // admin only — clears AdminFrozen, LastHeartbeat
 Both are admin-only (`require_auth(Admin)`). Verified live (simulation): `freeze` emits
 `EventFrozen`, `unfreeze` emits `EventUnfrozen`.
 
+With a policy installed, `AdminFrozen` and the policy's `paused` field are separate gates on
+account authorization (both also block heartbeat authorization); changing one does not clear the
+other:
+
+| Control | How to set / clear | Operational effect |
+|---|---|---|
+| `AdminFrozen` | `freeze()` / `unfreeze()` | Immediate halt without changing the policy or rolling window. `unfreeze()` also sets `LastHeartbeat = now`, re-arming the dead-man clock when needed. |
+| `PolicyConfig.paused` | `set_policy()` with `paused: true` / `false` | Replaces the whole policy each time, resets the rolling window, and re-arms the dead-man clock. This is not a pause-only update; see [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289). Dedicated `pause()`/`resume()` functions are proposed in [issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/290), but are not available yet. |
+
+For gate ordering and full incident guidance, see [SPEC §4.2](SPEC.md#42-admin-freeze-and-policy-pause).
+
 > ⚠️ **`unfreeze` re-arms the dead-man switch.** One call does two jobs: it clears
 > `AdminFrozen` *and* sets `LastHeartbeat = now` on the admin's authority. If the DMS
 > grace had already elapsed when you unfreeze, you have just silently restarted the
@@ -301,14 +425,48 @@ Both are admin-only (`require_auth(Admin)`). Verified live (simulation): `freeze
 > more. The emitted `event_unfrozen` carries `rearmed_dms: bool` (`true` = the call
 > changed `LastHeartbeat`, i.e. the clock was re-armed; `false` = it was already
 > `now`) so telemetry and audits can surface exactly that side effect. See [SPEC §5](SPEC.md#5-dead-man-switch--precise-definition).
+>
+> **If the admin key is unavailable, there is no reversal.** `unfreeze` is admin-only and
+> `propose_admin_rotation` needs the current admin's signature, so a lost admin key cannot be
+> replaced. Recognise the state with `status()` and plan for it before arming a grace:
+> [incident playbook — account DMS-frozen, admin key unavailable](docs/operations/incident-playbook-admin-key-lost.md).
 
 The real Phase-1 unfreeze — the DMS-reversal transaction verified on-chain (tx
 `dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5`):
 ```bash
+# Live, testnet protocol 28, 2026-09-08 (on-chain): the account had self-frozen
+# when the 60s grace lapsed; this admin unfreeze is the only path back (the
+# agent's own heartbeat is rejected while expired). Submitted and confirmed.
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --network testnet --source guard_admin --send=yes -- unfreeze
 # → ✅ Transaction submitted successfully!  tx=dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5
 ```
+
+### `pause` / `resume`
+```rust
+pub fn pause(env: Env)    // admin only — sets PolicyConfig.paused = true in place
+pub fn resume(env: Env)   // admin only — sets PolicyConfig.paused = false in place
+```
+Policy-level kill switch ([issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/290)):
+flips the stored policy's `paused` flag **in place** — the rolling window, the
+dead-man-switch clock, and every other field are untouched, so pausing mid-incident and
+resuming does not hand the agent a fresh budget or a fresh grace period. It is the same
+field the §4 rule #4 gate and `set_policy` write (`PolicyConfig.paused`); there is no
+second pause flag anywhere in storage. Both functions are admin-only
+(`require_auth(Admin)`), idempotent (pausing a paused account — or resuming a running one
+— is not an error; the event still records the action), and require an installed policy
+(`NoPolicy` otherwise — with no policy the account is default-deny and there is nothing to
+pause). Emits `EventPaused` / `EventResumed` carrying `by` and `revision`;
+`PolicyRevision` advances only when the call actually flips the flag, so `revision`
+changing is exactly “the effective policy changed”. `resume` restores admissibility, not
+budget: it does not refund what was spent while paused.
+
+> **Which lever — `pause` or `freeze`?** Reach for `pause`/`resume` for routine,
+> policy-level halts and restarts: they bind only while a policy is installed and preserve
+> spend accounting. Reach for `freeze`/`unfreeze` in an emergency: `freeze` sets the
+> account-level `AdminFrozen` brake that binds even a policyless account — and note that
+> `unfreeze` also re-arms the dead-man-switch clock (warning above), while `resume` touches
+> nothing but the flag.
 
 ### `policy` (read)
 ```rust
@@ -319,6 +477,9 @@ read may extend the policy TTL and incur rent if it is below the threshold in [S
 simulation does not persist the extension. Verified live against the deployed contract — this is
 the real installed fixture policy:
 ```bash
+# Live, testnet protocol 28, 2026-09-08: the account is DMS-frozen but the
+# policy still reads — permissionless reads are not gated by the dead-man switch.
+# This is the policy currently installed on the fixture account (DMS grace 60s).
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --network testnet --source-account guard_admin --send=no -- policy
 # → {"active_from":0,"active_until":0,"allow_any_recipient":false,
@@ -327,6 +488,20 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 #    "recipients":["GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"],
 #    "window_cap":"150","window_secs":60}
 ```
+
+### `policy_version` (read)
+```rust
+pub fn policy_version(env: Env) -> u32
+```
+No auth. Returns the policy-model format version recorded in instance storage at `initialize`
+(`1` for this release), or `0` before initialization — a value that is never a valid format
+version, so the read never traps. The value is written once and never changed by `set_policy`,
+`revoke_policy`, `pause`/`resume`, or key rotation: those change policy *content*, not the
+*model*. A future change to `PolicyConfig`'s shape or meaning — additive fields included —
+bumps it, so an indexer can distinguish an upgraded deployment from the one it replaced and
+a migration runbook can assert the starting state. SDKs should refuse to construct a policy
+for a version they do not know. The version policy is recorded in
+[SPEC §7.4](SPEC.md#74-policy-format-version--migration-hook-issue-339).
 
 ### `policy_hash` (read) — cheap drift detection
 ```rust
@@ -345,17 +520,42 @@ the XDR bytes of the same policy value your SDK builds for `set_policy`.
 ### `status` (read)
 ```rust
 pub fn status(env: Env) -> Status
+pub fn status_at(env: Env, as_of: u64) -> Status
 ```
 No auth. Returns `{ has_policy, admin_frozen, heartbeat_expired, last_heartbeat, now }` plus
 the additive operational fields `paused` (the policy's kill switch; `false` with no policy),
 `window_remaining` (global `window_cap - spent` on the pruned ledger; `null` when the global
 cap is disabled — mirrors `check_detailed`'s `remaining_window` for recipients without an
 override), and `outside_active_window` (`now` outside the policy's `active_from`/`active_until`
-bounds, both inclusive; `false` with no policy or an unrestricted window). When
-submitted on-ledger, this read may extend persistent-entry TTLs and incur rent; simulation does
-not persist those extensions (SPEC §9.5).
+bounds, both inclusive; `false` with no policy or an unrestricted window), `dms_grace_secs`,
+and `heartbeat_expires_at` (`last_heartbeat + dms_grace_secs`, or `null` when DMS is disabled
+or no heartbeat is recorded). The new `status_at` read evaluates the same snapshot at the
+caller-supplied Unix timestamp without changing the existing `status()` signature. At the
+exact expiry timestamp, `heartbeat_expired` remains false; it becomes true strictly afterward,
+matching the enforcement gate. For example, with a heartbeat at `1000` and a 60-second grace,
+`status_at(1060)` reports `heartbeat_expires_at: 1060` and `heartbeat_expired: false`, while
+`status_at(1061)` reports `heartbeat_expired: true`. After
+`active_until` passes, even `heartbeat` is blocked (`outside_active_window`) and
+`unfreeze` cannot revive it — only an admin `set_policy` with a renewed window restores the
+account. When submitted on-ledger, this read may extend persistent-entry TTLs and incur rent;
+simulation does not persist those extensions (SPEC §9.5).
+
+For example, the projected snapshot at the exact 60-second boundary is:
+```json
+{
+  "dms_grace_secs": 60,
+  "heartbeat_expires_at": 1060,
+  "heartbeat_expired": false,
+  "last_heartbeat": 1000,
+  "now": 1060
+}
+```
+
 Verified live:
 ```bash
+# Live, testnet protocol 28, 2026-09-08: the fixture account's 60s DMS grace
+# lapsed after the Phase-1 runs, so it reports heartbeat_expired: true. That is
+# the self-freeze working as designed, not a broken read.
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --network testnet --source-account guard_admin --send=no -- status
 # → {"admin_frozen":false,"has_policy":true,"heartbeat_expired":true,"last_heartbeat":1788855212,"now":1788863857}
@@ -379,6 +579,10 @@ telemetry sees one vocabulary. Submitting it on-ledger may extend persistent-ent
 incur rent (SPEC §9.5); simulation does not persist those extensions. Verified live (this account is
 DMS-frozen, so the honest answer today is blocked):
 ```bash
+# Live, testnet protocol 28, 2026-09-08: the account was DMS-frozen, so this
+# simulated 50-unit transfer is blocked at the dead-man gate (heartbeat_expired)
+# before caps or allowlists are consulted. That is a correct answer to "can this
+# transfer go through right now?", not a failure of the contract.
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --network testnet --source-account guard_admin --send=no -- \
   check --asset CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7 \
@@ -404,6 +608,9 @@ pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> Ch
 ```
 Example CLI read for a policy with a 150-unit rolling cap and 40 units already spent:
 ```bash
+# Illustrative shape, not a live capture: a 150-unit window with 40 already
+# spent, 25 more requested → Allowed, 110 remaining. Replace the placeholders
+# with real IDs; this block documents the fields, not a verified run.
 stellar contract invoke --id GUARD_CONTRACT_ID --network testnet --source-account operator --send=no -- \
   check_detailed --asset ASSET_CONTRACT_ID --to RECIPIENT_ADDRESS --amount 25
 # → {"result":"Allowed","remaining_window":"110","per_tx_cap":"1000",\
@@ -412,6 +619,18 @@ stellar contract invoke --id GUARD_CONTRACT_ID --network testnet --source-accoun
 When a cap is disabled, its corresponding detail is `None` rather than a sentinel value.
 The SDK and dashboard should consume these fields for pre-signing warnings and blocked-call
 operator reports.
+
+For a payment run, `check_batch` evaluates transfers in order while staging each allowed
+admission in memory. It does not write state, so callers can inspect every per-transfer
+verdict and the overall admissibility before signing the run:
+```rust
+pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
+```
+For example, if a 60-unit transfer is allowed under the remaining window cap, a subsequent
+50-unit transfer can be returned as `WindowCapExceeded` because it is evaluated against the
+first transfer's staged admission. The result is overall inadmissible when any item is blocked;
+the caller must then adjust the run rather than submit a batch that the authorization path would
+reject.
 
 ### `__check_auth` (host-invoked — not callable by anyone)
 ```rust
@@ -506,7 +725,7 @@ agent-tx preflight --guard C... --asset C... --to G... --amount 1100 --network t
 
 ### Build from source
 ```bash
-git clone https://github.com/aigbagbobila/stellar-agent-guard-contracts.git
+git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 
 # contract wasm (the artifact to deploy)
@@ -517,13 +736,14 @@ cargo build --release --target wasm32v1-none
 # stellar CLI cannot — see "heartbeat" above)
 cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 # → target/release/agent-tx
-
-# full gate suite (see Testing & CI)
-cargo test
-cargo clippy --all-targets --all-features
-cargo fmt --check
 ```
-Both builds and all three gates were re-run green on this machine during the README pass.
+
+Both builds are covered by the full local gate; the complete list of commands CI
+runs, in CI's order, is in [Testing & CI](#testing--ci).
+
+The ordered on-chain sequence — upload → create → initialize → set_policy → `status`
+verification, with the expected output and the most likely failure of each step — is the
+[deployment runbook](docs/operations/deployment-runbook.md).
 
 ### Download a released artifact (instead of building)
 
@@ -536,7 +756,7 @@ CI blessed:
 
 ```bash
 VERSION=v0.1.0  # pick a release from the Releases page
-REPO=aigbagbobila/stellar-agent-guard-contracts
+REPO=Stellar-Agent-Guard/stellar-agent-guard-contracts
 curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm
 curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm.sha256
 sha256sum -c stellar_agent_guard_contracts.wasm.sha256
@@ -593,37 +813,59 @@ its own commit so the hash change is reviewable on its own.
 ## How it works
 
 ```
-┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
-│ Transaction requires │─────▶│ __check_auth         │─────▶│ Verify agent Ed25519 │
-│ the account's auth   │      │ (host-invoked)       │      │ signature over auth  │
-└──────────────────────┘      └──────────────────────┘      │ payload (bad sig ⇒  │
-                                                             │ host trap)          │
-                                                             └──────────┬───────────┘
-                                                                        ▼
-┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
-│ Load PolicyConfig,   │◀─────│ Account-level gates  │◀─────│ Load instance +      │
-│ AdminFrozen,         │      │ (order: admin frozen │      │ persistent state     │
-│ LastHeartbeat, now   │      │ → DMS → paused →     │      │ (agent key, policy,  │
-└──────────┬───────────┘      │ active window)       │      │ window, heartbeat)   │
-           │                  └──────────────────────┘      └──────────────────────┘
+┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
+│ Transaction requires │───▶│ __check_auth         │───▶│ Verify agent Ed25519 │
+│ the account's auth   │    │ (host-invoked)       │    │ signature over auth  │
+│                      │    │                      │    │ payload              │
+│ [HOLDS FUNDS]        │    │ [HOST-ENFORCED]      │    │                      │
+│ Contract is account; │    │ Single enforcement   │    │ [HOST-ENFORCED]      │
+│ funds live in agent's│    │ vector (SPEC §1)     │    │ Host ed25519_verify; │
+│ own smart account    │    │                      │    │ bad sig traps frame  │
+│ with balances held   │    │ [NO FUNDS]           │    │ before policy eval   │
+│ at contract address  │    │ No third-party vault,│    │ (SPEC §1.1, §4.1)    │
+│ by SAC (SPEC §1)     │    │ no top_up, no deposit│    │                      │
+│                      │    │ step (SPEC §1)       │    │                      │
+└──────────────────────┘    └──────────────────────┘    └──────────┬───────────┘
+                                                [POLICY-BOUND]     │
+                                                From here, auth is │
+                                                policy-bound       ▼
+┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
+│ Load PolicyConfig,   │◀───│ Contexts >64 block   │◀───│ Load instance +      │
+│ AdminFrozen,         │    │ before gates; else   │    │ persistent state     │
+│ LastHeartbeat, now   │    │ admin → DMS → pause  │    │ (agent key, policy,  │
+└──────────┬───────────┘    │ → active window      │    │ window, heartbeat)   │
+           │                └──────────────────────┘    └──────────────────────┘
            ▼
-┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
-│ Per-context decision │─────▶│ parse_call: classify │─────▶│ Enforce per kind:    │
-│ loop — every context │      │ each auth context    │      │ • AssetTransfer →    │
-│ must pass            │      │ (SelfCall /          │      │   recipient allowlist│
-└──────────────────────┘      │  CreateContract /    │      │   + per-tx cap +     │
-                              │  Unknown / AssetOther│      │   rolling window     │
-                              │  / AssetTransfer /   │      │ • Protocol → contract│
-                              │  Protocol)           │      │   + fn allowlist     │
-                              └──────────────────────┘      │ • anything else →    │
-                                                             │   default-deny       │
-                                                             └──────────┬───────────┘
-                                                                        ▼
-                              ┌────────────────────────────────────────────────────┐
-                              │ All contexts admissible?  Yes → commit staged      │
-                              │ window admissions → Ok(()).  No → Err(reason) —     │
-                              │ the whole transaction is rejected pre-broadcast.   │
-                              └────────────────────────────────────────────────────┘
+┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
+│ Per-context decision │───▶│ parse_call: classify │───▶│ Enforce per kind:    │
+│ loop — every context │    │ each auth context    │    │ • AssetTransfer →    │
+│ must pass            │    │ (SelfCall /          │    │   recipient allowlist│
+└──────────────────────┘    │  CreateContract /    │    │   + per-tx cap +     │
+                            │  Unknown / AssetOther│    │   rolling window     │
+                            │  / AssetTransfer /   │    │ • Protocol → contract│
+                            │  Protocol)           │    │   + fn allowlist     │
+                            └──────────────────────┘    │ • anything else →    │
+                                                        │   default-deny       │
+                                                        └──────────┬───────────┘
+                                                                   ▼
+                          ┌────────────────────────────────────────────────────┐
+                          │ All contexts admissible?  Yes → commit staged      │
+                          │ window admissions → Ok(()).  No → Err(reason) —    │
+                          │ the whole transaction is rejected pre-broadcast.   │
+                          └────────────────────────────────────────────────────┘
+
+Trust boundaries & custody legend (SPEC §1):
+  [HOST-ENFORCED] Host-enforced step: Soroban host routes require_auth through
+                  __check_auth (SPEC §1); host crypto verification traps
+                  on bad signature (SPEC §1.1, §4.1).
+  [HOLDS FUNDS]   Contract is account (SPEC §1); funds live in agent's own
+                  smart account with balances held at contract address by
+                  Stellar Asset Contracts (SPEC §1).
+  [NO FUNDS]      Check logic takes no custody: there is no third-party vault,
+                  no top_up, no deposit step (SPEC §1).
+  [POLICY-BOUND]  From here, agent authorization is policy-bound: policy admin
+                  holds no fund-moving authority of any kind (admin functions
+                  change policy and freeze state only) (SPEC §1).
 ```
 
 Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
@@ -633,22 +875,29 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    policy logic, so a compromised-but-unregistered key never reaches the decision table.
 2. **Policy snapshot.** The current `PolicyConfig`, `AdminFrozen`, `LastHeartbeat`, and
    ledger time are loaded. No policy stored ⇒ `NoPolicy` — the account is default-deny.
-3. **Account-level gates** (in this order): admin freeze, dead-man switch (grace elapsed
+3. **Context-count bound.** After loading the snapshot, `decide` rejects more than
+   `MAX_AUTH_CONTEXTS` (64) contexts as one aggregate block before account gates or parsing.
+4. **Account-level gates** (in this order): admin freeze, dead-man switch (grace elapsed
    since last heartbeat), pause, active window. Any one firing rejects the transaction
-   regardless of what the call is.
+   regardless of what the call is. Every context in the transaction is evaluated against
+   the pre-transaction snapshot, so the dead-man gate evaluates the pre-transaction
+   heartbeat for every context in the transaction, including the heartbeat self-call — a
+   bundle of `[heartbeat, transfer]` against an expired account is judged against the
+   expired state and blocked, never updating `LastHeartbeat`.
 4. **Per-context classification.** `parse_call` turns each `Context` into a typed call:
    `SelfCall` (only `heartbeat` is allowed), `CreateContract` (denied in v1),
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).
-5. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
+6. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
    denylist (checked before the allowlist and before `allow_any_recipient`), recipient
    allowlist, per-tx cap, and the rolling-window projection (existing total + amounts
    staged earlier in the same request). Protocol calls get contract + per-function
    allowlisting. Everything else is denied by default.
-6. **All-or-nothing commit.** Window admissions are staged and only committed to storage
+7. **All-or-nothing commit.** Window admissions are staged and only committed to storage
    if *every* context passes — a partially-validating batch can never spend. `Ok(())`
    approves; `Err(reason)` rejects the entire transaction, and the `auth_checked` event
-   records the outcome either way — with the same observability caveat as step 5 above:
+  records the outcome either way. Its data includes the authorized contract and function, so
+  a blocked decision identifies the denied call. The event has the same observability caveat as step 6 above:
    an allowed decision's event is committed, a blocked one exists only in diagnostics
    (the transaction it rolled back with carried it away). See [SPEC §9](SPEC.md#9-events-and-telemetry).
 
@@ -710,9 +959,9 @@ Stellar Agent Guard operates across three dedicated repositories:
 
 | Repository | Role | Documentation |
 |---|---|---|
-| [**stellar-agent-guard-contracts**](https://github.com/aigbagbobila/stellar-agent-guard-contracts) (this repo) | Soroban smart contracts implementing Custom Account Abstraction and spending policy firewall | [GitBook Docs](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/) |
-| [**stellar-agent-guard-sdk**](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | TypeScript SDK for pre-flight interception, simulation pricing, and AI agent framework integration | [GitHub](https://github.com/aigbagbobila/stellar-agent-guard-sdk) |
-| [**stellar-agent-guard-dashboard**](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) | Client-side operator dashboard for policy deployment, inspection, and emergency panic-button freeze | [GitHub](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) |
+| [**stellar-agent-guard-contracts**](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) (this repo) | Soroban smart contracts implementing Custom Account Abstraction and spending policy firewall | [GitBook Docs](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/) |
+| [**stellar-agent-guard-sdk**](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | TypeScript SDK for pre-flight interception, simulation pricing, and AI agent framework integration | [GitHub](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) |
+| [**stellar-agent-guard-dashboard**](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard) | Client-side operator dashboard for policy deployment, inspection, and emergency panic-button freeze | [GitHub](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard) |
 
 ## Repository layout
 
@@ -721,7 +970,7 @@ Stellar Agent Guard operates across three dedicated repositories:
 - `src/integration_tests.rs` — contract-level tests that exercise the real
   `__check_auth` path, including Ed25519 auth-signature verification (SPEC §11).
 - `tools/agent-tx/` — submission helper that signs Soroban auth entries for the guard
-  (custom-account) address and submits real testnet transactions. The `stellar` CLI
+  (custom-account) address and submits real testnet transactions. See [tools/agent-tx/README.md](tools/agent-tx/README.md) for install, usage, secret handling, and what it is for. The `stellar` CLI
   cannot sign auth entries whose address is a contract, so this tool fills that gap; it
   is the prototype of the Phase 2 SDK's signing path.
 - `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat
@@ -741,12 +990,31 @@ Stellar Agent Guard operates across three dedicated repositories:
   build if that file, the SPEC §4 table, the “How it works” walkthrough above, the
   `Error` enum, and `src/engine.rs` disagree — so the three artifacts cannot drift
   apart silently.
-- `SPEC.md` — the full architecture specification.
+- `docs/README.md` — documentation contributor guide and the [SPEC ↔ GitBook cross-reference map](docs/README.md#spec--gitbook-cross-reference-map).
+- `SPEC.md` — the full architecture specification (normative source of truth).
 
 ## ✅ Verified against live testnet
 
+### How to read the output blocks in this README
+
+One convention applies to every fenced block, so a copied snippet keeps its caveat
+(issue #418):
+
+- **`# Live, <network> protocol <n>, <date>: <account state>. <what the result
+  demonstrates>.`** The first line inside a live block names the state the account
+  was in and what the output is evidence for. Live values are historical: they
+  describe the account at capture time, not today.
+- A block **without** a `# Live` line is not evidence of on-chain behaviour: it is
+  a command (no output shown), local build/tool output (`# → target/...`), or an
+  illustrative shape with placeholders such as `GUARD_CONTRACT_ID`.
+- [`tests/fixtures/README.md`](tests/fixtures/README.md) uses the same convention,
+  and each of its scenario blocks also carries the transaction hash and ledger that
+  prove it.
+
 Phase 1 was proven end-to-end against a **real deployed contract** on Stellar testnet
-(protocol 28, `Test SDF Network ; September 2015`), cross-checked on-chain:
+(protocol 28, `Test SDF Network ; September 2015`), cross-checked on-chain. The values
+below are the Phase-1 record from 2026-09-08 — history, not a claim about the account's
+current state (the `status` block in the function reference above shows that):
 
 - **Guard (custom account) contract ID**:
   `CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7`
@@ -757,6 +1025,23 @@ Phase 1 was proven end-to-end against a **real deployed contract** on Stellar te
   `b39457afa59f20d6ac90cd137e917c7efd51e27af4913c6c6308a6e5d0eff512`
 - **Admin unfreeze** (DMS reversal):
   `dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5`
+
+The fixture index records these setup and transfer transactions:
+
+| Fixture transaction | Hash |
+|---|---|
+| Upload guard WASM | `d43edd086ac9b376371f33b72ad89b37a9b6b4d43bf34dfea9717a29688b887c` |
+| Create guard contract | `a968bc517af34b0cb1ed53a4523d1cb8b9e562e9a9b1e8367acfabcbf18211b1` |
+| Create token (SAC) | `19f1e36cf4c67feab4e6eb490b4ef424a7fbcc978fcbfa2cad96a079e93ec828` |
+| Mint tokens to guard | `bdeab1808f83c8db3c7a8cf675690afa7039a7aaae5e92fdc9fb7d6700adfeb2` |
+| Initialize guard | `cb17b7b1c65bff74b6bc99f67fe3cf1070c7a28f14bdd71527ba60c9d4a81264` |
+| Policy for scenarios 1-4 | `6f17c5707d86754cc64f7f5adf6d9b9840904f0bea4d10ae5620ffe065c61174` |
+| Recipient trustline | `81479a058dd03457fb91e7b129f941eef64e0bc0752a7f0a5fb3928d5f644fb4` |
+| Policy with DMS grace | `1ddad388f914e267b282855ddc8e5478fabfb8542e7798e4402447e5341e3f9a` |
+| Admin unfreeze | `dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5` |
+| Allowed transfer | `4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8` |
+| Debug-era transfer | `6f5dd410d62e8d83b4d70330d3541ac40678f05b545a4584cbf8e4dce6d07d9b` |
+| Transfer after unfreeze | `b39457afa59f20d6ac90cd137e917c7efd51e27af4913c6c6308a6e5d0eff512` |
 
 The five scenarios — allowed transfer, per-tx cap block, rolling-window cap block,
 recipient-allowlist block, and dead-man trigger + reversal — plus the setup transaction
@@ -775,35 +1060,66 @@ Status legend: ✅ completed; 🚧 in progress; 🔲 not started/open. A “v2, 
 |---|---|
 | Custom-account `__check_auth` enforcement | ✅ |
 | Per-transaction spend cap | ✅ |
+| Per-asset per-transaction spend caps (override global `per_tx_cap`) | ✅ |
 | Rolling window spend cap | ✅ |
 | Recipient allowlist (SAC transfers) | ✅ |
 | Recipient denylist / blocklist (SAC transfers) | ✅ |
-| Protocol/function allowlist (any call) | ✅ |
+| Protocol/function allowlist (contract + function-name match; amounts/recipients on non-SAC calls are not enforced) | ✅ |
 | Dead-man switch (freeze on missed heartbeat) | ✅ |
 | Admin unfreeze | ✅ |
 | Verified against live testnet (cross-checked) | ✅ |
-| Fine-grained amount/recipient enforcement for non-SAC calls | 🔲 (v2, tracked as [issue #1](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/1)) |
+| Fine-grained amount/recipient enforcement for non-SAC calls | 🔲 (v2, tracked as [issue #1](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/1)) |
 
 ## Testing & CI
 
-68 tests (unit + integration) cover the policy decision engine — including the regression
+250 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `68 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green this session: `229 passed; 0 failed`.
+
+These are the commands CI runs, in the order the `ci` job runs them — the same
+block a contributor can copy (see also
+[CONTRIBUTING.md](CONTRIBUTING.md#development-setup)):
 
 ```bash
-cargo test
-cargo clippy --all-targets --all-features   # clippy `all` + `pedantic` denied via Cargo.toml lints
 cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings   # -D warnings makes the Cargo.toml lint groups a gate
+cargo test
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo build --release --target wasm32v1-none
+scripts/verify-readme.sh
+scripts/verify-docs-reachability.sh
+# tools/agent-tx is a separate cargo project — CI gates it explicitly too
+cargo fmt --manifest-path tools/agent-tx/Cargo.toml --check
+cargo clippy --manifest-path tools/agent-tx/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path tools/agent-tx/Cargo.toml
+cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
 
 Every push runs these gates on GitHub Actions (`.github/workflows/ci.yml`, job `ci`):
-format → clippy (`-D warnings`) → unit + integration tests → contract wasm build →
-`agent-tx` build. A second job, `wasm-reproducible`, builds the contract twice in clean
-target directories and fails unless both builds hash identically (see
-[Reproducible builds](#reproducible-builds)). `main` is protected by a branch ruleset —
-the `ci` check must be green and a review approved for changes to merge.
+format → unwrap/expect guard → clippy (`-D warnings`) → unit + integration tests →
+public-API docs (`-D warnings`) → contract wasm build → README claim audit → docs link
+check → `agent-tx` format, clippy, tests, and build. The unwrap/expect guard is a grep
+over the enforcement sources and has no separate local command.
+
+A second job, `msrv`, reads `rust-version` from `Cargo.toml`
+(currently `1.91.0`), installs that release with the `wasm32v1-none` target, and runs
+clippy, the test suite, and the contract build on it — so the declared minimum is a
+tested fact rather than an aspiration. Formatting stays on the pinned channel in that
+job because rustfmt output is version-sensitive. A third job, `wasm-reproducible`,
+builds the contract twice in clean target directories and fails unless both builds hash
+identically (see [Reproducible builds](#reproducible-builds)). Neither is a required
+check.
+
+`main` is protected by the `main-protection` ruleset: the status check named exactly
+`ci` must be green, the branch must be up to date with `main`, and one approving review
+is required (a new push dismisses it). The ruleset is recorded in the repository —
+[`.github/rulesets/main-protection.json`](.github/rulesets/main-protection.json) and
+[`.github/BRANCH_PROTECTION.md`](.github/BRANCH_PROTECTION.md) — because a rule that
+exists only in GitHub settings is invisible in review and lost if the settings change.
+The `ci` job key is load-bearing: required checks match the check-run name, so renaming
+that job leaves every PR waiting for a check that is never reported.
 
 ## Topics
 
@@ -812,14 +1128,18 @@ the `ci` check must be green and a review approved for changes to merge.
 
 ## Community
 
+Start at **[SUPPORT.md](SUPPORT.md)** — it says which channel is for what and
+what response time to expect on each.
+
 - [Telegram](https://t.me/+EzSusj-2vVhhNmI0) — Stellar Agent Guard community group
 - [Discord](https://discord.gg/Z766vsgjg) — Stellar Agent Guard community server
+- [GitHub issues](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues) — bugs and feature requests
 
 ## Maintainers
 
 | Name | GitHub | Telegram |
 |---|---|---|
-| Hybrid | [@aigbagbobila](https://github.com/aigbagbobila) | [@aigbagbobila](https://t.me/+EzSusj-2vVhhNmI0) |
+| Hybrid | [@aigbagbobila](https://github.com/aigbagbobila) | [community group invite](https://t.me/+EzSusj-2vVhhNmI0) — an invite link, not a personal handle |
 
 ## Socials
 
@@ -832,22 +1152,26 @@ Stellar Agent Guard spans three repositories. Use this table to file issues in t
 
 | Symptom / Question | Repository | Issue Template |
 |---|---|---|
-| My transfer is blocked unexpectedly / spend caps not working | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
-| Middleware/SDK throws wrong error / pre-flight check mismatch | [stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
-| Panic button won't confirm / dashboard UI issue | [stellar-agent-guard-dashboard](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
-| Policy encode/decode mismatch between contract and SDK | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) + [stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | File in both (link each other) |
-| Dead-man switch / heartbeat not firing as expected | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
-| Agent transaction signing / auth entry construction failing | [stellar-agent-guard-sdk](https://github.com/aigbagbobila/stellar-agent-guard-sdk) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
-| Contract deployment / initialization / admin functions | [stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
-| Dashboard not showing correct policy state / events | [stellar-agent-guard-dashboard](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) | [Bug report](https://github.com/aigbagbobila/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
+| My transfer is blocked unexpectedly / spend caps not working | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
+| Middleware/SDK throws wrong error / pre-flight check mismatch | [stellar-agent-guard-sdk](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
+| Panic button won't confirm / dashboard UI issue | [stellar-agent-guard-dashboard](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
+| Policy encode/decode mismatch between contract and SDK | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) + [stellar-agent-guard-sdk](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | File in both (link each other) |
+| Dead-man switch / heartbeat not firing as expected | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
+| Agent transaction signing / auth entry construction failing | [stellar-agent-guard-sdk](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
+| Contract deployment / initialization / admin functions | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
+| Dashboard not showing correct policy state / events | [stellar-agent-guard-dashboard](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
 
 > **Note:** If unsure, file in **stellar-agent-guard-contracts** — maintainers will triage and redirect.
 
 ## Contact
 
-- GitHub issues: <https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues>
+- GitHub issues: <https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues>
 - Maintainer (GitHub): [@aigbagbobila](https://github.com/aigbagbobila)
-- Security disclosures: see [SECURITY.md](SECURITY.md) (Telegram, the Stellar ecosystem norm)
+- Which channel for which question, and expected response times:
+  [SUPPORT.md](SUPPORT.md)
+- Security disclosures: [SECURITY.md](SECURITY.md), through **GitHub private
+  vulnerability reporting** (or its email fallback) — not Telegram, not Discord,
+  not a public issue
 
 ## License
 
@@ -859,8 +1183,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details on coding standards, PR proce
 project structure — including the strict one-commit-per-logical-unit rule.
 
 Looking for something to work on? The
-[issue backlog](https://github.com/aigbagbobila/stellar-agent-guard-contracts/issues)
+[issue backlog](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues)
 holds scoped issues with Summary / Acceptance Criteria / Tech Stack — good first tasks for
 the Drips Stellar Wave contributor sprints.
 
-![Contributors](https://contrib.rocks/image?repo=aigbagbobila/stellar-agent-guard-contracts)
+![Contributors](https://contrib.rocks/image?repo=Stellar-Agent-Guard/stellar-agent-guard-contracts)

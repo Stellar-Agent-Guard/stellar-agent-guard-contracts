@@ -9,25 +9,185 @@
 //! mode (`Env::set_auths`). A blocked policy decision therefore surfaces as a
 //! failed `require_auth`, exactly as it would on-chain.
 //!
-//! Two helper contracts:
+//! # Mechanics of Host-Routed Testing
+//!
+//! Writing a host-routed test requires understanding how Soroban routes and
+//! verifies authorization for custom accounts:
+//!
+//! 1. **The Preimage the Host Hashes**:
+//!    When a contract (or host function) invokes `from.require_auth()`, the
+//!    Soroban host constructs a `HashIdPreimage::SorobanAuthorization`
+//!    containing:
+//!    - `network_id`: SHA-256 hash of the Stellar network passphrase (e.g.
+//!      Testnet vs Mainnet), preventing cross-network signature replay.
+//!    - `nonce`: An `i64` sequence number tracked per address, preventing replay
+//!      of identical authorizations within the network.
+//!    - `signature_expiration_ledger`: A `u32` ledger sequence after which the
+//!      authorization entry expires. In the harness, this is set via
+//!      `ledger.sequence() + max_ttl`.
+//!    - `invocation`: A `SorobanAuthorizedInvocation` specifying the target
+//!      contract address, function name, arguments (`VecM<ScVal>`), and any
+//!      child `sub_invocations`.
+//!
+//! 2. **Why the Signature Covers the Preimage**:
+//!    The host writes the `HashIdPreimage` to XDR and computes its SHA-256
+//!    digest. It then calls the custom account's `__check_auth` method, passing
+//!    this 32-byte hash as `signature_payload`. The guard contract uses
+//!    `env.crypto().ed25519_verify()` to assert that the provided signature
+//!    was signed by the registered agent's Ed25519 public key over that exact
+//!    32-byte payload. Only after cryptographic verification passes does the
+//!    guard evaluate the policy rules against the invocation contexts.
+//!
+//! 3. **The Role of the Nonce**:
+//!    The nonce ensures replay protection. The host rejects stale, out-of-order,
+//!    or reused nonces. In `Harness`, `self.guard_nonce` and `self.admin_nonce`
+//!    are monotonically incremented each time an entry is generated via
+//!    `guard_entry()` or `admin_entry()`. Reusing an entry or failing to increment
+//!    the nonce triggers an immediate host rejection.
+//!
+//! 4. **Invocation Trees and Sub-invocations**:
+//!    `SorobanAuthorizedInvocation` captures the call tree. For direct calls
+//!    to the guard (e.g. `heartbeat`), the invocation targets the guard directly
+//!    with empty sub-invocations. For Stellar Asset Contract (SAC) transfers,
+//!    the invocation targets `MockAsset::transfer(guard, to, amount)`. When
+//!    the contract call triggers further contract calls that also require auth,
+//!    they must be included in `sub_invocations`. A mismatch between the
+//!    invocation tree in the auth entry and what the host observes causes the
+//!    host to fail authorization before `__check_auth` is reached.
+//!
+//! # Env Modes: `mock_all_auths()` vs `set_auths()`
+//!
+//! This is the single most common source of confusion in the test harness:
+//!
+//! - **`env.mock_all_auths()` (Blanket Mocking)**:
+//!   Bypasses all signature verification and completely skips calling
+//!   `__check_auth`. Every `require_auth()` unconditionally succeeds.
+//!   *When correct*: Test setup and administrative configuration
+//!   (`initialize`, `set_policy`, `revoke_policy`). `Harness::new()` enters
+//!   mock mode during setup so tests do not need to hand-craft signatures
+//!   just to initialize state.
+//!   *The trap*: Testing guarded operations under mock mode is a false positive!
+//!   Policy checks will never execute. Never assert that a transfer or policy
+//!   block works while `mock_all_auths()` is active.
+//!
+//! - **`env.set_auths(&[entries])` / `Harness::enforce(entry)` (Enforcing Mode)**:
+//!   Flips the `Env` from mocking mode into strict enforcing mode for the
+//!   specified authorization entries. The host will look up matching entries,
+//!   validate nonces and expiration, and invoke `PolicyEngine::__check_auth`.
+//!   *When correct*: All tests asserting that an operation is allowed or
+//!   blocked by policy or signature validation.
+//!   *The trap*: Once `set_auths` is called, subsequent calls without matching
+//!   auth entries will fail. If you need to perform admin ops after entering
+//!   enforcing mode, use `Harness::set_policy_enforcing()` (which provides an
+//!   admin entry) or call `h.env.mock_all_auths()` to explicitly re-enable mocking.
+//!
+//! # Available Harness Helpers to Reuse
+//!
+//! When writing new integration tests, reuse these existing building blocks:
+//!
+//! | Category | Helper | Purpose |
+//! |---|---|---|
+//! | **Setup** | `Harness::new()` | Initializes env, registers `MockAdmin`, `MockAsset`, `PolicyEngine`, generates agent keypair, runs `initialize()`. |
+//! | | `Harness::base_policy()` | Returns a standard baseline policy with `MockAsset` and allowed recipient `h.recv`. |
+//! | | `h.install_policy(&cfg)` | Installs policy in mock mode. |
+//! | | `h.set_policy_enforcing(&cfg)` | Updates policy when already in enforcing mode. |
+//! | | `Harness::new_enforced_auth()` | Fresh registration under *real* host auth: `initialize` runs with an explicit admin entry and no `mock_all_auths()` call. |
+//! | **Invocations** | `h.transfer_invocation(from, to, amount)` | Constructs `SorobanAuthorizedInvocation` for `MockAsset::transfer`. |
+//! | | `h.heartbeat_invocation()` | Constructs invocation for `heartbeat()`. |
+//! | | `h.invocation(contract, fn, args)` | Low-level invocation builder for arbitrary contracts/methods. |
+//! | **Auth Entries** | `h.guard_entry(&root)` | Hashes preimage, signs with agent key, bumps nonce, returns `SorobanAuthorizationEntry`. |
+//! | | `h.guard_entry_with(key, &root)` | Signs with an arbitrary key (for testing wrong or rotated keys). |
+//! | | `h.admin_entry(&root)` | Builds auth entry for `MockAdmin` (void signature). |
+//! | | `h.non_admin_entry(account, &root)` | Builds auth entry for an arbitrary (non-admin) account. |
+//! | **Execution** | `h.enforce(entry)` | Calls `env.set_auths(&[entry])`, activating enforcing mode. |
+//! | | `h.transfer(to, amount)` | High-level: builds entry, enforces, executes transfer, asserts success. |
+//! | | `h.transfer_expect_blocked(to, amount)` | High-level: compares preflight's expected reason with the host-routed failure. |
+//! | | `h.transfer_blocked_reason(to, amount)` | Same check, returning the host panic log. |
+//! | | `h.heartbeat()` / `h.heartbeat_expect_blocked(reason)` | High-level heartbeat runners in enforcing mode. |
+//! | | `h.unfreeze()` | Admin unfreeze in enforcing mode. |
+//!
+//! # Minimal Worked Example
+//!
+//! Adding a new host-routed test using `Harness`:
+//!
+//! ```rust,ignore
+//! #[test]
+//! fn test_transfer_above_per_tx_cap_blocked_host_routed() {
+//!     // 1. Initialize harness (starts in mock mode for setup)
+//!     let mut h = Harness::new();
+//!
+//!     // 2. Configure policy while still in mock mode
+//!     let mut policy = h.base_policy();
+//!     policy.per_tx_cap = 100; // max 100 stroops per tx
+//!     h.install_policy(&policy);
+//!
+//!     // 3. Construct the authorized invocation the host will route
+//!     let root = h.transfer_invocation(&h.guard, &h.recv, 150);
+//!
+//!     // 4. Build and sign the auth entry (increments nonce, computes preimage hash, signs with Ed25519)
+//!     let entry = h.guard_entry(&root);
+//!
+//!     // 5. Flip the environment from mocking to enforcing mode with the signed entry
+//!     h.enforce(entry);
+//!
+//!     // 6. Invoke the SAC transfer; host routes through __check_auth, which rejects the cap breach
+//!     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+//!         MockAssetClient::new(&h.env, &h.asset).transfer(&h.guard, &h.recv, &150);
+//!     }));
+//!     assert!(res.is_err(), "transfer exceeding per-tx cap must be blocked by host require_auth");
+//! }
+//! ```
+//!
+//! Or using the high-level helper `h.transfer_blocked_reason()`:
+//!
+//! ```rust,ignore
+//! #[test]
+//! fn test_transfer_above_cap_concise() {
+//!     let mut h = Harness::new();
+//!     let mut policy = h.base_policy();
+//!     policy.per_tx_cap = 100;
+//!     h.install_policy(&policy);
+//!
+//!     let log = h.transfer_blocked_reason(&h.recv, 150);
+//!     assert!(log.contains(GuardError::PerTxCapExceeded.reason()));
+//! }
+//! ```
+//!
+//! # Declarative Scenarios and the Shared Scenario Matrix
+//!
+//! For multi-step scenarios or tests mapped to the SPEC §4 decision table,
+//! use the `GuardScenario` builder (issue #63):
+//!
+//! ```rust,ignore
+//! GuardScenario::new()
+//!     .policy(|p| p.per_tx_cap = 100)
+//!     .expect_transfer(&recv, 50)
+//!     .expect_block(GuardError::PerTxCapExceeded, &recv, 150);
+//! ```
+//!
+//! Cross-reference `docs/scenario-matrix.md` (the canonical scenario matrix)
+//! and `decision-table.json` when adding tests to ensure every decision-table
+//! row and call kind is accounted for.
+//!
+//! # Helper Contracts
+//!
 //! - `MockAsset` plays a Stellar Asset Contract: `transfer(from, to, amount)`
 //!   does `from.require_auth()`, so authorizing a transfer from the guard
 //!   routes through the guard's `__check_auth` with the real context shape.
 //! - `MockAdmin` is a trivial custom account (`Signature = ()`, always
 //!   approves) so admin calls can be enforced in the same env without key
 //!   material.
+//! - `MockDeployer` exercises host contract creation routing (`CreateContractV2HostFn`).
 //!
 //! Protocol allowlist coverage (SPEC §6.3): `ProtocolRule.fns` has three
 //! states — `None` (any fn on that contract), `Some(list)` with a match, and
-//! `Some(list)` without a match. The tests below pin each state plus the
-//! unknown-contract denial and the empty-`Some([])` config rejection, and
-//! assert that the allowlist check runs *before* any arg inspection (a
-//! protocol named like an SAC is still classified as a protocol, not a
-//! transfer).
+//! `Some(list)` without a match. Unit tests pin the classification order;
+//! host-routed tests below cover allowed, denied, wildcard, and unknown
+//! protocol calls with real authorization entries.
 
 use crate::types::{
-    CheckResult, DataKey, DmsHealthStatus, Error as GuardError, PolicyConfig, PolicyRuleId,
-    ProtocolRule, RecipientCap, ValidationOutcome, WindowState,
+    AssetCap, BatchTransfer, CheckResult, DataKey, DmsHealthStatus, Error as GuardError,
+    PolicyConfig, PolicyRuleId, ProtocolRule, RecipientCap, ValidationOutcome, WindowState,
 };
 use crate::{AuthSnapshot, PolicyEngine, PolicyEngineClient};
 
@@ -49,6 +209,16 @@ use std::format;
 /// A `ScVal::Symbol` built from a plain string (event names / map keys).
 fn symbol_val(s: &str) -> ScVal {
     ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from(s)).unwrap())
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> std::string::String {
+    if let Some(message) = payload.downcast_ref::<std::string::String>() {
+        return message.clone();
+    }
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return std::string::String::from(*message);
+    }
+    panic!("expected a string panic payload from the blocked host invocation");
 }
 
 /// Off-chain reproduction of the contract's key fingerprint (SPEC §9):
@@ -247,16 +417,94 @@ fn last_event_revision(env: &Env, name: &str) -> u64 {
 
 // ── Test contracts ───────────────────────────────────────────────────────
 
+fn mock_balances_key(env: &Env) -> Symbol {
+    Symbol::new(env, "balances")
+}
+
+fn mock_load_balances(env: &Env) -> soroban_sdk::Map<Address, i128> {
+    let key = mock_balances_key(env);
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Map::new(env))
+}
+
+fn mock_save_balances(env: &Env, balances: &soroban_sdk::Map<Address, i128>) {
+    let key = mock_balances_key(env);
+    env.storage().persistent().set(&key, balances);
+}
+
+/// Test-only mock SAC token with per-holder balance tracking (issue #361).
+///
+/// Stores balances in `env.storage().persistent()` using a `Map<Address, i128>`.
+/// Using `env.storage()` directly with an unbounded `Map` inside a mock contract
+/// is fine in tests (where storage cost and TTL/rent are not production concerns),
+/// but **do not copy this pattern into shipped contract code** — production
+/// Soroban contracts must bound collection sizes and manage persistent TTLs
+/// explicitly (SPEC §3/§9.5).
 #[contract]
 pub struct MockAsset;
 
 #[contractimpl]
 #[allow(clippy::needless_pass_by_value)] // contract ABI requires owned args
 impl MockAsset {
-    /// SAC-shaped `transfer`: requires auth from the sender. The guard
-    /// contract is the `from`, so this routes through `__check_auth`.
+    /// Seeds `holder` with `initial_balance`, replacing any prior balance.
+    /// Test-only setup helper (no auth required).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `initial_balance` is negative.
+    pub fn initialize(env: Env, holder: Address, initial_balance: i128) {
+        assert!(initial_balance >= 0, "negative initial balance");
+        let mut balances = mock_load_balances(&env);
+        balances.set(holder, initial_balance);
+        mock_save_balances(&env, &balances);
+    }
+
+    /// Credits `amount` to `to`'s balance. Test-only setup helper (no auth).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `amount` is negative or overflows `i128`.
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        assert!(amount >= 0, "negative mint amount");
+        let mut balances = mock_load_balances(&env);
+        let current = balances.get(to.clone()).unwrap_or(0);
+        let updated = current.checked_add(amount).expect("balance overflow");
+        balances.set(to, updated);
+        mock_save_balances(&env, &balances);
+    }
+
+    /// Returns the current balance of `holder` (`0` if never funded).
+    pub fn balance(env: Env, holder: Address) -> i128 {
+        mock_load_balances(&env).get(holder).unwrap_or(0)
+    }
+
+    /// SAC-shaped `transfer`: requires auth from the sender, then moves
+    /// `amount` from `from` to `to`, failing on insufficient funds. The guard
+    /// contract is `from`, so `from.require_auth()` routes through
+    /// `__check_auth` before any balance changes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `amount <= 0`, if `from` has insufficient balance, or if the
+    /// recipient balance overflows `i128`.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         from.require_auth();
+        assert!(amount > 0, "non-positive transfer");
+        let mut balances = mock_load_balances(&env);
+        let sender_balance = balances.get(from.clone()).unwrap_or(0);
+        assert!(
+            sender_balance >= amount,
+            "insufficient mock balance: has {sender_balance}, tried to transfer {amount}"
+        );
+        balances.set(from, sender_balance - amount);
+        let recipient_balance = balances.get(to.clone()).unwrap_or(0);
+        let credited = recipient_balance
+            .checked_add(amount)
+            .expect("balance overflow");
+        balances.set(to.clone(), credited);
+        mock_save_balances(&env, &balances);
         #[allow(deprecated)] // test-only helper; not part of the shipped surface
         env.events()
             .publish((Symbol::new(&env, "transfer_ok"),), (to, amount));
@@ -266,6 +514,35 @@ impl MockAsset {
     /// `memory_read_entries` reports for every invocation of a registered
     /// contract, on top of whatever storage entries the frame actually read.
     pub fn ping() {}
+}
+
+#[contract]
+pub struct MockProtocol;
+
+#[contractimpl]
+impl MockProtocol {
+    pub fn swap(account: &Address) {
+        account.require_auth();
+    }
+
+    pub fn deposit(account: &Address) {
+        account.require_auth();
+    }
+}
+
+/// Issue #340 research probe: an allowlisted protocol whose function pulls a
+/// *second* authorization from the guarded account for a nested SAC transfer.
+/// The guarded account authorizes `route` (its root context) and, inside that
+/// frame, `MockAsset::transfer` calls `account.require_auth()` again.
+#[contract]
+pub struct MockNestedRouter;
+
+#[contractimpl]
+impl MockNestedRouter {
+    pub fn route(env: &Env, account: &Address, asset: &Address, to: &Address, amount: i128) {
+        account.require_auth();
+        MockAssetClient::new(env, asset).transfer(account, to, &amount);
+    }
 }
 
 /// Admin account contract: approves every authorization it is asked to
@@ -293,6 +570,38 @@ impl CustomAccountInterface for MockAdmin {
     }
 }
 
+/// Test helper contract to initiate contract deployment on behalf of another
+/// address. This exercises the real Soroban host authorization path for contract
+/// creation from within a contract invocation frame.
+#[contract]
+pub struct MockDeployer;
+
+#[contractimpl]
+impl MockDeployer {
+    pub fn deploy_v2(
+        env: &Env,
+        deployer: &Address,
+        salt: &BytesN<32>,
+        wasm_hash: &BytesN<32>,
+    ) -> Address {
+        env.deployer()
+            .with_address(deployer.clone(), salt.clone())
+            .deploy_v2(wasm_hash.clone(), ())
+    }
+
+    pub fn deploy_with_ctor(
+        env: &Env,
+        deployer: &Address,
+        salt: &BytesN<32>,
+        wasm_hash: &BytesN<32>,
+        arg: i128,
+    ) -> Address {
+        env.deployer()
+            .with_address(deployer.clone(), salt.clone())
+            .deploy_v2(wasm_hash.clone(), (arg,))
+    }
+}
+
 // ── Harness ──────────────────────────────────────────────────────────────
 
 struct Harness {
@@ -300,6 +609,8 @@ struct Harness {
     guard: Address,
     admin: Address,
     asset: Address,
+    protocol: Address,
+    other_protocol: Address,
     agent: SigningKey,
     recv: Address,
     other: Address,
@@ -325,17 +636,24 @@ impl Harness {
         let agent = SigningKey::from_bytes(&[7u8; 32]);
         let admin = env.register(MockAdmin, ());
         let asset = env.register(MockAsset, ());
+        let protocol = env.register(MockProtocol, ());
+        let other_protocol = env.register(MockProtocol, ());
         let guard = env.register(PolicyEngine, ());
+        // Seed the guard with a large mock balance so policy-focused tests do
+        // not fail on mock liquidity; balance-conservation tests override this.
+        let asset_client = MockAssetClient::new(&env, &asset);
+        asset_client.initialize(&guard, &1_000_000_000);
         // Recipients/others are arbitrary addresses used only as data.
         let recv = Address::generate(&env);
         let other = Address::generate(&env);
 
         // soroban-sdk 27 test env defaults to *enforcing* auth: `require_auth`
-        // only passes with explicit entries. Admin setup ops (initialize,
-        // set_policy, ...) run under blanket mocking; `enforce()` flips the env
-        // back into enforcing mode with a hand-signed entry for the guarded
-        // flow. `mock_all_auths` is the documented default intent of the
-        // harness (see header comment).
+        // only passes with explicit entries. The default harness intentionally
+        // uses blanket mocking for the rest of the suite because the majority of
+        // tests care about policy behavior, not the auth bootstrap path; this is
+        // the documented exception for the suite, not an accidental omission.
+        // A dedicated test can choose explicit `set_auths` entries to verify the
+        // real `require_auth` flow when admin/agent semantics matter.
         env.mock_all_auths();
         let client = PolicyEngineClient::new(&env, &guard);
         let pk = agent.verifying_key().to_bytes();
@@ -346,12 +664,64 @@ impl Harness {
             guard,
             admin,
             asset,
+            protocol,
+            other_protocol,
             agent,
             recv,
             other,
             guard_nonce: 1,
             admin_nonce: 1,
         }
+    }
+
+    /// Fresh registration under real host auth: initialize and the first policy
+    /// set both require explicit admin entries, with no blanket `mock_all_auths`
+    /// call in this harness.
+    fn new_enforced_auth() -> Self {
+        let env = Env::default();
+        let agent = SigningKey::from_bytes(&[7u8; 32]);
+        let admin = env.register(MockAdmin, ());
+        let asset = env.register(MockAsset, ());
+        let protocol = env.register(MockProtocol, ());
+        let other_protocol = env.register(MockProtocol, ());
+        let guard = env.register(PolicyEngine, ());
+        let asset_client = MockAssetClient::new(&env, &asset);
+        asset_client.initialize(&guard, &1_000_000_000);
+        let recv = Address::generate(&env);
+        let other = Address::generate(&env);
+
+        let mut h = Harness {
+            env,
+            guard,
+            admin,
+            asset,
+            protocol,
+            other_protocol,
+            agent,
+            recv,
+            other,
+            guard_nonce: 1,
+            admin_nonce: 1,
+        };
+
+        let pk = h.agent.verifying_key().to_bytes();
+        let init_root = h.invocation(
+            &h.guard,
+            "initialize",
+            std::vec![
+                h.admin.clone().into_val(&h.env),
+                BytesN::from_array(&h.env, &pk).into_val(&h.env),
+            ],
+        );
+        let init_entry = {
+            let h = &mut h;
+            h.admin_entry(&init_root)
+        };
+        h.env.set_auths(&[init_entry]);
+        PolicyEngineClient::new(&h.env, &h.guard)
+            .initialize(&h.admin, &BytesN::from_array(&h.env, &pk));
+
+        h
     }
 
     /// Base policy: asset = `MockAsset`, one allowed recipient, no caps.
@@ -364,6 +734,7 @@ impl Harness {
             protocols: soroban_sdk::Vec::new(&self.env),
             recipients: soroban_sdk::vec![&self.env, self.recv.clone()],
             recipient_window_caps: soroban_sdk::Vec::new(&self.env),
+            asset_caps: soroban_sdk::Vec::new(&self.env),
             blocked_recipients: soroban_sdk::Vec::new(&self.env),
             allow_any_recipient: false,
             active_from: 0,
@@ -395,6 +766,20 @@ impl Harness {
         fn_name: &str,
         args: std::vec::Vec<Val>,
     ) -> SorobanAuthorizedInvocation {
+        self.invocation_with_subs(contract, fn_name, args, std::vec::Vec::new())
+    }
+
+    /// Build an invocation with an explicit sub-invocation tree. The host
+    /// requires the declared tree to match the calls that actually execute, so
+    /// a nested `require_auth` must be declared here as a child of the frame
+    /// that performs it (issue #340).
+    fn invocation_with_subs(
+        &self,
+        contract: &Address,
+        fn_name: &str,
+        args: std::vec::Vec<Val>,
+        subs: std::vec::Vec<SorobanAuthorizedInvocation>,
+    ) -> SorobanAuthorizedInvocation {
         let sc_args: std::vec::Vec<ScVal> = args
             .into_iter()
             .map(|v| xdr::ScVal::from_val(&self.env, &v))
@@ -405,7 +790,7 @@ impl Harness {
                 function_name: ScSymbol::try_from(fn_name.as_bytes().to_vec()).unwrap(),
                 args: xdr::VecM::try_from(sc_args).unwrap(),
             }),
-            sub_invocations: xdr::VecM::default(),
+            sub_invocations: xdr::VecM::try_from(subs).unwrap(),
         }
     }
 
@@ -445,6 +830,85 @@ impl Harness {
 
     fn confirm_admin_invocation(&self) -> SorobanAuthorizedInvocation {
         self.invocation(&self.guard, "confirm_admin_rotation", std::vec![])
+    }
+
+    fn cancel_admin_invocation(&self) -> SorobanAuthorizedInvocation {
+        self.invocation(&self.guard, "cancel_admin_rotation", std::vec![])
+    }
+
+    fn set_policy_invocation(&self, cfg: &PolicyConfig) -> SorobanAuthorizedInvocation {
+        self.invocation(
+            &self.guard,
+            "set_policy",
+            std::vec![cfg.clone().into_val(&self.env)],
+        )
+    }
+
+    fn increase_window_cap_invocation(&self, new_cap: i128) -> SorobanAuthorizedInvocation {
+        self.invocation(
+            &self.guard,
+            "increase_window_cap",
+            std::vec![new_cap.into_val(&self.env)],
+        )
+    }
+
+    fn revoke_policy_invocation(&self) -> SorobanAuthorizedInvocation {
+        self.invocation(&self.guard, "revoke_policy", std::vec![])
+    }
+
+    fn rotate_agent_key_invocation(&self, new_pubkey: &BytesN<32>) -> SorobanAuthorizedInvocation {
+        self.invocation(
+            &self.guard,
+            "rotate_agent_key",
+            std::vec![new_pubkey.clone().into_val(&self.env)],
+        )
+    }
+
+    fn create_contract_invocation(
+        &self,
+        salt: &BytesN<32>,
+        wasm_hash: &BytesN<32>,
+    ) -> SorobanAuthorizedInvocation {
+        SorobanAuthorizedInvocation {
+            function: SorobanAuthorizedFunction::CreateContractV2HostFn(
+                xdr::CreateContractArgsV2 {
+                    contract_id_preimage: xdr::ContractIdPreimage::Address(
+                        xdr::ContractIdPreimageFromAddress {
+                            address: xdr::ScAddress::from(&self.guard),
+                            salt: xdr::Uint256(salt.to_array()),
+                        },
+                    ),
+                    executable: xdr::ContractExecutable::Wasm(xdr::Hash(wasm_hash.to_array())),
+                    constructor_args: xdr::VecM::default(),
+                },
+            ),
+            sub_invocations: xdr::VecM::default(),
+        }
+    }
+
+    fn create_contract_with_ctor_invocation(
+        &self,
+        salt: &BytesN<32>,
+        wasm_hash: &BytesN<32>,
+        ctor_arg: i128,
+    ) -> SorobanAuthorizedInvocation {
+        let val: Val = ctor_arg.into_val(&self.env);
+        let sc_val = xdr::ScVal::from_val(&self.env, &val);
+        SorobanAuthorizedInvocation {
+            function: SorobanAuthorizedFunction::CreateContractV2HostFn(
+                xdr::CreateContractArgsV2 {
+                    contract_id_preimage: xdr::ContractIdPreimage::Address(
+                        xdr::ContractIdPreimageFromAddress {
+                            address: xdr::ScAddress::from(&self.guard),
+                            salt: xdr::Uint256(salt.to_array()),
+                        },
+                    ),
+                    executable: xdr::ContractExecutable::Wasm(xdr::Hash(wasm_hash.to_array())),
+                    constructor_args: xdr::VecM::try_from(std::vec![sc_val]).unwrap(),
+                },
+            ),
+            sub_invocations: xdr::VecM::default(),
+        }
     }
 
     fn signature_expiration_ledger(&self) -> u32 {
@@ -514,6 +978,24 @@ impl Harness {
         }
     }
 
+    /// Build an auth entry for an arbitrary custom account (e.g. non-admin `MockAdmin`).
+    fn non_admin_entry(
+        &self,
+        account: &Address,
+        root: &SorobanAuthorizedInvocation,
+    ) -> SorobanAuthorizationEntry {
+        let signature_expiration_ledger = self.signature_expiration_ledger();
+        SorobanAuthorizationEntry {
+            credentials: SorobanCredentials::Address(SorobanAddressCredentials {
+                address: xdr::ScAddress::from(account),
+                nonce: 1,
+                signature_expiration_ledger,
+                signature: ScVal::Void,
+            }),
+            root_invocation: root.clone(),
+        }
+    }
+
     /// Switch the env into enforcing auth mode with exactly one entry.
     fn enforce(&mut self, entry: SorobanAuthorizationEntry) {
         self.env.set_auths(&[entry]);
@@ -529,32 +1011,89 @@ impl Harness {
     }
 
     fn transfer_expect_blocked(&mut self, to: &Address, amount: i128) {
-        let root = self.transfer_invocation(&self.guard, to, amount);
-        let entry = self.guard_entry(&root);
-        self.enforce(entry);
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            MockAssetClient::new(&self.env, &self.asset).transfer(&self.guard, to, &amount);
-        }));
-        assert!(res.is_err(), "expected the transfer to be blocked");
+        self.transfer_blocked_reason(to, amount);
     }
 
     /// Signed transfer *expected to be blocked*, returning the host error log so
     /// a caller can assert **which** reason blocked it (mirrors
-    /// `heartbeat_with_expect_blocked`). Panics if the transfer is not blocked.
+    /// `heartbeat_with_expect_blocked`). The expected reason comes from the
+    /// permissionless preflight and must match the host-routed failure.
     fn transfer_blocked_reason(&mut self, to: &Address, amount: i128) -> std::string::String {
+        let expected =
+            match PolicyEngineClient::new(&self.env, &self.guard).check(&self.asset, to, &amount) {
+                CheckResult::Blocked(reason) => GuardError::from_block_reason(&reason)
+                    .unwrap_or_else(|| {
+                        panic!("preflight returned an unknown block reason {reason:?}")
+                    }),
+                CheckResult::Allowed => panic!("expected preflight to block the transfer"),
+            };
+        assert_eq!(
+            self.emitted_blocked_auth(expected.reason()),
+            1,
+            "preflight must emit exactly one blocked auth_checked event for {}",
+            expected.reason()
+        );
+
         let root = self.transfer_invocation(&self.guard, to, amount);
         let entry = self.guard_entry(&root);
         self.enforce(entry);
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             MockAssetClient::new(&self.env, &self.asset).transfer(&self.guard, to, &amount);
         }));
-        match res {
-            Err(payload) => payload
-                .downcast_ref::<std::string::String>()
-                .cloned()
-                .unwrap_or_default(),
+        let log = match res {
+            Err(payload) => panic_message(payload.as_ref()),
             Ok(()) => panic!("expected the transfer to be blocked"),
+        };
+        assert!(
+            log.contains(expected.reason()),
+            "expected block reason {}, but the host log was: {log}",
+            expected.reason()
+        );
+        log
+    }
+
+    fn protocol_call(&mut self, contract: &Address, function: &str) {
+        let root = self.invocation(
+            contract,
+            function,
+            std::vec![self.guard.clone().into_val(&self.env)],
+        );
+        let entry = self.guard_entry(&root);
+        self.enforce(entry);
+        match function {
+            "swap" => MockProtocolClient::new(&self.env, contract).swap(&self.guard),
+            "deposit" => MockProtocolClient::new(&self.env, contract).deposit(&self.guard),
+            _ => panic!("unsupported MockProtocol function {function}"),
         }
+    }
+
+    fn protocol_call_expect_blocked(
+        &mut self,
+        contract: &Address,
+        function: &str,
+        expected: GuardError,
+    ) {
+        let root = self.invocation(
+            contract,
+            function,
+            std::vec![self.guard.clone().into_val(&self.env)],
+        );
+        let entry = self.guard_entry(&root);
+        self.enforce(entry);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match function {
+            "swap" => MockProtocolClient::new(&self.env, contract).swap(&self.guard),
+            "deposit" => MockProtocolClient::new(&self.env, contract).deposit(&self.guard),
+            _ => panic!("unsupported MockProtocol function {function}"),
+        }));
+        let log = match res {
+            Err(payload) => panic_message(payload.as_ref()),
+            Ok(()) => panic!("expected protocol call to be blocked"),
+        };
+        assert!(
+            log.contains(expected.reason()),
+            "expected protocol block reason {}, but the host log was: {log}",
+            expected.reason()
+        );
     }
 
     fn heartbeat(&mut self) {
@@ -564,14 +1103,22 @@ impl Harness {
         PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
     }
 
-    fn heartbeat_expect_blocked(&mut self) {
+    fn heartbeat_expect_blocked(&mut self, expected: GuardError) {
         let root = self.heartbeat_invocation();
         let entry = self.guard_entry(&root);
         self.enforce(entry);
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
         }));
-        assert!(res.is_err(), "expected the heartbeat to be blocked");
+        let log = match res {
+            Err(payload) => panic_message(payload.as_ref()),
+            Ok(()) => panic!("expected the heartbeat to be blocked"),
+        };
+        assert!(
+            log.contains(expected.reason()),
+            "expected heartbeat block reason {}, but the host log was: {log}",
+            expected.reason()
+        );
     }
 
     fn heartbeat_with(&mut self, key: &SigningKey) {
@@ -593,10 +1140,7 @@ impl Harness {
             PolicyEngineClient::new(&self.env, &self.guard).heartbeat();
         }));
         if let Err(payload) = res {
-            payload
-                .downcast_ref::<std::string::String>()
-                .cloned()
-                .unwrap_or_default()
+            panic_message(payload.as_ref())
         } else {
             panic!("expected the heartbeat to be blocked")
         }
@@ -612,18 +1156,40 @@ impl Harness {
     /// `set_policy` once the harness has entered enforcing auth mode: the
     /// plain `install_policy` relies on mock auth and would be rejected.
     fn set_policy_enforcing(&mut self, cfg: &PolicyConfig) {
-        let root = self.invocation(
-            &self.guard,
-            "set_policy",
-            std::vec![cfg.clone().into_val(&self.env)],
-        );
+        let root = self.set_policy_invocation(cfg);
         let entry = self.admin_entry(&root);
         self.enforce(entry);
         PolicyEngineClient::new(&self.env, &self.guard).set_policy(cfg);
     }
 
+    fn increase_window_cap(&mut self, new_cap: i128) {
+        let root = self.increase_window_cap_invocation(new_cap);
+        let entry = self.admin_entry(&root);
+        self.enforce(entry);
+        let client = PolicyEngineClient::new(&self.env, &self.guard);
+        client.increase_window_cap(&new_cap);
+    }
+
+    fn balance(&self, holder: &Address) -> i128 {
+        MockAssetClient::new(&self.env, &self.asset).balance(holder)
+    }
+
+    fn set_asset_balance(&self, holder: &Address, initial_balance: i128) {
+        let client = MockAssetClient::new(&self.env, &self.asset);
+        client.initialize(holder, &initial_balance);
+    }
+
+    fn mint_asset(&self, to: &Address, amount: i128) {
+        let client = MockAssetClient::new(&self.env, &self.asset);
+        client.mint(to, &amount);
+    }
+
     fn status(&self) -> crate::types::Status {
         PolicyEngineClient::new(&self.env, &self.guard).status()
+    }
+
+    fn status_at(&self, as_of: u64) -> crate::types::Status {
+        PolicyEngineClient::new(&self.env, &self.guard).status_at(&as_of)
     }
 
     /// The persisted rolling-window ledger (SPEC §3), or `None` when the
@@ -651,6 +1217,43 @@ impl Harness {
             .any(|e| match &e.body {
                 xdr::ContractEventBody::V0(v0) => v0.topics.get(1) == Some(&want),
             })
+    }
+
+    /// Count allowed `auth_checked` events (one per admitted auth context).
+    fn emitted_allowed_auth_count(&self) -> usize {
+        let allowed = symbol_val("allowed");
+        let event_name = symbol_val("event_auth_checked");
+        self.env
+            .events()
+            .all()
+            .events()
+            .iter()
+            .filter(|event| match &event.body {
+                xdr::ContractEventBody::V0(v0) => {
+                    v0.topics.first() == Some(&event_name) && v0.topics.get(1) == Some(&allowed)
+                }
+            })
+            .count()
+    }
+
+    /// Count blocked `auth_checked` events with the requested reason topic.
+    fn emitted_blocked_auth(&self, reason: &str) -> usize {
+        let blocked = symbol_val("blocked");
+        let reason = symbol_val(reason);
+        let event_name = symbol_val("event_auth_checked");
+        self.env
+            .events()
+            .all()
+            .events()
+            .iter()
+            .filter(|event| match &event.body {
+                xdr::ContractEventBody::V0(v0) => {
+                    v0.topics.first() == Some(&event_name)
+                        && v0.topics.get(1) == Some(&blocked)
+                        && v0.topics.get(2) == Some(&reason)
+                }
+            })
+            .count()
     }
 
     /// Run one real, agent-signed transfer authorization and return the host's
@@ -890,6 +1493,91 @@ impl Harness {
     }
 }
 
+// ── Full lifecycle under real host auth (issue #438) ──────────────────────
+//
+// The rest of this suite mocks auth on purpose (see the harness header):
+// most tests care about policy *behaviour*, not about how the account is
+// authorized, and hand-signing every admin call would bury that intent.
+//
+// The blanket mock hides a whole class of regressions, though: a
+// `require_auth` that no longer matches the recorded admin, an auth entry
+// built against the wrong invocation tree, a signature over the wrong
+// payload. None of them can show up while `mock_all_auths()` short-circuits
+// every authorization.
+//
+// The test below closes that gap for the registration path. It runs the
+// whole lifecycle — `initialize`, `set_policy`, and an agent-signed
+// transfer — under *real* host auth, with explicit `set_auths` entries and
+// no `mock_all_auths()` call anywhere in the flow.
+
+/// A fresh registration must be usable end to end under real host auth: the
+/// admin authorizes `initialize` and `set_policy`, the agent authorizes a
+/// guarded transfer, and the installed policy decides it.
+#[test]
+fn full_lifecycle_runs_under_real_host_auth() {
+    // 1. Registration under a real admin auth entry.
+    let mut h = Harness::new_enforced_auth();
+    let (admin, pending) = h.stored_admins();
+    assert_eq!(
+        admin,
+        Some(h.admin.clone()),
+        "initialize must store the admin that authorized it"
+    );
+    assert_eq!(
+        pending, None,
+        "no admin rotation is pending after initialize"
+    );
+    assert!(
+        !h.status().has_policy,
+        "a fresh registration has no policy yet"
+    );
+
+    // 2. Policy install under a real admin auth entry.
+    let mut p = h.base_policy();
+    p.per_tx_cap = 50;
+    h.set_policy_enforcing(&p);
+    let status = h.status();
+    assert!(status.has_policy, "set_policy must install the policy");
+    assert_eq!(
+        status.policy_revision, 1,
+        "the first policy install is revision 1"
+    );
+
+    // 3. An agent-signed transfer under the installed policy is allowed.
+    let recv = h.recv.clone();
+    h.transfer(&recv, 20);
+    assert!(
+        h.emitted_allowed_auth(),
+        "the guarded transfer must be decided by the policy, not mocked away"
+    );
+
+    // 4. The same policy blocks an over-cap transfer in the same lifecycle.
+    let reason = h.transfer_blocked_reason(&recv, 51);
+    assert!(
+        reason.contains("per_tx_cap_exceeded"),
+        "an over-cap transfer must be blocked with the cap reason, got {reason}"
+    );
+
+    // 5. The admin authorization is enforced, not merely present: an entry
+    //    belonging to a different account must not be able to set a policy.
+    let impostor = h.env.register(MockAdmin, ());
+    let root = h.set_policy_invocation(&p);
+    let entry = h.non_admin_entry(&impostor, &root);
+    h.enforce(entry);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(
+        res.is_err(),
+        "a non-admin entry must not be able to install a policy"
+    );
+    assert_eq!(
+        h.status().policy_revision,
+        1,
+        "the rejected install must leave the installed policy untouched"
+    );
+}
+
 // ── GuardScenario: declarative scenario builder (issue #63) ──────────────
 //
 // Each call maps 1:1 onto a step of the SPEC §11 scenario walkthrough, so a
@@ -955,8 +1643,8 @@ impl GuardScenario {
     }
 
     /// A signed heartbeat expected to be **Blocked**.
-    fn heartbeat_blocked(mut self) -> Self {
-        self.h.heartbeat_expect_blocked();
+    fn heartbeat_blocked(mut self, reason: GuardError) -> Self {
+        self.h.heartbeat_expect_blocked(reason);
         self
     }
 
@@ -1011,6 +1699,138 @@ fn lifecycle_initialize_once_then_status() {
     assert!(!st.admin_frozen);
     assert!(!st.heartbeat_expired);
     assert_eq!(st.now, 0);
+}
+
+/// Issue #339: a freshly initialized account reports the policy-model format
+/// version it was built against, and the constant itself is pinned so a bump
+/// is a deliberate, reviewed act rather than a silent release change.
+#[test]
+fn policy_format_version_is_recorded_at_initialize() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    assert_eq!(client.policy_version(), crate::POLICY_FORMAT_VERSION);
+    let stored: Option<u32> = h.env.as_contract(&h.guard, || {
+        h.env.storage().instance().get(&DataKey::PolicyVersion)
+    });
+    assert_eq!(
+        stored,
+        Some(crate::POLICY_FORMAT_VERSION),
+        "initialize must write the format version to instance storage"
+    );
+    assert_eq!(
+        crate::POLICY_FORMAT_VERSION,
+        1,
+        "bumping POLICY_FORMAT_VERSION is a deliberate change: update SPEC §3/§7, \
+         its version-policy paragraph, and this assertion together"
+    );
+}
+
+/// Issue #339: the read never traps and reports `0` (never a valid format
+/// version) on an account that has not been initialized.
+#[test]
+fn policy_format_version_is_zero_before_initialize() {
+    let env = Env::default();
+    let guard = env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&env, &guard);
+
+    assert_eq!(client.policy_version(), 0);
+}
+
+// ── Issue #340 research spike: nested / sub-invocation authorizations ────
+//
+// Does the host collapse a protocol's nested `require_auth` on the account
+// into the parent context, hide it, or deliver it as a separate context to
+// `__check_auth`? `MockNestedRouter::route` is an allowlisted protocol call
+// that performs a second `require_auth` from the same account for a nested
+// SAC transfer. The declared auth tree is `route` -> `transfer`.
+
+/// Builds the auth tree for `MockNestedRouter::route(guard, asset, to, amount)`
+/// with the nested `MockAsset::transfer(guard, to, amount)` declared as a
+/// sub-invocation, exactly as the host requires for the nested authorization.
+fn nested_route_invocation(
+    h: &Harness,
+    router: &Address,
+    to: &Address,
+    amount: i128,
+) -> SorobanAuthorizedInvocation {
+    let nested = h.transfer_invocation(&h.guard, to, amount);
+    h.invocation_with_subs(
+        router,
+        "route",
+        std::vec![
+            h.guard.clone().into_val(&h.env),
+            h.asset.clone().into_val(&h.env),
+            to.clone().into_val(&h.env),
+            amount.into_val(&h.env),
+        ],
+        std::vec![nested],
+    )
+}
+
+fn policy_allowing_router(h: &Harness, router: &Address) -> PolicyConfig {
+    let mut policy = h.base_policy();
+    policy.protocols = vec![
+        &h.env,
+        ProtocolRule {
+            contract: router.clone(),
+            fns: Some(vec![&h.env, Symbol::new(&h.env, "route")]),
+            paused: false,
+        },
+    ];
+    policy
+}
+
+/// The nested `require_auth` is **visible**: the host delivers it as its own
+/// entry in `auth_contexts` (one guard decision, and therefore one
+/// `auth_checked` event, per context). A collapsed or hidden nested context
+/// would produce exactly one allowed event for this invocation.
+#[test]
+fn nested_authorization_is_delivered_as_a_separate_auth_context() {
+    let mut h = Harness::new();
+    let router = h.env.register(MockNestedRouter, ());
+    h.install_policy(&policy_allowing_router(&h, &router));
+
+    let recv = h.recv.clone();
+    let root = nested_route_invocation(&h, &router, &recv, 10);
+    let entry = h.guard_entry(&root);
+    h.enforce(entry);
+    MockNestedRouterClient::new(&h.env, &router).route(&h.guard, &h.asset, &recv, &10);
+
+    assert_eq!(
+        h.emitted_allowed_auth_count(),
+        2,
+        "the outer protocol call and its nested SAC transfer must each be \
+         evaluated as a separate context (issue #340)"
+    );
+}
+
+/// The nested context is not merely visible — it is **enforced**. The outer
+/// protocol call is allowlisted, but the nested transfer targets a recipient
+/// outside the allowlist, so the whole authorization must be rejected with the
+/// nested context's reason. This is the property that makes fine-grained v2
+/// enforcement possible.
+#[test]
+fn nested_authorization_is_evaluated_against_policy() {
+    let mut h = Harness::new();
+    let router = h.env.register(MockNestedRouter, ());
+    h.install_policy(&policy_allowing_router(&h, &router));
+
+    let other = h.other.clone();
+    let root = nested_route_invocation(&h, &router, &other, 10);
+    let entry = h.guard_entry(&root);
+    h.enforce(entry);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        MockNestedRouterClient::new(&h.env, &router).route(&h.guard, &h.asset, &other, &10);
+    }));
+    let log = match res {
+        Err(payload) => panic_message(payload.as_ref()),
+        Ok(()) => panic!("the nested transfer to a non-allowlisted recipient must be blocked"),
+    };
+    assert!(
+        log.contains("recipient_not_allowed"),
+        "the nested context must be judged by the guard's policy, but the host log was: {log}"
+    );
 }
 
 #[test]
@@ -1151,6 +1971,50 @@ fn blocked_detailed_check_reports_headroom_without_writing_window() {
 }
 
 #[test]
+fn batch_check_stages_admissions_and_matches_auth_outcome() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+    h.set_time(1_000);
+
+    let first = BatchTransfer {
+        to: h.recv.clone(),
+        amount: 60,
+    };
+    let second = BatchTransfer {
+        to: h.recv.clone(),
+        amount: 50,
+    };
+    let batch = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_batch(
+            h.env.clone(),
+            h.asset.clone(),
+            soroban_sdk::vec![&h.env, first.clone(), second.clone()],
+        )
+    });
+    assert_eq!(batch.verdicts.len(), 2);
+    assert_eq!(batch.verdicts.get(0), Some(CheckResult::Allowed));
+    assert_eq!(
+        batch.verdicts.get(1),
+        Some(CheckResult::Blocked(Symbol::new(
+            &h.env,
+            "window_cap_exceeded",
+        )))
+    );
+    assert!(!batch.admissible);
+
+    h.transfer(&h.recv.clone(), first.amount);
+    let second_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.transfer(&h.recv.clone(), second.amount);
+    }));
+    assert!(
+        second_result.is_err(),
+        "the same staged window must reject the second transfer"
+    );
+}
+
+#[test]
 fn policy_revision_increments_across_set_and_revoke() {
     let h = Harness::new();
     let client = PolicyEngineClient::new(&h.env, &h.guard);
@@ -1200,6 +2064,39 @@ fn per_tx_cap_violation_blocked_without_window_effect() {
     .expect_transfer(&recv, 30) // total 50 — would fail if the blocked 60 had counted (110 > 100)
     .expect_transfer(&recv, 50) // total exactly 100
     .expect_block(GuardError::WindowCapExceeded, &recv, 1); // ledger genuinely full
+}
+
+/// SPEC §6.2 rule 3: `per_tx_cap` comparison is exclusive-of-blocking (inclusive cap):
+/// a transfer with `amount == per_tx_cap` is admitted; `amount == per_tx_cap + 1` is
+/// blocked with `per_tx_cap_exceeded`.
+#[test]
+fn per_tx_cap_boundary_admitted_at_cap_and_blocked_at_cap_plus_one() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 50;
+    // Generous window cap so only the per-tx cap is exercised.
+    p.window_cap = 1_000;
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // amount == per_tx_cap (50): admitted.
+    h.transfer(&recv, 50);
+
+    // amount == per_tx_cap + 1 (51): blocked with per_tx_cap_exceeded.
+    let reason = h.transfer_blocked_reason(&recv, 51);
+    assert!(
+        reason.contains("per_tx_cap_exceeded"),
+        "expected per_tx_cap_exceeded for amount == per_tx_cap + 1, got: {reason}"
+    );
+
+    // Preflight simulation check() also agrees on the boundary.
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(client.check(&h.asset, &recv, &50), CheckResult::Allowed);
+    assert_eq!(
+        client.check(&h.asset, &recv, &51),
+        CheckResult::Blocked(Symbol::new(&h.env, "per_tx_cap_exceeded"))
+    );
 }
 
 #[test]
@@ -1409,7 +2306,7 @@ fn dead_man_switch_freeze_and_admin_reversal() {
         .expect_transfer(&recv, 5)
         .at(1_000_100) // grace (60s) elapsed
         .expect_block(GuardError::HeartbeatExpired, &recv, 5)
-        .heartbeat_blocked(); // silence cannot self-revive (SPEC §5)
+        .heartbeat_blocked(GuardError::HeartbeatExpired); // silence cannot self-revive (SPEC §5)
 
     // Admin unfreeze is the reversal path (SPEC §5). The DMS grace had
     // elapsed, so the admin's signature re-arms the liveness clock — the
@@ -1418,6 +2315,76 @@ fn dead_man_switch_freeze_and_admin_reversal() {
     let s = s.unfreeze(); // sets LastHeartbeat = now (1_000_100)
     assert_unfrozen_event_rearmed(s.env(), true);
     s.heartbeat().at(1_000_100).expect_transfer(&recv, 5); // revived
+}
+
+/// Issue #318: A transaction bundling `[heartbeat, transfer]` against an expired
+/// account is evaluated against the pre-transaction `LastHeartbeat`.
+///
+/// Every auth context in one `__check_auth` call shares a single state snapshot
+/// loaded from storage before any context is executed. Even though the bundle contains
+/// a heartbeat intended to revive the account, the dead-man gate (rule #2) evaluates
+/// every context in the transaction against the existing pre-transaction storage snapshot.
+/// Because the account is expired, `__check_auth` blocks the bundle with
+/// `HeartbeatExpired`, the transaction is rejected, and `LastHeartbeat` in storage
+/// is not updated.
+#[test]
+fn bundled_heartbeat_with_spend_blocked_when_heartbeat_expired() {
+    let h = Harness::new();
+    h.set_time(1_000_000);
+
+    let mut p = h.base_policy();
+    p.dms_grace_secs = 60;
+    h.install_policy(&p);
+
+    // Initial state: LastHeartbeat set to install time (1_000_000).
+    assert_eq!(h.status().last_heartbeat, 1_000_000);
+    assert!(!h.status().heartbeat_expired);
+
+    // Advance time past the 60s DMS grace period (100 seconds elapsed).
+    h.set_time(1_000_100);
+    assert!(h.status().heartbeat_expired);
+
+    // Construct a bundle containing [heartbeat, transfer].
+    let ctx_heartbeat = Context::Contract(ContractContext {
+        contract: h.guard.clone(),
+        fn_name: Symbol::new(&h.env, "heartbeat"),
+        args: soroban_sdk::Vec::new(&h.env),
+    });
+
+    let mut transfer_args: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(&h.env);
+    transfer_args.push_back(h.guard.clone().into_val(&h.env));
+    transfer_args.push_back(h.recv.clone().into_val(&h.env));
+    transfer_args.push_back(10i128.into_val(&h.env));
+    let ctx_transfer = Context::Contract(ContractContext {
+        contract: h.asset.clone(),
+        fn_name: Symbol::new(&h.env, "transfer"),
+        args: transfer_args,
+    });
+
+    let contexts = soroban_sdk::vec![&h.env, ctx_heartbeat, ctx_transfer];
+
+    // Sign the auth payload with the registered agent key.
+    let payload_bytes = [77u8; 32];
+    let sig = h.agent.sign(&payload_bytes).to_bytes();
+
+    // Verify __check_auth returns Err(Ok(GuardError::HeartbeatExpired)).
+    let outcome = h.invoke_check_auth_raw(&h.guard, &payload_bytes, &sig, &contexts);
+    assert_eq!(outcome, Err(Ok(GuardError::HeartbeatExpired)));
+
+    // Crucially assert that the blocked bundle does NOT update LastHeartbeat.
+    let status = h.status();
+    assert_eq!(status.last_heartbeat, 1_000_000);
+    assert!(status.heartbeat_expired);
+
+    // Verify direct storage read confirms LastHeartbeat remains unchanged.
+    let stored_heartbeat = h.env.as_contract(&h.guard, || {
+        h.env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::LastHeartbeat)
+            .unwrap()
+    });
+    assert_eq!(stored_heartbeat, 1_000_000);
 }
 
 /// Reads the most recent `event_unfrozen` data map and asserts the value of
@@ -1473,6 +2440,82 @@ fn unfreeze_while_dms_fresh_emits_rearmed_dms_false() {
     h.unfreeze();
     assert_unfrozen_event_rearmed(&h.env, false);
     assert_eq!(h.status().last_heartbeat, 1_000_010);
+}
+
+#[test]
+fn refresh_deadman_records_auto_freeze_and_emits_event() {
+    let mut h = Harness::new();
+    let mut p = h.base_policy();
+    p.dms_grace_secs = 60;
+    h.set_time(1_000_000);
+    h.install_policy(&p);
+
+    // Within grace, refresh_deadman does nothing
+    h.set_time(1_000_010);
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).refresh_deadman();
+    // Verify no event emitted
+    let mut events = std::vec::Vec::new();
+    for e in h.env.events().all().events() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &e.body;
+        let want_event = soroban_sdk::xdr::ScVal::Symbol(
+            soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("event_dms_auto_frozen"))
+                .unwrap(),
+        );
+        if v0.topics.first() == Some(&want_event) {
+            events.push(v0.topics.clone());
+        }
+    }
+    assert_eq!(
+        events.len(),
+        0,
+        "No event should be emitted when not expired"
+    );
+
+    // Grace elapsed, it should record and emit
+    h.set_time(1_000_100);
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).refresh_deadman();
+
+    let mut events2 = std::vec::Vec::new();
+    for e in h.env.events().all().events() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &e.body;
+        let want_event = soroban_sdk::xdr::ScVal::Symbol(
+            soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("event_dms_auto_frozen"))
+                .unwrap(),
+        );
+        if v0.topics.first() == Some(&want_event) {
+            events2.push(v0.topics.clone());
+        }
+    }
+    assert_eq!(
+        events2.len(),
+        1,
+        "Should emit exactly one auto-freeze event"
+    );
+
+    // Calling it again should no-op
+    PolicyEngineClient::new(&h.env, &h.guard).refresh_deadman();
+    let mut events3 = std::vec::Vec::new();
+    for e in h.env.events().all().events() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &e.body;
+        let want_event = soroban_sdk::xdr::ScVal::Symbol(
+            soroban_sdk::xdr::ScSymbol::try_from(std::vec::Vec::from("event_dms_auto_frozen"))
+                .unwrap(),
+        );
+        if v0.topics.first() == Some(&want_event) {
+            events3.push(v0.topics.clone());
+        }
+    }
+    assert_eq!(
+        events3.len(),
+        0,
+        "Second call should be a no-op (no new events)"
+    );
+
+    // Ensure subsequent spends are still identically blocked (no change to lazy evaluation)
+    let recv = h.recv.clone();
+    h.transfer_expect_blocked(&recv, 5);
 }
 
 #[test]
@@ -2760,6 +3803,8 @@ fn self_address_rejected_in_every_list() {
     let rule = ProtocolRule {
         contract: h.guard.clone(),
         fns: None,
+
+        paused: false,
     };
     p.protocols = soroban_sdk::vec![&h.env, rule];
     expect_invalid(&p, "protocols");
@@ -2810,9 +3855,12 @@ fn error_and_block_reason_round_trip() {
         GuardError::WindowCapExceeded,
         GuardError::ProtocolNotAllowed,
         GuardError::FunctionNotAllowed,
+        GuardError::AssetFnNotAllowed,
         GuardError::UnknownContract,
         GuardError::SelfFunctionNotAllowed,
         GuardError::CreateContractNotAllowed,
+        GuardError::ProtocolCallRateExceeded,
+        GuardError::DecisionInvariantViolation,
     ];
 
     for err in all_errors {
@@ -2870,7 +3918,7 @@ fn agent_runtime_lifecycle_simulation_continuous_heartbeat_loop_and_spends() {
 
     // Assert transfers and heartbeats are frozen
     h.transfer_expect_blocked(&recv, 10);
-    h.heartbeat_expect_blocked();
+    h.heartbeat_expect_blocked(GuardError::HeartbeatExpired);
 
     // Unfreeze
     h.unfreeze();
@@ -3169,10 +4217,14 @@ fn policy_config_debug_snapshot() {
             ProtocolRule {
                 contract: proto_a,
                 fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+
+                paused: false,
             },
             ProtocolRule {
                 contract: proto_b,
                 fns: None,
+
+                paused: false,
             },
         ],
         recipients: vec![&env, recip_a.clone(), recip_b],
@@ -3181,6 +4233,15 @@ fn policy_config_debug_snapshot() {
             crate::types::RecipientCap {
                 recipient: recip_a,
                 cap: 10_000,
+            },
+        ],
+        asset_caps: vec![
+            &env,
+            AssetCap {
+                asset: asset_a.clone(),
+                per_tx_cap: 500,
+
+                paused: false,
             },
         ],
         blocked_recipients: vec![&env],
@@ -3203,6 +4264,7 @@ fn policy_config_debug_snapshot() {
         "recipients",
         "recipient_window_caps",
         "blocked_recipients",
+        "asset_caps",
         "allow_any_recipient",
         "active_from",
         "active_until",
@@ -3212,8 +4274,12 @@ fn policy_config_debug_snapshot() {
 
     let mut last_pos = 0;
     for field in fields {
+        if field == "paused" {
+            continue;
+        }
+        let needle = format!("{field}:");
         let pos = debug_output
-            .find(field)
+            .find(&needle)
             .unwrap_or_else(|| panic!("field {field} not found in debug output"));
         assert!(
             pos >= last_pos,
@@ -3221,6 +4287,20 @@ fn policy_config_debug_snapshot() {
         );
         last_pos = pos;
     }
+
+    let paused_pos = debug_output
+        .rfind("paused:")
+        .unwrap_or_else(|| panic!("field paused not found in debug output"));
+    let active_until_pos = debug_output
+        .find("active_until:")
+        .unwrap_or_else(|| panic!("field active_until not found in debug output"));
+    let dms_pos = debug_output
+        .find("dms_grace_secs:")
+        .unwrap_or_else(|| panic!("field dms_grace_secs not found in debug output"));
+    assert!(
+        paused_pos > active_until_pos && paused_pos < dms_pos,
+        "top-level paused field must sit between active_until and dms_grace_secs"
+    );
 }
 
 #[test]
@@ -3315,12 +4395,17 @@ fn batch_events_emit_in_order_with_context_index() {
             key: XdrScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from(key)).unwrap()),
             val,
         };
-        // `auth_checked` data: {context_index, revision} (issue #38: the
-        // policy revision in force at decision time joins the event to the
-        // policy generation that produced it).
+        let contract: Val = h.asset.clone().into_val(&h.env);
+        // `auth_checked` data identifies the evaluated contract call as well
+        // as its position and policy generation.
         XdrScVal::Map(Some(ScMap(
             VecM::try_from(std::vec::Vec::from([
                 entry("context_index", XdrScVal::U32(idx)),
+                entry("contract", XdrScVal::from_val(&h.env, &contract)),
+                entry(
+                    "fn_name",
+                    XdrScVal::from_val(&h.env, &Symbol::new(&h.env, "transfer")),
+                ),
                 entry("revision", XdrScVal::U64(revision)),
             ]))
             .unwrap(),
@@ -3422,6 +4507,17 @@ fn failed_multi_context_batch_never_commits_staged_window_admissions() {
                 .map_or(0i128, |w| w.total)
         })
     };
+
+    // All 65 transfers fit the configured 100-unit window, but the whole
+    // authorization must be rejected before any of them can be persisted.
+    let mut oversized = soroban_sdk::Vec::new(&h.env);
+    for _ in 0..=crate::types::MAX_AUTH_CONTEXTS {
+        oversized.push_back(transfer_ctx(&to, 1));
+    }
+    let oversized_result = check_batch(oversized, 2);
+    assert_eq!(oversized_result, Err(GuardError::TooManyAuthContexts));
+    assert_eq!(read_window_total(), 0i128);
+    assert_eq!(h.status().window_remaining, Some(100));
 
     // Two-context auth batch: ctx1 (40, valid), ctx2 (90, exceeds per_tx_cap 80).
     let contexts = soroban_sdk::vec![&h.env, transfer_ctx(&to, 40), transfer_ctx(&to, 90)];
@@ -3607,6 +4703,190 @@ fn detailed_check_reports_per_recipient_headroom() {
     assert_eq!(detail.remaining_window, Some(60)); // 100 cap - 40 already admitted
     assert_eq!(detail.effective_window_cap, Some(100));
 }
+#[test]
+fn per_asset_cap_override_wins_over_global() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 10,
+
+            paused: false,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Under the asset override: allowed.
+    h.transfer(&recv, 10);
+    // Above the asset override but below the global cap: must be blocked by
+    // the override (proves the override wins, not the global).
+    h.transfer_expect_blocked(&recv, 50);
+}
+
+#[test]
+fn per_asset_cap_falls_back_to_global_when_absent() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    // No asset_caps entry for h.asset: global per_tx_cap applies.
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    h.transfer(&recv, 100);
+    h.transfer_expect_blocked(&recv, 101);
+}
+
+#[test]
+fn per_asset_cap_zero_override_disables_cap_for_that_asset() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 0,
+
+            paused: false,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // per_tx_cap = 0 means "no cap" for this asset, overriding the global 100.
+    h.transfer(&recv, 1_000_000);
+}
+
+#[test]
+fn per_asset_cap_window_still_uses_global_window() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    // Global per-tx cap must not exceed the window cap (validate_policy rejects
+    // that combination); the per-asset override is the binding per-tx limit here.
+    p.per_tx_cap = 100;
+    p.window_cap = 100;
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 50,
+
+            paused: false,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    // Per-tx override allows up to 50 per tx; window still caps total at 100.
+    h.transfer(&recv, 50);
+    h.transfer(&recv, 50);
+    h.transfer_expect_blocked(&recv, 1); // window full
+}
+
+#[test]
+fn invalid_negative_per_asset_cap_rejected() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: -1,
+
+            paused: false,
+        },
+    ];
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(res.is_err(), "negative per-asset cap must be rejected");
+}
+
+#[test]
+fn invalid_unknown_asset_override_rejected() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    // `other` is not in `assets`; an override for it must be rejected rather
+    // than silently ignored.
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.other.clone(),
+            per_tx_cap: 10,
+
+            paused: false,
+        },
+    ];
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(
+        res.is_err(),
+        "override for an asset not in `assets` must be rejected"
+    );
+}
+
+#[test]
+fn invalid_duplicate_per_asset_cap_rejected() {
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 10,
+
+            paused: false,
+        },
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 20,
+
+            paused: false,
+        },
+    ];
+    h.env.mock_all_auths();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
+    }));
+    assert!(res.is_err(), "duplicate per-asset cap must be rejected");
+}
+
+#[test]
+fn detailed_check_reports_effective_per_asset_cap() {
+    let h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.per_tx_cap = 100;
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: 25,
+
+            paused: false,
+        },
+    ];
+    h.install_policy(&p);
+    h.set_time(1_000);
+
+    let detail = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check_detailed(h.env.clone(), h.asset.clone(), recv.clone(), 10)
+    });
+    assert_eq!(detail.result, CheckResult::Allowed);
+    assert_eq!(detail.per_tx_cap, Some(100));
+    assert_eq!(detail.effective_per_tx_cap, Some(25));
+}
 
 // ── status() operational fields (issue #29) ──────────────────────────────
 
@@ -3615,6 +4895,8 @@ fn status_without_policy_reports_null_operational_fields() {
     let h = Harness::new();
     let st = h.status();
     assert!(!st.has_policy);
+    assert_eq!(st.dms_grace_secs, 0);
+    assert_eq!(st.heartbeat_expires_at, None);
     // Default-deny has nothing to pause, no cap to project headroom from, and
     // no active window to sit outside of — all three must be inert.
     assert!(!st.paused);
@@ -3633,6 +4915,137 @@ fn status_reports_paused_flag_from_policy() {
     h.env.mock_all_auths();
     PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
     assert!(h.status().paused);
+}
+
+#[test]
+fn status_at_projects_heartbeat_expiry_boundary_and_long_expiry() {
+    let h = Harness::new();
+    h.set_time(1_000);
+    let mut p = h.base_policy();
+    p.dms_grace_secs = 60;
+    h.install_policy(&p);
+
+    let boundary = h.status_at(1_060);
+    assert_eq!(boundary.now, 1_060);
+    assert_eq!(boundary.dms_grace_secs, 60);
+    assert_eq!(boundary.heartbeat_expires_at, Some(1_060));
+    assert!(!boundary.heartbeat_expired);
+
+    let before_boundary = h.status_at(1_059);
+    assert!(!before_boundary.heartbeat_expired);
+    assert_eq!(before_boundary.heartbeat_expires_at, Some(1_060));
+
+    let just_expired = h.status_at(1_061);
+    assert!(just_expired.heartbeat_expired);
+    assert_eq!(just_expired.heartbeat_expires_at, Some(1_060));
+
+    let long_expired = h.status_at(10_000);
+    assert!(long_expired.heartbeat_expired);
+    assert_eq!(long_expired.heartbeat_expires_at, Some(1_060));
+}
+
+#[test]
+fn status_at_reports_no_deadline_when_grace_is_disabled() {
+    let h = Harness::new();
+    h.set_time(1_000);
+    let mut p = h.base_policy();
+    p.dms_grace_secs = 0;
+    h.install_policy(&p);
+
+    let status = h.status_at(10_000);
+    assert_eq!(status.dms_grace_secs, 0);
+    assert_eq!(status.heartbeat_expires_at, None);
+    assert!(!status.heartbeat_expired);
+}
+
+#[test]
+fn paused_policy_blocks_host_routed_transfer_without_spending_window() {
+    let mut h = Harness::new();
+    h.set_time(1_000);
+    let mut policy = h.base_policy();
+    policy.paused = true;
+    policy.window_cap = 10;
+    h.install_policy(&policy);
+    let window_before = h.stored_window();
+
+    let recv = h.recv.clone();
+    let blocked_log = h.transfer_blocked_reason(&recv, 5);
+    assert!(blocked_log.contains(GuardError::Paused.reason()));
+    assert_eq!(
+        h.stored_window(),
+        window_before,
+        "a paused denial must not change rolling-window state"
+    );
+    assert_eq!(h.status().window_remaining, Some(10));
+
+    policy.paused = false;
+    h.set_policy_enforcing(&policy);
+    h.transfer(&recv, 5);
+    assert_eq!(h.stored_window().map(|window| window.total), Some(5));
+    assert_eq!(h.status().window_remaining, Some(5));
+}
+
+#[test]
+fn protocol_allowlist_is_enforced_through_real_host_authorization() {
+    let mut h = Harness::new();
+    h.set_time(1_000);
+    let mut policy = h.base_policy();
+    policy.protocols = soroban_sdk::vec![
+        &h.env,
+        ProtocolRule {
+            contract: h.protocol.clone(),
+            fns: Some(soroban_sdk::vec![&h.env, Symbol::new(&h.env, "swap")]),
+            paused: false,
+        },
+    ];
+    h.install_policy(&policy);
+
+    h.protocol_call(&h.protocol.clone(), "swap");
+    assert!(
+        h.emitted_allowed_auth(),
+        "the allowlisted protocol function must pass through host auth"
+    );
+    h.protocol_call_expect_blocked(
+        &h.protocol.clone(),
+        "deposit",
+        GuardError::FunctionNotAllowed,
+    );
+    h.protocol_call_expect_blocked(
+        &h.other_protocol.clone(),
+        "swap",
+        GuardError::UnknownContract,
+    );
+
+    h.env.mock_all_auths();
+    policy.protocols = soroban_sdk::vec![
+        &h.env,
+        ProtocolRule {
+            contract: h.protocol.clone(),
+            fns: None,
+            paused: false,
+        },
+    ];
+    h.install_policy(&policy);
+    h.protocol_call(&h.protocol.clone(), "deposit");
+}
+
+#[test]
+fn blocked_preflight_emits_one_auth_checked_reason_event() {
+    let h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.per_tx_cap = 10;
+    h.install_policy(&policy);
+
+    let result = PolicyEngineClient::new(&h.env, &h.guard).check_detailed(&h.asset, &h.recv, &11);
+    assert_eq!(
+        result.result,
+        CheckResult::Blocked(Symbol::new(&h.env, "per_tx_cap_exceeded"))
+    );
+    assert_eq!(
+        h.emitted_blocked_auth(GuardError::PerTxCapExceeded.reason()),
+        1,
+        "a blocked decision must emit one auth_checked event with its reason topic"
+    );
 }
 
 #[test]
@@ -4145,6 +5558,8 @@ fn validate_policy_reports_self_address_in_list() {
         ProtocolRule {
             contract: h.guard.clone(),
             fns: None,
+
+            paused: false,
         },
     ];
     assert_eq!(
@@ -4269,6 +5684,8 @@ fn policy_asset_protocol_and_recipient_limits_are_inclusive_and_fail_closed() {
         protocols.push_back(ProtocolRule {
             contract: Address::generate(&h.env),
             fns: None,
+
+            paused: false,
         });
     }
     let mut at_limit = baseline.clone();
@@ -4279,6 +5696,8 @@ fn policy_asset_protocol_and_recipient_limits_are_inclusive_and_fail_closed() {
     protocols.push_back(ProtocolRule {
         contract: Address::generate(&h.env),
         fns: None,
+
+        paused: false,
     });
     let mut over_limit = at_limit.clone();
     over_limit.protocols = protocols;
@@ -4362,6 +5781,8 @@ fn validate_policy_reports_protocol_contract_duplicate() {
     let rule = ProtocolRule {
         contract: h.asset.clone(),
         fns: None,
+
+        paused: false,
     };
     p.protocols = soroban_sdk::vec![&h.env, rule.clone(), rule];
     assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolContractDuplicate);
@@ -4378,6 +5799,8 @@ fn validate_policy_reports_protocol_fn_list_invalid() {
         ProtocolRule {
             contract: h.asset.clone(),
             fns: Some(soroban_sdk::Vec::new(&h.env)),
+
+            paused: false,
         },
     ];
     assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolFnListInvalid);
@@ -4394,6 +5817,8 @@ fn validate_policy_reports_protocol_fn_list_invalid() {
         ProtocolRule {
             contract: h.asset.clone(),
             fns: Some(fns),
+
+            paused: false,
         },
     ];
     assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolFnListInvalid);
@@ -4749,4 +6174,898 @@ fn auth_verification_ordering_matrix_pins_exact_observables() {
         Ok(()),
         "Row 4: registered signature with policy installed must approve"
     );
+}
+
+/// Issue #358: Exercise contract creation denial through the real host path.
+///
+/// Verifies end-to-end that when contract creation is deployed on behalf of the guarded
+/// custom account address, the real Soroban host surfaces the creation context to
+/// `__check_auth` (both `Context::CreateContractHostFn` for zero constructor args and
+/// `Context::CreateContractWithCtorHostFn` for non-zero constructor args).
+///
+/// In both cases, the policy engine denies the authorization fail-closed with
+/// `Error::CreateContractNotAllowed` (code 28), emits the `auth_checked` event with
+/// `blocked` and `create_contract_not_allowed`, and causes the host transaction to fail
+/// with `Error(Contract, #28)`.
+#[test]
+fn contract_creation_denied_through_real_host_path() {
+    let mut h = Harness::new();
+    let p = h.base_policy();
+    h.install_policy(&p);
+
+    let wasm_hash = h
+        .env
+        .deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::new(&h.env));
+    let deployer_contract = h.env.register(MockDeployer, ());
+    let client = MockDeployerClient::new(&h.env, &deployer_contract);
+
+    // Case 1: Deploy with no constructor arguments.
+    // The host surfaces Context::CreateContractHostFn to __check_auth.
+    let salt1 = BytesN::from_array(&h.env, &[1u8; 32]);
+    let root1 = h.create_contract_invocation(&salt1, &wasm_hash);
+    let entry1 = h.guard_entry(&root1);
+    h.enforce(entry1);
+
+    let res1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.deploy_v2(&h.guard, &salt1, &wasm_hash);
+    }));
+    assert!(
+        res1.is_err(),
+        "contract creation without constructor args must be blocked"
+    );
+    let panic_msg1 = res1
+        .err()
+        .and_then(|payload| payload.downcast_ref::<std::string::String>().cloned())
+        .unwrap_or_default();
+    assert!(
+        panic_msg1.contains("Error(Contract, #28)"),
+        "expected panic log to contain Error(Contract, #28), got: {panic_msg1}"
+    );
+    assert!(
+        panic_msg1.contains("create_contract_not_allowed"),
+        "expected panic log to contain create_contract_not_allowed, got: {panic_msg1}"
+    );
+    assert!(
+        panic_msg1.contains("CreateContractHostFn"),
+        "expected host diagnostic log to show Context::CreateContractHostFn, got: {panic_msg1}"
+    );
+
+    // Case 2: Deploy with constructor arguments.
+    // The host surfaces Context::CreateContractWithCtorHostFn to __check_auth.
+    let salt2 = BytesN::from_array(&h.env, &[2u8; 32]);
+    let root2 = h.create_contract_with_ctor_invocation(&salt2, &wasm_hash, 99);
+    let entry2 = h.guard_entry(&root2);
+    h.enforce(entry2);
+
+    let res2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.deploy_with_ctor(&h.guard, &salt2, &wasm_hash, &99);
+    }));
+    assert!(
+        res2.is_err(),
+        "contract creation with constructor args must be blocked"
+    );
+    let panic_msg2 = res2
+        .err()
+        .and_then(|payload| payload.downcast_ref::<std::string::String>().cloned())
+        .unwrap_or_default();
+    assert!(
+        panic_msg2.contains("Error(Contract, #28)"),
+        "expected panic log to contain Error(Contract, #28), got: {panic_msg2}"
+    );
+    assert!(
+        panic_msg2.contains("create_contract_not_allowed"),
+        "expected panic log to contain create_contract_not_allowed, got: {panic_msg2}"
+    );
+    assert!(
+        panic_msg2.contains("CreateContractWithCtorHostFn"),
+        "expected host diagnostic log to show Context::CreateContractWithCtorHostFn, got: {panic_msg2}"
+    );
+}
+
+#[test]
+fn unfreeze_does_not_clear_outside_active_window_until_set_policy() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut p = h.base_policy();
+    p.active_from = 100;
+    p.active_until = 500;
+    h.install_policy(&p);
+
+    // Ledger time moves past active_until (600 > 500).
+    h.set_time(600);
+
+    // outside_active_window is active.
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert!(h.status().outside_active_window);
+    assert_eq!(
+        client.check(&h.asset, &recv, &10),
+        CheckResult::Blocked(Symbol::new(&h.env, "outside_active_window"))
+    );
+
+    // Both spend and heartbeat are blocked at gate #5 (account_error).
+    h.transfer_expect_blocked(&recv, 10);
+    h.heartbeat_expect_blocked(GuardError::OutsideActiveWindow);
+
+    // Admin unfreezes the account. This clears AdminFrozen and sets LastHeartbeat = now,
+    // but does NOT touch policy configuration (cannot advance active_until).
+    h.unfreeze();
+
+    // The account remains outside the active window: unfreeze alone cannot revive it.
+    assert!(h.status().outside_active_window);
+    assert_eq!(
+        client.check(&h.asset, &recv, &10),
+        CheckResult::Blocked(Symbol::new(&h.env, "outside_active_window"))
+    );
+    h.transfer_expect_blocked(&recv, 10);
+    h.heartbeat_expect_blocked(GuardError::OutsideActiveWindow);
+
+    // Only set_policy with a renewed active window restores the account.
+    let mut renewed = p;
+    renewed.active_until = 1_000;
+    h.set_policy_enforcing(&renewed);
+
+    // The account is revived: outside_active_window is cleared, heartbeat and transfer succeed.
+    assert!(!h.status().outside_active_window);
+    assert_eq!(client.check(&h.asset, &recv, &10), CheckResult::Allowed);
+    h.heartbeat();
+    h.transfer(&recv, 10);
+}
+
+// ── Admin-gated functions (issue #365, SPEC §1 & §7) ─────────────────────
+//
+// SPEC §1 and §7 state that only the admin can change policy and manage admin
+// controls ('Admin never gains fund-moving authority' and 'only the admin can
+// change policy'). Admin calls must be rejected if authorized by a non-admin
+// principal (whether the agent key or an arbitrary external address).
+//
+// Contract methods returning `()` (`set_policy`, `revoke_policy`, `freeze`,
+// `unfreeze`, `rotate_agent_key`, `propose_admin_rotation`,
+// `cancel_admin_rotation`) panic on authorization failure via the host's
+// `require_auth` check; the Soroban SDK generates no `try_*` client method
+// for unit-returning contract functions that signals host-level auth rejection.
+// `std::panic::catch_unwind` + `std::panic::AssertUnwindSafe` is therefore the
+// standard mechanism to assert that unauthorized calls fail closed.
+
+#[test]
+fn admin_gating_set_policy_rejects_non_admin() {
+    let mut h = Harness::new();
+    let base = h.base_policy();
+    h.install_policy(&base);
+
+    let mut rogue_policy = base.clone();
+    rogue_policy.allow_any_recipient = true;
+
+    let root = h.set_policy_invocation(&rogue_policy);
+
+    // Case 1: Unauthorized random principal.
+    let non_admin = h.env.register(MockAdmin, ());
+    let entry = h.non_admin_entry(&non_admin, &root);
+    h.enforce(entry);
+
+    // `set_policy` returns `()` and the host aborts with an auth error; `try_set_policy`
+    // is not generated by the SDK for unit returns, so `catch_unwind` asserts rejection.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&rogue_policy);
+    }));
+    assert!(
+        res.is_err(),
+        "set_policy authorized by a non-admin account must fail"
+    );
+
+    // Case 2: Agent key principal.
+    let agent_entry = h.guard_entry(&root);
+    h.enforce(agent_entry);
+
+    let res_agent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).set_policy(&rogue_policy);
+    }));
+    assert!(
+        res_agent.is_err(),
+        "set_policy authorized by the agent key must fail"
+    );
+
+    // Fail-closed: policy and revision remain untouched.
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(client.policy(), Some(base));
+    assert_eq!(h.status().policy_revision, 1);
+}
+
+#[test]
+fn admin_gating_revoke_policy_rejects_non_admin() {
+    let mut h = Harness::new();
+    let base = h.base_policy();
+    h.install_policy(&base);
+
+    let root = h.revoke_policy_invocation();
+
+    // Case 1: Unauthorized random principal.
+    let non_admin = h.env.register(MockAdmin, ());
+    let entry = h.non_admin_entry(&non_admin, &root);
+    h.enforce(entry);
+
+    // `revoke_policy` returns `()`; host auth failure traps without SDK `try_*` error,
+    // so `catch_unwind` is used.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).revoke_policy();
+    }));
+    assert!(
+        res.is_err(),
+        "revoke_policy authorized by a non-admin account must fail"
+    );
+
+    // Case 2: Agent key principal.
+    let agent_entry = h.guard_entry(&root);
+    h.enforce(agent_entry);
+
+    let res_agent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).revoke_policy();
+    }));
+    assert!(
+        res_agent.is_err(),
+        "revoke_policy authorized by the agent key must fail"
+    );
+
+    // Fail-closed: policy is still active and revision unchanged.
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(client.policy(), Some(base));
+    assert_eq!(h.status().policy_revision, 1);
+}
+
+#[test]
+fn admin_gating_freeze_rejects_non_admin() {
+    let mut h = Harness::new();
+    assert!(!h.status().admin_frozen);
+
+    let root = h.freeze_invocation();
+
+    // Case 1: Unauthorized random principal.
+    let non_admin = h.env.register(MockAdmin, ());
+    let entry = h.non_admin_entry(&non_admin, &root);
+    h.enforce(entry);
+
+    // `freeze` returns `()`; host auth failure traps without SDK `try_*` error,
+    // so `catch_unwind` is used.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).freeze();
+    }));
+    assert!(
+        res.is_err(),
+        "freeze authorized by a non-admin account must fail"
+    );
+
+    // Case 2: Agent key principal.
+    let agent_entry = h.guard_entry(&root);
+    h.enforce(agent_entry);
+
+    let res_agent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).freeze();
+    }));
+    assert!(
+        res_agent.is_err(),
+        "freeze authorized by the agent key must fail"
+    );
+
+    // Fail-closed: account is still not frozen.
+    assert!(!h.status().admin_frozen);
+}
+
+#[test]
+fn admin_gating_unfreeze_rejects_non_admin() {
+    let mut h = Harness::new();
+
+    // Legitimate admin freeze.
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).freeze();
+    assert!(h.status().admin_frozen);
+
+    let root = h.unfreeze_invocation();
+
+    // Case 1: Unauthorized random principal.
+    let non_admin = h.env.register(MockAdmin, ());
+    let entry = h.non_admin_entry(&non_admin, &root);
+    h.enforce(entry);
+
+    // `unfreeze` returns `()`; host auth failure traps without SDK `try_*` error,
+    // so `catch_unwind` is used.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).unfreeze();
+    }));
+    assert!(
+        res.is_err(),
+        "unfreeze authorized by a non-admin account must fail"
+    );
+
+    // Case 2: Agent key principal.
+    let agent_entry = h.guard_entry(&root);
+    h.enforce(agent_entry);
+
+    let res_agent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).unfreeze();
+    }));
+    assert!(
+        res_agent.is_err(),
+        "unfreeze authorized by the agent key must fail"
+    );
+
+    // Fail-closed: account remains frozen.
+    assert!(h.status().admin_frozen);
+
+    // Legitimate admin unfreeze succeeds.
+    h.unfreeze();
+    assert!(!h.status().admin_frozen);
+}
+
+#[test]
+fn admin_gating_rotate_agent_key_rejects_non_admin() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    h.install_policy(&h.base_policy());
+    h.set_time(1_000);
+
+    let attacker_key = SigningKey::from_bytes(&[99u8; 32]);
+    let attacker_pk = attacker_key.verifying_key().to_bytes();
+    let attacker_pk_val = BytesN::from_array(&h.env, &attacker_pk);
+
+    let root = h.rotate_agent_key_invocation(&attacker_pk_val);
+
+    // Case 1: Non-admin principal cannot rotate the agent key to its own key.
+    let non_admin = h.env.register(MockAdmin, ());
+    let entry = h.non_admin_entry(&non_admin, &root);
+    h.enforce(entry);
+
+    // `rotate_agent_key` returns `()`; host auth failure traps without SDK `try_*` error,
+    // so `catch_unwind` is used.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).rotate_agent_key(&attacker_pk_val);
+    }));
+    assert!(
+        res.is_err(),
+        "rotate_agent_key authorized by a non-admin account must fail"
+    );
+
+    // Case 2: Current agent key cannot rotate the agent key either.
+    let agent_entry = h.guard_entry(&root);
+    h.enforce(agent_entry);
+
+    let res_agent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).rotate_agent_key(&attacker_pk_val);
+    }));
+    assert!(
+        res_agent.is_err(),
+        "rotate_agent_key authorized by the agent key must fail"
+    );
+
+    // Assert that the attacker cannot authorize operations as the agent:
+    // the rejected rotation leaves the bound agent key unchanged.
+    let transfer_root = h.transfer_invocation(&h.guard, &recv, 10);
+    let attacker_auth = h.guard_entry_with(&attacker_key, &transfer_root);
+    h.enforce(attacker_auth);
+
+    let res_transfer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        MockAssetClient::new(&h.env, &h.asset).transfer(&h.guard, &recv, &10);
+    }));
+    assert!(
+        res_transfer.is_err(),
+        "attacker who failed to bind key must not authorize as agent"
+    );
+
+    // Legitimate agent key still authorizes transfers successfully.
+    h.transfer(&recv, 10);
+}
+
+#[test]
+fn admin_gating_propose_admin_rotation_rejects_non_admin() {
+    let mut h = Harness::new();
+    let rogue_admin = Address::generate(&h.env);
+
+    let root = h.propose_admin_invocation(&rogue_admin);
+
+    // Case 1: Unauthorized random principal.
+    let non_admin = h.env.register(MockAdmin, ());
+    let entry = h.non_admin_entry(&non_admin, &root);
+    h.enforce(entry);
+
+    // `propose_admin_rotation` returns `()`; host auth failure traps without SDK `try_*` error,
+    // so `catch_unwind` is used.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).propose_admin_rotation(&rogue_admin);
+    }));
+    assert!(
+        res.is_err(),
+        "propose_admin_rotation authorized by a non-admin account must fail"
+    );
+
+    // Case 2: Agent key principal.
+    let agent_entry = h.guard_entry(&root);
+    h.enforce(agent_entry);
+
+    let res_agent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).propose_admin_rotation(&rogue_admin);
+    }));
+    assert!(
+        res_agent.is_err(),
+        "propose_admin_rotation authorized by the agent key must fail"
+    );
+
+    // Fail-closed: pending admin slot remains empty.
+    let (_, pending) = h.stored_admins();
+    assert!(pending.is_none());
+}
+
+#[test]
+fn admin_gating_cancel_admin_rotation_rejects_non_admin() {
+    let mut h = Harness::new();
+    let new_admin = Address::generate(&h.env);
+
+    // Admin legitimately proposes rotation.
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).propose_admin_rotation(&new_admin);
+    let (_, pending) = h.stored_admins();
+    assert_eq!(pending, Some(new_admin.clone()));
+
+    let root = h.cancel_admin_invocation();
+
+    // Case 1: Unauthorized random principal.
+    let non_admin = h.env.register(MockAdmin, ());
+    let entry = h.non_admin_entry(&non_admin, &root);
+    h.enforce(entry);
+
+    // `cancel_admin_rotation` returns `()`; host auth failure traps without SDK `try_*` error,
+    // so `catch_unwind` is used.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).cancel_admin_rotation();
+    }));
+    assert!(
+        res.is_err(),
+        "cancel_admin_rotation authorized by a non-admin account must fail"
+    );
+
+    // Case 2: Agent key principal.
+    let agent_entry = h.guard_entry(&root);
+    h.enforce(agent_entry);
+
+    let res_agent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).cancel_admin_rotation();
+    }));
+    assert!(
+        res_agent.is_err(),
+        "cancel_admin_rotation authorized by the agent key must fail"
+    );
+
+    // Fail-closed: pending admin rotation is not cancelled.
+    let (_, pending) = h.stored_admins();
+    assert_eq!(pending, Some(new_admin));
+}
+
+// ── Admin functions before `initialize` (issue #364) ─────────────────────
+//
+// `admin_or_panic` (src/lib.rs) is the single gate in front of every admin
+// write: with no admin stored it panics `NotInitialized`, so a guard that was
+// registered but never initialized cannot accept a policy, rotate its key, or
+// flip the freeze switch. Default-deny depends on every state path failing
+// closed — the administrative ones included — but this `NotInitialized` arm
+// had no coverage: `initialize`'s double-call rejection was tested, the
+// pre-init rejection of every other admin function was not.
+//
+// These assertions use the generated `try_*` client methods rather than
+// `catch_unwind`. `try_*` is generated for unit-returning contract functions
+// too, and it distinguishes a contract error (`Err(Ok(..))`, the
+// `panic_with_error!` path this test targets) from a host-level failure
+// (`Err(Err(..))`), so the exact error code is asserted instead of just "it
+// panicked".
+
+/// The contract error carried by a generated `try_*` call, or a panic naming
+/// how the call failed to be one.
+fn try_contract_error<T, E>(
+    res: Result<Result<T, E>, Result<soroban_sdk::Error, InvokeError>>,
+) -> GuardError
+where
+    T: std::fmt::Debug,
+    E: std::fmt::Debug,
+{
+    match res {
+        Err(Ok(err)) => GuardError::try_from(err).expect("unknown contract error code"),
+        Ok(ok) => panic!("expected a contract error, but the call succeeded: {ok:?}"),
+        Err(Err(host)) => panic!("expected a contract error, but the host failed: {host:?}"),
+    }
+}
+
+#[test]
+fn admin_functions_reject_with_not_initialized_before_initialize() {
+    let h = Harness::new();
+    // A freshly registered guard: no `initialize` call was ever made, so no
+    // admin address is stored and there is no key or policy state either.
+    let guard = h.env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&h.env, &guard);
+
+    let status_before = client.status();
+    assert!(!status_before.has_policy, "a fresh guard has no policy");
+    assert_eq!(status_before.policy_revision, 0);
+    assert!(!status_before.admin_frozen);
+    assert_eq!(status_before.last_heartbeat, 0);
+
+    // Raw state the `status` snapshot does not expose (the bound agent key and
+    // the rolling ledger), read as the contract so it sees the stored bytes.
+    let stored_agent_key = || {
+        h.env.as_contract(&guard, || {
+            h.env
+                .storage()
+                .instance()
+                .get::<DataKey, BytesN<32>>(&DataKey::AgentPubkey)
+        })
+    };
+    let stored_window = || {
+        h.env.as_contract(&guard, || {
+            h.env
+                .storage()
+                .persistent()
+                .get::<DataKey, WindowState>(&DataKey::Window)
+        })
+    };
+    assert!(stored_agent_key().is_none());
+    assert!(stored_window().is_none());
+
+    // After each rejection the whole observable state must be byte-identical
+    // to the pre-call snapshot: no policy, no agent key, no window, no
+    // revision/freeze/heartbeat movement, and no lifecycle event (a rejected
+    // admin call emits nothing; the event log still holds its own invocation).
+    let assert_unchanged = |label: &str| {
+        assert!(
+            h.env.events().all().events().is_empty(),
+            "`{label}` before initialize must not emit an event"
+        );
+        assert_eq!(
+            client.status(),
+            status_before,
+            "`{label}` before initialize must leave the status snapshot untouched"
+        );
+        assert!(
+            client.policy().is_none(),
+            "`{label}` before initialize must not install a policy"
+        );
+        assert!(
+            stored_agent_key().is_none(),
+            "`{label}` before initialize must not bind an agent key"
+        );
+        assert!(
+            stored_window().is_none(),
+            "`{label}` before initialize must not create a window"
+        );
+    };
+
+    // Every admin entrypoint, driven against the uninitialized account. The
+    // candidate policy and key are valid on their own, so the only thing that
+    // can reject them here is the missing admin.
+    assert_eq!(
+        try_contract_error(client.try_set_policy(&h.base_policy())),
+        GuardError::NotInitialized,
+        "set_policy before initialize must fail closed with NotInitialized"
+    );
+    assert_unchanged("set_policy");
+
+    assert_eq!(
+        try_contract_error(client.try_revoke_policy()),
+        GuardError::NotInitialized,
+        "revoke_policy before initialize must fail closed with NotInitialized"
+    );
+    assert_unchanged("revoke_policy");
+
+    let new_pubkey = BytesN::from_array(&h.env, &[9u8; 32]);
+    assert_eq!(
+        try_contract_error(client.try_rotate_agent_key(&new_pubkey)),
+        GuardError::NotInitialized,
+        "rotate_agent_key before initialize must fail closed with NotInitialized"
+    );
+    assert_unchanged("rotate_agent_key");
+
+    assert_eq!(
+        try_contract_error(client.try_freeze()),
+        GuardError::NotInitialized,
+        "freeze before initialize must fail closed with NotInitialized"
+    );
+    assert_unchanged("freeze");
+
+    assert_eq!(
+        try_contract_error(client.try_unfreeze()),
+        GuardError::NotInitialized,
+        "unfreeze before initialize must fail closed with NotInitialized"
+    );
+    assert_unchanged("unfreeze");
+
+    // Sanity: once the same account is initialized the identical call is
+    // accepted, so the rejections above came from the missing admin and not
+    // from a broken harness or an invalid candidate policy.
+    h.env.mock_all_auths();
+    let pk = h.agent.verifying_key().to_bytes();
+    client.initialize(&h.admin, &BytesN::from_array(&h.env, &pk));
+    client.set_policy(&h.base_policy());
+    assert!(client.policy().is_some());
+    assert!(client.status().has_policy);
+}
+
+// ── Mid-window cap extension (issue #349) ────────────────────────────────
+
+#[test]
+fn increase_window_cap_preserves_total_and_blocks_at_new_cap() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    policy.window_secs = 3_600;
+    policy.dms_grace_secs = 600;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+
+    let hash_before = PolicyEngineClient::new(&h.env, &h.guard).policy_hash();
+    let initial_heartbeat = h.status().last_heartbeat;
+
+    h.set_time(1_010);
+    h.transfer(&recv, 80);
+    let log = h.transfer_blocked_reason(&recv, 30);
+    assert!(log.contains(GuardError::WindowCapExceeded.reason()));
+
+    // Extend cap mid-window from 100 -> 150: ledger entries stay intact.
+    h.set_time(1_020);
+    h.increase_window_cap(150);
+
+    assert_eq!(event_count(&h.env, "event_window_cap_increased"), 1);
+    let event_revision = last_event_revision(&h.env, "event_window_cap_increased");
+    assert_eq!(event_revision, 2);
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(client.policy().unwrap().window_cap, 150);
+    assert_ne!(client.policy_hash(), hash_before);
+    assert_eq!(h.status().last_heartbeat, initial_heartbeat);
+    assert_eq!(h.stored_window().unwrap().total, 80);
+    assert_eq!(h.status().window_remaining, Some(70));
+
+    // Remaining 70 is admitted; the next unit blocks at the new 150 ceiling.
+    h.set_time(1_030);
+    h.transfer(&recv, 70);
+    assert_eq!(h.stored_window().unwrap().total, 150);
+    assert_eq!(h.status().window_remaining, Some(0));
+
+    let blocked = h.transfer_blocked_reason(&recv, 1);
+    assert!(blocked.contains(GuardError::WindowCapExceeded.reason()));
+}
+
+#[test]
+fn increase_window_cap_rejects_below_current_total_and_non_increasing_values() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 200;
+    policy.window_secs = 3_600;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+
+    h.set_time(1_010);
+    h.transfer(&recv, 150);
+
+    // Switch back to mock auth so rejections exercise cap validation, not auth.
+    h.env.mock_all_auths();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    for bad_cap in [100i128, 200, 0, -10] {
+        assert_eq!(
+            try_contract_error(client.try_increase_window_cap(&bad_cap)),
+            GuardError::InvalidConfig,
+            "increase_window_cap({bad_cap}) must reject with InvalidConfig"
+        );
+    }
+    assert_eq!(client.policy().unwrap().window_cap, 200);
+    assert_eq!(h.status().policy_revision, 1);
+    assert_eq!(h.stored_window().unwrap().total, 150);
+
+    // Tighten window_cap below live total via set_policy (issue #289 preserves
+    // the 150 spend). Raising to 120 (> old_cap 100) must still fail because
+    // 120 < live total 150; raising to 150 (== live total) succeeds.
+    let mut tightened = policy.clone();
+    tightened.window_cap = 100;
+    client.set_policy(&tightened);
+    assert_eq!(
+        try_contract_error(client.try_increase_window_cap(&120)),
+        GuardError::InvalidConfig
+    );
+    client.increase_window_cap(&150);
+    assert_eq!(client.policy().unwrap().window_cap, 150);
+
+    // Once the 150 entry expires past window_secs, the live pruned total is 0,
+    // so raising from 50 -> 80 is allowed even though stored total was 150.
+    h.set_time(5_000);
+    let mut smaller = policy.clone();
+    smaller.window_cap = 50;
+    client.set_policy(&smaller);
+    client.increase_window_cap(&80);
+    assert_eq!(client.policy().unwrap().window_cap, 80);
+
+    // SPEC §8 invariants still hold when enabling a cap from 0.
+    let mut no_width = policy.clone();
+    no_width.window_cap = 0;
+    no_width.window_secs = 0;
+    client.set_policy(&no_width);
+    assert_eq!(
+        try_contract_error(client.try_increase_window_cap(&100)),
+        GuardError::InvalidConfig
+    );
+
+    let mut high_per_tx = policy;
+    high_per_tx.per_tx_cap = 200;
+    high_per_tx.window_cap = 0;
+    client.set_policy(&high_per_tx);
+    assert_eq!(
+        try_contract_error(client.try_increase_window_cap(&100)),
+        GuardError::InvalidConfig
+    );
+}
+
+#[test]
+fn increase_window_cap_requires_admin_initialized_and_installed_policy() {
+    let mut h = Harness::new();
+
+    let uninit_guard = h.env.register(PolicyEngine, ());
+    let uninit_client = PolicyEngineClient::new(&h.env, &uninit_guard);
+    assert_eq!(
+        try_contract_error(uninit_client.try_increase_window_cap(&200)),
+        GuardError::NotInitialized
+    );
+
+    let no_policy_res = PolicyEngineClient::new(&h.env, &h.guard).try_increase_window_cap(&200);
+    let err = try_contract_error(no_policy_res);
+    assert_eq!(err, GuardError::NoPolicy);
+
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.install_policy(&policy);
+
+    let root = h.increase_window_cap_invocation(200);
+
+    let non_admin = h.env.register(MockAdmin, ());
+    let non_admin_entry = h.non_admin_entry(&non_admin, &root);
+    h.enforce(non_admin_entry);
+    let non_admin_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).increase_window_cap(&200);
+    }));
+    assert!(
+        non_admin_res.is_err(),
+        "increase_window_cap authorized by a non-admin account must fail"
+    );
+
+    let agent_entry = h.guard_entry(&root);
+    h.enforce(agent_entry);
+    let agent_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PolicyEngineClient::new(&h.env, &h.guard).increase_window_cap(&200);
+    }));
+    assert!(
+        agent_res.is_err(),
+        "increase_window_cap authorized by the agent key must fail"
+    );
+
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(client.policy().unwrap().window_cap, 100);
+    assert_eq!(h.status().policy_revision, 1);
+}
+
+// ── MockAsset balances & value conservation (issue #361) ─────────────────
+
+#[test]
+fn mock_asset_enforces_balance_and_fails_on_insufficient_funds() {
+    let mut h = Harness::new();
+    let guard = h.guard.clone();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 500;
+    policy.window_secs = 3_600;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+
+    h.set_asset_balance(&guard, 100);
+    assert_eq!(h.balance(&guard), 100);
+    h.mint_asset(&guard, 25);
+    assert_eq!(h.balance(&guard), 125);
+    assert_eq!(h.balance(&recv), 0);
+
+    h.transfer(&recv, 75);
+    assert_eq!(h.balance(&guard), 50);
+    assert_eq!(h.balance(&recv), 75);
+    assert_eq!(h.stored_window().unwrap().total, 75);
+
+    // Transfer of 60 passes policy (75 + 60 <= 500) but exceeds balance (50).
+    let root = h.transfer_invocation(&guard, &recv, 60);
+    let entry = h.guard_entry(&root);
+    h.enforce(entry);
+    let asset_client = MockAssetClient::new(&h.env, &h.asset);
+    let res = asset_client.try_transfer(&guard, &recv, &60);
+    assert!(
+        res.is_err(),
+        "MockAsset::transfer must reject a transfer exceeding sender balance"
+    );
+    assert_eq!(h.balance(&guard), 50);
+    assert_eq!(h.balance(&recv), 75);
+    assert_eq!(h.stored_window().unwrap().total, 75);
+}
+
+#[test]
+fn value_conservation_sum_of_transfers_equals_window_total() {
+    let mut h = Harness::new();
+    let guard = h.guard.clone();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+
+    let initial_balance = 1_000i128;
+    h.set_asset_balance(&guard, initial_balance);
+
+    let mut policy = h.base_policy();
+    policy.per_tx_cap = 150;
+    policy.window_cap = 300;
+    policy.window_secs = 3_600;
+    policy.allow_any_recipient = true;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+
+    // Mix of allowed transfers and policy-blocked transfers within one window.
+    h.transfer(&recv, 80);
+    h.transfer_expect_blocked(&recv, 160);
+    h.transfer(&other, 90);
+    h.transfer(&recv, 70);
+    h.transfer_expect_blocked(&other, 70);
+    h.transfer(&recv, 60);
+
+    let guard_balance = h.balance(&guard);
+    let recv_balance = h.balance(&recv);
+    let other_balance = h.balance(&other);
+    let total_outflow = initial_balance - guard_balance;
+
+    assert_eq!(total_outflow, 300);
+    assert_eq!(recv_balance, 210);
+    assert_eq!(other_balance, 90);
+    let conserved = guard_balance + recv_balance + other_balance;
+    assert_eq!(conserved, initial_balance);
+    // Close the end-to-end accounting loop: real funds moved == window total.
+    assert_eq!(h.stored_window().unwrap().total, total_outflow);
+    assert_eq!(h.status().window_remaining, Some(0));
+
+    // After the window rolls over, another transfer moves 50 more units while
+    // the rolling window tracks only the live-window spend (50).
+    h.set_time(5_000);
+    h.transfer(&other, 50);
+    assert_eq!(initial_balance - h.balance(&guard), 350);
+    assert_eq!(h.balance(&other), 140);
+    assert_eq!(h.stored_window().unwrap().total, 50);
+}
+
+// ── Empty auth_contexts semantics (issue #368) ───────────────────────────
+
+#[test]
+fn empty_auth_contexts_approves_without_emitting_auth_checked() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let uninit_guard = h.env.register(PolicyEngine, ());
+
+    let payload = [0x42u8; 32];
+    let sig = h.agent.sign(&payload).to_bytes();
+    let empty_contexts: soroban_sdk::Vec<Context> = soroban_sdk::Vec::new(&h.env);
+
+    // Pre-decision gates still fail closed even when auth_contexts is empty.
+    let uninit_res = h.invoke_check_auth_raw(&uninit_guard, &payload, &sig, &empty_contexts);
+    assert_eq!(uninit_res, Err(Ok(GuardError::NotInitialized)));
+    assert_eq!(event_count(&h.env, "event_auth_checked"), 0);
+
+    let no_policy_res = h.invoke_check_auth_raw(&h.guard, &payload, &sig, &empty_contexts);
+    assert_eq!(no_policy_res, Err(Ok(GuardError::NoPolicy)));
+    assert_eq!(event_count(&h.env, "event_auth_checked"), 0);
+
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+    h.transfer(&recv, 40);
+
+    // With a valid signature and installed policy, zero contexts authorize
+    // zero calls: __check_auth approves vacuously, emits zero per-context
+    // auth_checked events, and leaves the rolling window unchanged.
+    let allowed_res = h.invoke_check_auth_raw(&h.guard, &payload, &sig, &empty_contexts);
+    assert_eq!(allowed_res, Ok(()));
+    assert_eq!(event_count(&h.env, "event_auth_checked"), 0);
+    assert_eq!(h.stored_window().unwrap().total, 40);
 }

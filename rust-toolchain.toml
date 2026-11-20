@@ -16,9 +16,14 @@
 # pin was added, so pinning changed no build output on the day it landed — the
 # `wasm-reproducible` CI job then proves it stays that way.
 #
-# Note on the MSRV: `Cargo.toml` declares `rust-version = "1.85"`, but
-# `soroban-sdk` 27.0.6 sets `rust-version = "1.91.0"` itself, so the real
-# floor is 1.91 regardless of what this field says.
+# Note on the MSRV: `Cargo.toml` declares `rust-version = "1.91.0"` and the
+# `msrv` job in `.github/workflows/ci.yml` installs exactly that release and
+# runs the full gate on it (issue #410). 1.91.0 is the floor the dependency
+# graph actually requires — `soroban-sdk` 27.0.6 sets `rust-version =
+# "1.91.0"` itself — while `channel` below is the pinned compiler that builds
+# the released artifact. The MSRV must never be newer than `channel`; bump
+# both together when either moves, and keep this note and the one in
+# `Cargo.toml` consistent.
 #
 # Bumping `channel` changes the released artifact hash. Bump it in its own
 # commit, and re-record the resulting hash when you cut the release (the

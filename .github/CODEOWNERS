@@ -1,0 +1,24 @@
+# Security-sensitive enforcement path.
+#
+# Changes to policy semantics or the auth path have real financial blast radius
+# (CONTRIBUTING's opening warning), so a README typo and an engine change must
+# not receive the same review. The enforcement path and the CI/security files
+# themselves are owned by the maintainer and require an approving review from a
+# security-literate reviewer — encoded here, not left to memory.
+#
+# GitHub uses the last matching pattern; every entry names the same owner, so
+# overlap is intentional and harmless.
+
+# Core contract enforcement path (__check_auth, policy engine, rolling window,
+# dead-man switch, admin controls).
+src/ @aigbagbobila
+
+# Per-file ownership for the enforcement-path files named in the issue.
+src/engine.rs @aigbagbobila
+src/window.rs @aigbagbobila
+src/lib.rs @aigbagbobila
+src/types.rs @aigbagbobila
+
+# CI/CD workflows (the gate enforcing this review) and the security policy.
+.github/workflows/ @aigbagbobila
+SECURITY.md @aigbagbobila

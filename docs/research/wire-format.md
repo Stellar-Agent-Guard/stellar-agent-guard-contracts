@@ -1,6 +1,6 @@
 # JSON Wire Format for Contract Read Functions
 
-This document specifies the exact JSON serialization format returned by the contract's read functions (`policy`, `status`, `check`). These are the wire forms that non-Rust consumers (TypeScript SDK, dashboard, other language bindings) must decode.
+This document specifies the exact JSON serialization format returned by the contract's read functions (`policy`, `status`, `status_at`, `check`). These are the wire forms that non-Rust consumers (TypeScript SDK, dashboard, other language bindings) must decode.
 
 **Source of truth:** Verified against live testnet deployment (contract `CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7`) as documented in README. The Soroban host uses `soroban-sdk`'s `serde` implementation for contract type serialization.
 
@@ -46,7 +46,7 @@ null
 
 Returns account status snapshot.
 
-### Example (live output, before the #29 additive fields):
+### Example (live output, before additive operational and DMS projection fields):
 
 ```json
 {
@@ -65,7 +65,7 @@ install, never reset by a revoke) and is the join key that ties `auth_checked`
 events to the policy generation in force — the `policy_set`, `policy_revoked`,
 and `auth_checked` events stamp the same counter as additive `revision` data.
 
-### Additive operational fields (issue #29):
+### Additive operational fields:
 
 `status()` additionally returns three operational fields. They are additive —
 older decoders keep working because no existing key was renamed or removed:
@@ -88,6 +88,29 @@ older decoders keep working because no existing key was renamed or removed:
 - `outside_active_window` — `true` when `now` is outside the policy's
   `active_from`/`active_until` bounds (both inclusive); `false` with no policy
   or an unrestricted window.
+
+The snapshot also includes DMS projection fields. `dms_grace_secs` is the
+configured grace in seconds (zero when disabled), and `heartbeat_expires_at`
+is `last_heartbeat + dms_grace_secs`, or `null` when DMS is disabled or no
+heartbeat has been recorded. `heartbeat_expired` becomes true strictly after
+the expiry timestamp.
+
+`status_at(as_of)` returns the same `Status` shape as `status()`, with `now`,
+heartbeat expiry, active-window state, and rolling-window headroom evaluated
+against the caller-supplied Unix timestamp. It is an additive contract method;
+the existing no-argument `status()` ABI is unchanged.
+
+Example projection for `last_heartbeat = 1000` and `dms_grace_secs = 60`:
+
+```json
+{
+  "dms_grace_secs": 60,
+  "heartbeat_expires_at": 1060,
+  "heartbeat_expired": false,
+  "last_heartbeat": 1000,
+  "now": 1060
+}
+```
 
 ### Field naming convention:
 - All fields are **snake_case** (matching Rust struct field names exactly)
@@ -184,4 +207,4 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
   --to GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX --amount 50
 ```
 
-Cross-reference: [README.md live outputs](../README.md) and [tests/fixtures/README.md](../tests/fixtures/README.md).
+Cross-reference: [README.md live outputs](../../README.md) and [tests/fixtures/README.md](../../tests/fixtures/README.md).

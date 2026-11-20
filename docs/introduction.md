@@ -33,4 +33,4 @@ Phase 1 is complete. All five enforcement scenarios were proven against live Ste
 | `stellar-agent-guard-contracts` (this repo) | The on-chain policy engine: a Soroban custom account contract |
 | `tools/agent-tx` | CLI helper that signs Soroban auth entries for the guard address and submits real testnet transactions |
 
-> ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do not deploy to mainnet without an independent audit. See [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md).
+> ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do not deploy to mainnet without an independent audit. See [SECURITY.md](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/SECURITY.md).

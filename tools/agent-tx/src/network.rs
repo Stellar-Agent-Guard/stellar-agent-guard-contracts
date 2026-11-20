@@ -106,6 +106,7 @@ pub struct Endpoint {
     pub network: Option<Network>,
     pub rpc_url: String,
     pub passphrase: String,
+    pub passphrase_source: &'static str,
 }
 
 /// Turn the three endpoint flags into one answer, kept apart from argument
@@ -133,13 +134,20 @@ pub fn resolve_endpoint(
                 passphrase: passphrase
                     .unwrap_or_else(|| preset.passphrase())
                     .to_string(),
+                passphrase_source: if passphrase.is_some() {
+                    "explicit --network-passphrase"
+                } else {
+                    "--network preset"
+                },
             })
         }
         (None, Some(url)) => {
-            // A URL that *is* a preset endpoint gets that preset's passphrase:
-            // `--rpc-url https://soroban.stellar.org` must not sign a testnet
-            // payload. A custom node keeps the default.
+            // A URL that is a preset endpoint gets its passphrase. A custom
+            // endpoint must supply its network identity rather than guessing.
             let preset = Network::from_rpc_url(url);
+            if preset.is_none() && passphrase.is_none() {
+                return Err("custom --rpc-url requires an explicit --network-passphrase".into());
+            }
             let fallback = preset.unwrap_or(DEFAULT_NETWORK);
             Ok(Endpoint {
                 network: preset,
@@ -147,6 +155,11 @@ pub fn resolve_endpoint(
                 passphrase: passphrase
                     .unwrap_or_else(|| fallback.passphrase())
                     .to_string(),
+                passphrase_source: if passphrase.is_some() {
+                    "explicit --network-passphrase"
+                } else {
+                    "recognized --rpc-url preset"
+                },
             })
         }
         (None, None) => Ok(Endpoint {
@@ -155,6 +168,11 @@ pub fn resolve_endpoint(
             passphrase: passphrase
                 .unwrap_or_else(|| DEFAULT_NETWORK.passphrase())
                 .to_string(),
+            passphrase_source: if passphrase.is_some() {
+                "explicit --network-passphrase"
+            } else {
+                "default testnet preset"
+            },
         }),
     }
 }
@@ -190,6 +208,7 @@ mod tests {
         assert_eq!(default.network, Some(Network::Testnet));
         assert_eq!(default.rpc_url, Network::Testnet.rpc_url());
         assert_eq!(default.passphrase, Network::Testnet.passphrase());
+        assert_eq!(default.passphrase_source, "default testnet preset");
 
         let futurenet = resolve_endpoint(Some("futurenet"), None, None).unwrap();
         assert_eq!(futurenet.rpc_url, "https://rpc-futurenet.stellar.org");
@@ -206,13 +225,17 @@ mod tests {
     #[test]
     fn rpc_url_overrides_the_default_but_not_an_explicit_network() {
         let custom = "http://127.0.0.1:8000/soroban/rpc";
-        let overridden = resolve_endpoint(None, Some(custom), None).unwrap();
+        let missing_passphrase = resolve_endpoint(None, Some(custom), None).unwrap_err();
+        assert!(missing_passphrase.contains("requires an explicit --network-passphrase"));
+
+        let overridden =
+            resolve_endpoint(None, Some(custom), Some("Local Network ; 2026")).unwrap();
         assert_eq!(overridden.rpc_url, custom);
         assert_eq!(overridden.network, None, "a private node is not a preset");
+        assert_eq!(overridden.passphrase, "Local Network ; 2026");
         assert_eq!(
-            overridden.passphrase,
-            Network::Testnet.passphrase(),
-            "an unrecognised URL keeps the documented default passphrase"
+            overridden.passphrase_source,
+            "explicit --network-passphrase"
         );
 
         // A preset endpoint passed as a URL is still that network: signing the
@@ -222,6 +245,11 @@ mod tests {
         let by_url = resolve_endpoint(None, Some(Network::Mainnet.rpc_url()), None).unwrap();
         assert_eq!(by_url.network, Some(Network::Mainnet));
         assert_eq!(by_url.passphrase, Network::Mainnet.passphrase());
+        assert_eq!(by_url.passphrase_source, "recognized --rpc-url preset");
+        let testnet_by_url =
+            resolve_endpoint(None, Some(Network::Testnet.rpc_url()), None).unwrap();
+        assert_eq!(testnet_by_url.network, Some(Network::Testnet));
+        assert_eq!(testnet_by_url.passphrase, Network::Testnet.passphrase());
 
         let err = resolve_endpoint(Some("testnet"), Some(custom), None).unwrap_err();
         assert!(err.starts_with("conflicting network selection"), "{err}");
@@ -267,5 +295,6 @@ mod tests {
             resolve_endpoint(Some("futurenet"), None, Some("Some Local Network ; 2026")).unwrap();
         assert_eq!(endpoint.rpc_url, Network::Futurenet.rpc_url());
         assert_eq!(endpoint.passphrase, "Some Local Network ; 2026");
+        assert_eq!(endpoint.passphrase_source, "explicit --network-passphrase");
     }
 }

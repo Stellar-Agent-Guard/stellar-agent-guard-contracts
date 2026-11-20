@@ -1,7 +1,12 @@
 # Summary
 
+* [Documentation Guide & SPEC Cross-Reference](README.md)
 * [Introduction](introduction.md)
 * [Installation](installation.md)
+* [Operations](operations/)
+  * [Deployment Runbook](operations/deployment-runbook.md)
+  * [Migrating a Funded Agent Wallet](operations/migration-guide.md)
+  * [Incident Playbook — DMS-Frozen, Admin Key Lost](operations/incident-playbook-admin-key-lost.md)
 * [Concepts](concepts/)
   * [Custom Account Enforcement](concepts/custom-account-enforcement.md)
   * [Spend Limits](concepts/spend-limits.md)
@@ -16,6 +21,7 @@
   * [check\_auth](functions/check-auth.md)
 * [Policy Templates](policy-templates.md)
 * [Key Rotation](key-rotation.md)
+* [Storage Rent and TTL](rent-and-ttl.md)
 * [Architecture](architecture.md)
 * [Testnet Verification](verification.md)
 * [Enforcement Scope](enforcement-scope.md)

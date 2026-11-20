@@ -26,9 +26,9 @@ const GLOSSARY: &str = "docs/reason-glossary.md";
 const ENGINE: &str = "src/engine.rs";
 const TYPES: &str = "src/types.rs";
 
-/// The §4 table is a seven-row table, so a row quietly appearing or
+/// The §4 table is an eight-row table, so a row quietly appearing or
 /// disappearing on either side has to fail rather than shrink the check.
-const EXPECTED_ROWS: usize = 7;
+const EXPECTED_ROWS: usize = 8;
 
 fn repo_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(name)

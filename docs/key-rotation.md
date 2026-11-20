@@ -185,6 +185,28 @@ fingerprint, and the original agent secret heartbeats `ALLOWED` again
 or after the new key was confirmed — because it only re-binds which key
 `__check_auth` verifies; it never moves funds or alters policy.
 
+## Recovery runbook: lost agent key (admin key survives)
+
+When an agent machine dies or its secret is lost without suspected compromise:
+
+1. **Confirm state**: Query `status()` with `--send=no` ([step 0](#0-record-the-current-state)) to check `admin_frozen`, `heartbeat_expired`, and `window_remaining`.
+2. **Decide lost vs. compromised**: If exposure of the key can't be ruled out, treat it as compromised and follow the [Incident variant](#incident-variant-suspected-agent-key-leak) below (freeze first). Only proceed here if the key was purely lost and exposure can be ruled out.
+3. **Handle DMS expiration**: If the dead-man switch expired while the host was down (`heartbeat_expired: true`), `unfreeze` must happen before the new key's first heartbeat (see [Incident step 4](#incident-variant-suspected-agent-key-leak)). `rotate_agent_key` itself is admin-only (`require_auth(Admin)`, `src/lib.rs`) and not DMS-gated, but `__check_auth` rejects all agent authorizations (including heartbeats) while the DMS is expired.
+4. **Rotate key**: Generate a new key offline ([step 1](#1-generate-the-new-key-offline)), rehearse with `--send=no` ([step 2](#2-rehearse-the-rotation-testnet-safe-nothing-submitted)), and invoke `rotate_agent_key` ([step 3](#3-rotate-admin-transaction)).
+5. **Verify**: Check `EventAgentRotated` fingerprints, confirm `status()` flags, and verify `EventUnfrozen` if `unfreeze` was run.
+6. **Resume heartbeats**: Submit a test heartbeat with the new key via `tools/agent-tx` ([step 4](#4-confirm-the-new-key-signs-before-retiring-the-old)) and restart the agent loop.
+
+### What rotation changes
+
+| State | Modified by `rotate_agent_key`? | Behavior |
+|---|---|---|
+| `AgentPubkey` | **Yes** | Re-bound to `new_pubkey`; emits `EventAgentRotated` |
+| `Window` (spend history) | **No** | Retained; active window spend is not reset |
+| `Policy` / `PolicyRevision` | **No** | Rules, allowlists, and policy revision unchanged |
+| `LastHeartbeat` | **No** | DMS clock not reset; expired switch requires `unfreeze` |
+| `AdminFrozen` | **No** | Frozen status untouched; requires `unfreeze` if frozen |
+| Account balances | **No** | Guard holds no funds; token balances unchanged |
+
 ## Incident variant: suspected agent-key leak
 
 Ordering: **freeze → rotate → unfreeze.** Do not rotate first.
@@ -210,7 +232,15 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7 \
   --network testnet --source-account guard_admin --send=no -- status
 # → expect {"admin_frozen":true,...} — the account is now inert.
+```
 
+**Review what the old key could have spent (audit before rotating or tightening policy):**
+- **Bounding limits**: The leaked key was bound by configured allowlists, per-transaction caps (`per_tx_cap`, with per-asset overrides via `effective_per_tx_cap` in `src/engine.rs`), and rolling window limits (`window_cap`). Rehearse candidate transactions with `check_detailed()` (`--send=no`).
+- **Window spend**: Query `status().window_remaining`. The quantity `window_cap - window_remaining` estimates volume spent in the current rolling window.
+- **Caveats for `window_cap - window_remaining`**: Only measures the active rolling window (prior windows roll off), saturates at `window_cap` (does not record drain attempts beyond the cap), ignores per-recipient caps, and is `None` when `window_cap == 0` (no window cap enabled; `src/engine.rs`).
+- **Audit order warning**: `set_policy` resets the rolling-window ledger to empty and stamps `LastHeartbeat = now` (`set_policy`). Always query `status()` and review ledger events *before* tightening or replacing policy.
+
+```bash
 # 3. Generate the new key offline (ceremony step 1) and rotate (steps 2–3).
 #    Rotation works while frozen — it is an admin function, not an agent
 #    authorization — so no unfreeze is needed first.
