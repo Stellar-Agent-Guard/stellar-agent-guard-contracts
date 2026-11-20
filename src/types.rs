@@ -446,6 +446,33 @@ pub struct Status {
     pub heartbeat_expires_at: Option<u64>,
 }
 
+/// Live rolling-window consumption returned by the auth-free
+/// `window_consumption()` read (SPEC §7, issue #348).
+///
+/// # Wire format
+///
+/// Additive-growth contract: new fields may be appended, but existing fields are
+/// never renamed or removed. **Field order and field names are part of the on-chain
+/// wire format** — this is a `#[contracttype]` map keyed by these names, decoded
+/// positionally against the sorted field list, so a rename or a reorder is a
+/// breaking change for every consumer even though it compiles. See
+/// `docs/research/wire-format.md`, SPEC §3, and `tests/snapshots/abi_snapshot.txt`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowConsumption {
+    /// Live global rolling total: the sum of the non-expired spend entries
+    /// recorded against `window_secs`, after lazy pruning at the current
+    /// ledger time. Zero when no policy is installed.
+    pub total: i128,
+    /// Number of live global spend entries in the ledger (same-second spends
+    /// coalesce, so this is an entry count, not a transaction count).
+    pub entries: u32,
+    /// Unix timestamp at which the oldest live entry leaves the window
+    /// (`oldest.ts + window_secs`), or `None` when the ledger is empty or the
+    /// policy disables the rolling window (`window_secs == 0`).
+    pub oldest_expires_at: Option<u64>,
+}
+
 /// Permissionless policy decision returned by `check`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
