@@ -32,7 +32,8 @@ fn __check_auth(
 4. **Run the decision table** (`decide` function):
    - Context-count bound first: more than `MAX_AUTH_CONTEXTS` (64) contexts returns one aggregate
      `TooManyAuthContexts` verdict (§4 row 0) before any context is parsed.
-   - Account-level gates next: admin freeze → dead-man switch → pause → active window.
+   - Account-level gates next: no policy → admin freeze (admin `freeze` or agent `self_lock`) →
+     dead-man switch → pause → active window.
    - Per-context classification: each `Context` is parsed into a typed call (`SelfCall`, `AssetTransfer`, `AssetOther`, `Protocol`, `Unknown`, `CreateContract`).
    - Per-kind enforcement: asset transfers get recipient allowlist + per-tx cap + rolling window. Protocol calls get contract + function allowlist. Everything else is denied.
    - **All-or-nothing commit:** Window admissions are staged and only committed to storage if *every* context passes.
