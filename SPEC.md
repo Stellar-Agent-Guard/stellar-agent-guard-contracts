@@ -325,12 +325,16 @@ exactly the burst-boundary cases a spend guard exists to catch.
 Implementation (exact, lazy, bounded):
 
 - Entries are append-ordered by unix ledger time (`env.ledger().timestamp()`, 1s granularity).
-- On every evaluation: expired entries are bulk-pruned using binary search over the timestamp-sorted entries to find the first live entry, dropping expired prefixes in O(log n) time instead of sequential O(k) pops. Evaluation is lazy — no cron, no background writes.
-- On every evaluation: while `entries[0].ts + window_secs <= now`, pop from the front and
-  subtract from `total`. Expiry is tested in this addition form (not the algebraically
-  equivalent `entries[0].ts <= now - window_secs`) so that a low ledger timestamp cannot
-  underflow `now - window_secs` and wrongly expire a still-live entry. Evaluation is lazy — no
-  cron, no background writes; the O(expired) pruning cost amortizes over accesses.
+- On every evaluation: the global and per-recipient spend ledgers bulk-prune their expired
+  prefix using binary search over the timestamp-sorted entries to find the first live entry,
+  dropping the prefix in O(log n) time instead of sequential O(k) pops. Expiry is tested as
+  `entry.ts + window_secs <= now` — the addition form, not the algebraically equivalent
+  `entry.ts <= now - window_secs` — because the subtraction form underflows (saturates to 0)
+  at low ledger timestamps and would wrongly expire a still-live entry. Protocol-call entries
+  apply the same predicate in a front-to-back loop. The low-timestamp regression is pinned by
+  `window::tests::prune_keeps_recent_entries_at_low_timestamps`, which keeps an entry recorded
+  at ts 0 that is only 50 seconds old in a 100-second window. Evaluation is lazy — no cron, no
+  background writes; the O(expired) pruning cost amortizes over accesses.
 - A new spend coalesces into the trailing entry when it shares the same second
   (`entries.last().ts == now`), so dense bursts in one second stay one entry.
 - **Boundedness backstop:** `MAX_WINDOW_ENTRIES = 8192`. If a write would exceed it, the two
@@ -379,9 +383,10 @@ Suppose a policy lists two SAC assets `[AssetA, AssetB]` with `window_cap = 100`
 This keeps the window invariant (§3.1) unchanged: the global `total` is still the sum of all admitted asset spends in the window across all listed assets, and admission requires `total + amount <= window_cap`.
 
 **Invariant (window):** for every authorization decision, the global `total` after any admission equals the
-sum of `entries[i].amount` over global entries with `ts + window_secs > now`, and a new asset transfer
-is admitted only if the running total (plus amounts already staged in the same request) ≤ the
-effective cap for that transfer. Per-recipient overrides maintain the same invariant in their own
+sum of `entries[i].amount` over global entries whose addition-form predicate `ts + window_secs > now`
+holds — the exact predicate `prune` applies, never the subtraction form `ts > now - window_secs` — and a
+new asset transfer is admitted only if the running total (plus amounts already staged in the same
+request) ≤ the effective cap for that transfer. Per-recipient overrides maintain the same invariant in their own
 `RecipientWindowState`; recipients without an override use the global cap. Both the global cap
 and any matching per-recipient cap must be satisfied.
 
