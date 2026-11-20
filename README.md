@@ -887,7 +887,9 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
 4. **Per-context classification.** `parse_call` turns each `Context` into a typed call:
    `SelfCall` (only `heartbeat` is allowed), `CreateContract` (denied in v1),
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
-   recipient and amount), or `Protocol` (a call to an allowlisted contract).
+   recipient and amount), `UnlistedAsset` (a SAC `transfer`/`transfer_from` on a contract
+   that is in neither `assets` nor `protocols` — denied with `asset_not_allowed`), or
+   `Protocol` (a call to an allowlisted contract).
 6. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
    denylist (checked before the allowlist and before `allow_any_recipient`), recipient
    allowlist, per-tx cap, and the rolling-window projection (existing total + amounts
