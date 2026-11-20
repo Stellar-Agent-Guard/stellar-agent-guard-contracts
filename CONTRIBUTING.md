@@ -157,6 +157,9 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    as stable `Error` reasons (SPEC §7), never accidental traps.
    CI scans the release WASM for panic/unwrap diagnostic strings as a backstop;
    a clean scan does not prove the absence of panic paths or replace code review.
+   The authorization path also has no external call surface today — see
+   [SPEC §10.4](SPEC.md#104-reentrancy--no-external-call-surface-in-__check_auth)
+   before adding any cross-contract call to `__check_auth` or its callees.
 2. **Every policy change must update SPEC.md and the tests together** — the
    decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2)
    must stay word-for-word consistent with the code; that consistency is

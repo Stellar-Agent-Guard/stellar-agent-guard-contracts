@@ -1909,6 +1909,50 @@ the account, no state — and a *bounded* one — it cannot escalate into a spen
 or a locked budget. Its cost is measured in operator attention, and its remedy is one
 `rotate_agent_key`.
 
+### 10.4 Reentrancy — no external call surface in `__check_auth`
+
+Verified against `PolicyEngine::__check_auth` and every function it calls in
+`src/lib.rs`, `src/engine.rs`, and `src/window.rs`. The complete host-facing call
+set is:
+
+- **Storage reads:** `env.storage().instance().get(DataKey::AgentPubkey)`;
+  `env.storage().persistent().get` for `DataKey::Policy`, `DataKey::AdminFrozen`,
+  `DataKey::LastHeartbeat`, and `DataKey::Window` (all four through
+  `AuthSnapshot::load`), plus `DataKey::PolicyRevision` through
+  `emit_auth`/`current_revision`. Every *present* persistent read is followed by
+  `env.storage().max_ttl()` and `env.storage().persistent().extend_ttl(...)`
+  per §9.5.
+- **Storage writes:** on an all-allowed authorization whose ledger changed,
+  `env.storage().persistent().set(DataKey::Window, ...)` followed by the same
+  `max_ttl()`/`extend_ttl(...)` refresh. No other key is written by
+  `__check_auth`.
+- **Host crypto:** `env.crypto().ed25519_verify(agent_pubkey, signature_payload,
+  signature)`.
+- **Host introspection:** `env.ledger().timestamp()` and
+  `env.current_contract_address()`.
+- **Events:** `EventAuthChecked` once per auth context (topics `result` and
+  `reason`; data carries `context_index` and `PolicyRevision`) and
+  `EventWindowMerged` for admitted ledger coalescence, published through
+  `env.events().publish`.
+- **Errors and pure work:** contract `Err(Error)` on policy denial and
+  deliberate `panic_with_error!(..., Error)` on invariant failure. `decide`,
+  `parse_call`, and the ledger projections do host value conversions and
+  in-memory `Vec`/`Map` work only; they make no storage or cross-contract calls.
+
+There is no `require_auth`, `invoke_contract`, `try_invoke_contract`, contract
+creation, token call, or cross-contract call anywhere on this path. Every listed
+operation is local storage, host crypto/time/self introspection, event
+publication, or computation on values the host already supplied. None transfers
+control to another contract, so none can re-enter the guard while its decision
+is in flight.
+
+**Future-change rule:** do not add an external contract call — directly or
+through a helper, parser, hook, event adapter, or policy adapter — to
+`__check_auth` or anything it calls without a written argument in this section
+that re-establishes the no-reentrancy invariant, or documents the new mitigation
+and the risk accepted. A call to another contract is not a harmless host detail;
+it changes this threat model.
+
 ---
 
 ## 11. Testnet proof plan (scenarios 1–8: five proven, three planned)
