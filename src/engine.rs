@@ -11,8 +11,13 @@ use soroban_sdk::{Address, Env, Symbol, TryFromVal, Vec};
 pub struct AccountState {
     /// Admin-initiated freeze flag (`AdminFrozen`).
     pub admin_frozen: bool,
-    /// Unix seconds of the last agent heartbeat; `0` = never.
-    pub last_heartbeat: u64,
+    /// Unix seconds of the last agent heartbeat.
+    ///
+    /// `None` = never heartbeated. `Some(t)` = the last attestation, and `t`
+    /// may legitimately be `0`: a heartbeat recorded at ledger timestamp zero
+    /// (the local test environment's default) is a real attestation and arms
+    /// the dead-man switch, so it must not share an encoding with "never".
+    pub last_heartbeat: Option<u64>,
 }
 
 /// Verdict for one authorization context.
@@ -75,15 +80,17 @@ fn checked_window_projection(base: i128, staged: i128, amount: i128) -> Option<i
 /// Evaluate dead-man switch health given current timestamp, last heartbeat, and policy config.
 pub fn dms_health(
     now: u64,
-    last_heartbeat: u64,
+    last_heartbeat: Option<u64>,
     policy: &PolicyConfig,
 ) -> crate::types::DmsHealthStatus {
     if policy.dms_grace_secs == 0 {
         return crate::types::DmsHealthStatus::Ok;
     }
-    if last_heartbeat == 0 {
+    // No attestation at all: the advisory view reports the missing heartbeat as
+    // `Expired` while the gate itself stays closed (rule #2 in `decide`).
+    let Some(last_heartbeat) = last_heartbeat else {
         return crate::types::DmsHealthStatus::Expired;
-    }
+    };
     let elapsed = now.saturating_sub(last_heartbeat);
     if elapsed > policy.dms_grace_secs {
         return crate::types::DmsHealthStatus::Expired;
@@ -407,9 +414,12 @@ pub fn decide(
         return verdicts;
     };
 
+    // Rule #2 arms on any recorded heartbeat, including one stamped at ledger
+    // timestamp 0 (`Some(0)`) — only `None` (never heartbeated) skips the gate.
     let account_error = if cfg.dms_enabled()
-        && state.last_heartbeat != 0
-        && now.saturating_sub(state.last_heartbeat) > cfg.dms_grace_secs
+        && state
+            .last_heartbeat
+            .is_some_and(|hb| now.saturating_sub(hb) > cfg.dms_grace_secs)
     {
         Some(Error::HeartbeatExpired)
     } else if cfg.paused {
@@ -647,7 +657,7 @@ mod tests {
     fn alive() -> AccountState {
         AccountState {
             admin_frozen: false,
-            last_heartbeat: 0,
+            last_heartbeat: None,
         }
     }
 
@@ -1573,7 +1583,7 @@ mod tests {
 
         let frozen = AccountState {
             admin_frozen: true,
-            last_heartbeat: 0,
+            last_heartbeat: None,
         };
         assert!(matches!(
             decide(&env, &sa, p.as_ref(), &frozen, &mut l, 1000, ctx.clone())
@@ -1603,7 +1613,7 @@ mod tests {
         dms.dms_grace_secs = 100;
         let st = AccountState {
             admin_frozen: false,
-            last_heartbeat: 500,
+            last_heartbeat: Some(500),
         };
         assert!(matches!(
             decide(&env, &sa, Some(&dms), &st, &mut l, 700, ctx.clone())
@@ -1613,7 +1623,7 @@ mod tests {
         ));
         let st2 = AccountState {
             admin_frozen: false,
-            last_heartbeat: 650,
+            last_heartbeat: Some(650),
         };
         assert!(matches!(
             decide(&env, &sa, Some(&dms), &st2, &mut l, 700, ctx.clone())
@@ -1672,7 +1682,7 @@ mod tests {
         // before `active_from`. The dead-man leg is the only reason reported.
         let stale = AccountState {
             admin_frozen: false,
-            last_heartbeat: 500,
+            last_heartbeat: Some(500),
         };
         let both = decide(&env, &sa, Some(&p), &stale, &mut l, 1_000, ctx.clone());
         assert_eq!(both.len(), 2, "one verdict per context");
@@ -1689,7 +1699,7 @@ mod tests {
         // time. This is the reversal trap §5.2 exists to name.
         let re_armed = AccountState {
             admin_frozen: false,
-            last_heartbeat: 1_000,
+            last_heartbeat: Some(1_000),
         };
         let after_unfreeze = decide(&env, &sa, Some(&p), &re_armed, &mut l, 1_000, ctx.clone());
         for verdict in &after_unfreeze {
@@ -1813,6 +1823,58 @@ mod tests {
         }
     }
 
+    /// Issue #295: the stored clock is `Option<u64>`, so a heartbeat recorded at
+    /// ledger timestamp 0 is a real attestation (`Some(0)`) and arms rule #2.
+    /// Only `None` — never heartbeated — skips the gate.
+    #[test]
+    fn heartbeat_at_epoch_zero_arms_the_dead_man_switch() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let hb = vec![&env, heartbeat_ctx(&env, &sa)];
+        let mut p = base_policy(&env);
+        p.dms_grace_secs = 100;
+        let mut l = Ledger::empty(&env);
+        let armed_at_zero = AccountState {
+            admin_frozen: false,
+            last_heartbeat: Some(0),
+        };
+
+        // Exactly at the grace the boundary is `>` grace, so still admitted.
+        assert!(matches!(
+            decide(&env, &sa, Some(&p), &armed_at_zero, &mut l, 100, hb.clone())
+                .first()
+                .unwrap(),
+            Decision::Allowed
+        ));
+        // One second later the epoch-zero install has expired.
+        assert!(matches!(
+            decide(&env, &sa, Some(&p), &armed_at_zero, &mut l, 101, hb.clone())
+                .first()
+                .unwrap(),
+            Decision::Blocked(Error::HeartbeatExpired)
+        ));
+
+        // "Never heartbeated" is a different state and still never arms.
+        let never = AccountState {
+            admin_frozen: false,
+            last_heartbeat: None,
+        };
+        assert!(matches!(
+            decide(&env, &sa, Some(&p), &never, &mut l, 1_000, hb)
+                .first()
+                .unwrap(),
+            Decision::Allowed
+        ));
+        assert_eq!(
+            dms_health(50, Some(0), &p),
+            crate::types::DmsHealthStatus::Ok
+        );
+        assert_eq!(
+            dms_health(1_000, None, &p),
+            crate::types::DmsHealthStatus::Expired
+        );
+    }
+
     #[test]
     fn heartbeat_allowed_but_expired_blocked_even_for_heartbeat() {
         let env = Env::default();
@@ -1822,7 +1884,7 @@ mod tests {
         p.dms_grace_secs = 100;
         let expired = AccountState {
             admin_frozen: false,
-            last_heartbeat: 500,
+            last_heartbeat: Some(500),
         };
         let mut l = Ledger::empty(&env);
         assert!(matches!(
@@ -1833,7 +1895,7 @@ mod tests {
         ));
         let fresh = AccountState {
             admin_frozen: false,
-            last_heartbeat: 650,
+            last_heartbeat: Some(650),
         };
         assert!(matches!(
             decide(&env, &sa, Some(&p), &fresh, &mut l, 700, hb.clone())
@@ -1855,7 +1917,7 @@ mod tests {
         p.dms_grace_secs = 100;
         let expired = AccountState {
             admin_frozen: false,
-            last_heartbeat: 500,
+            last_heartbeat: Some(500),
         };
         let mut l = Ledger::empty(&env);
         let verdicts = decide(&env, &sa, Some(&p), &expired, &mut l, 700, bundle);

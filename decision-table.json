@@ -51,7 +51,7 @@
     },
     {
       "id": 2,
-      "condition": "dead-man switch enabled AND `LastHeartbeat != 0` AND `now - LastHeartbeat > dms_grace_secs`",
+      "condition": "dead-man switch enabled AND `LastHeartbeat` is set (`Some`) AND `now - LastHeartbeat > dms_grace_secs`",
       "result": "**Block** (`Reason::HeartbeatExpired`) — automatic freeze, derived lazily, no background write",
       "verdict": "block",
       "readme_terms": [
@@ -67,7 +67,7 @@
           ]
         }
       ],
-      "note": "The gate also blocks `heartbeat` itself once the grace elapsed: reviving the account is the admin's `unfreeze` (§5)."
+      "note": "The gate also blocks `heartbeat` itself once the grace elapsed: reviving the account is the admin's `unfreeze` (§5). `LastHeartbeat` is an `Option<u64>`: `Some(0)` (install at ledger timestamp 0) arms the switch, `None` (never heartbeated) does not — issue #295."
     },
     {
       "id": 3,

@@ -326,8 +326,10 @@ struct AuthSnapshot {
     policy: PolicyConfig,
     /// Admin kill switch.
     admin_frozen: bool,
-    /// Unix seconds of the last agent heartbeat (0 = never).
-    last_heartbeat: u64,
+    /// Unix seconds of the last agent heartbeat; `None` = never heartbeated
+    /// (which `Some(0)` — a heartbeat at ledger timestamp zero — no longer
+    /// aliases, so the dead-man switch arms on an epoch-zero install).
+    last_heartbeat: Option<u64>,
     /// `DataKey::Window` was present in storage, as opposed to the account
     /// never having spent. Captured by the same single load that builds the
     /// ledger, so the caller deciding whether to write the window back does not
@@ -344,7 +346,7 @@ impl AuthSnapshot {
     fn load(env: &Env) -> Option<Self> {
         let policy = persist_get::<PolicyConfig>(env, &DataKey::Policy)?;
         let admin_frozen = persist_get::<bool>(env, &DataKey::AdminFrozen).unwrap_or(false);
-        let last_heartbeat = persist_get::<u64>(env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let last_heartbeat = persist_get::<Option<u64>>(env, &DataKey::LastHeartbeat).flatten();
         let (ledger, window_persisted) = load_window(env);
         Some(Self {
             policy,
@@ -753,7 +755,7 @@ mod policy_engine_type {
         let policy = persist_get::<PolicyConfig>(env, &DataKey::Policy);
         let policy_revision = persist_get::<u64>(env, &DataKey::PolicyRevision).unwrap_or(0);
         let admin_frozen = persist_get::<bool>(env, &DataKey::AdminFrozen).unwrap_or(false);
-        let last_heartbeat = persist_get::<u64>(env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let last_heartbeat = persist_get::<Option<u64>>(env, &DataKey::LastHeartbeat).flatten();
         let dms_enabled = policy.as_ref().is_some_and(PolicyConfig::dms_enabled);
         let (paused, window_remaining, outside_active_window, dms_grace_secs) = match &policy {
             None => (false, None, false, 0),
@@ -771,19 +773,23 @@ mod policy_engine_type {
                 )
             }
         };
-        let heartbeat_expires_at = (dms_enabled && last_heartbeat != 0)
-            .then(|| last_heartbeat.saturating_add(dms_grace_secs));
+        let heartbeat_expires_at = last_heartbeat
+            .filter(|_| dms_enabled)
+            .map(|hb| hb.saturating_add(dms_grace_secs));
 
         Status {
             has_policy: policy.is_some(),
             policy_revision,
             admin_frozen,
             heartbeat_expired: dms_enabled
-                && last_heartbeat != 0
-                && as_of.saturating_sub(last_heartbeat) > dms_grace_secs,
+                && last_heartbeat.is_some_and(|hb| as_of.saturating_sub(hb) > dms_grace_secs),
             dms_grace_secs,
             heartbeat_expires_at,
-            last_heartbeat,
+            // Public ABI field: `0` reads as "never" here even though an
+            // epoch-zero heartbeat is a real attestation internally. The gate
+            // and `heartbeat_expired` use the stored `Option`, so they are
+            // never ambiguous.
+            last_heartbeat: last_heartbeat.unwrap_or(0),
             now: as_of,
             paused,
             window_remaining,
@@ -817,7 +823,9 @@ mod policy_engine_type {
                 .set(&DataKey::PolicyVersion, &POLICY_FORMAT_VERSION);
             env.storage().instance().set(&DataKey::Initialized, &true);
             persist_set(&env, &DataKey::AdminFrozen, &false);
-            persist_set(&env, &DataKey::LastHeartbeat, &0u64);
+            // `None` is the "never heartbeated" encoding; it is distinct from a
+            // heartbeat stamped at ledger timestamp 0 (issue #295).
+            persist_set(&env, &DataKey::LastHeartbeat, &Option::<u64>::None);
             emit_initialized(&env, &admin);
         }
 
@@ -857,7 +865,9 @@ mod policy_engine_type {
             if first_install {
                 save_ledger(&env, &Ledger::empty(&env));
                 let now = env.ledger().timestamp();
-                persist_set(&env, &DataKey::LastHeartbeat, &now);
+                // Stamped even at timestamp 0: `Some(0)` is a real attestation
+                // and must arm the switch (issue #295).
+                persist_set(&env, &DataKey::LastHeartbeat, &Some(now));
             }
             emit_policy_set(&env, &admin);
         }
@@ -1054,11 +1064,11 @@ mod policy_engine_type {
             // the write (with its TTL extension) and the event carry no new
             // information — the first heartbeat of this second already extended the
             // entry's TTL. Skip both rather than pay for a no-op write (SPEC §5).
-            let last = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
-            if now == last {
+            let last = persist_get::<Option<u64>>(&env, &DataKey::LastHeartbeat).flatten();
+            if last == Some(now) {
                 return;
             }
-            persist_set(&env, &DataKey::LastHeartbeat, &now);
+            persist_set(&env, &DataKey::LastHeartbeat, &Some(now));
             // Read the policy fresh here, at emission time, so the recorded
             // deadline reflects the grace actually in force for this heartbeat and
             // not a value cached from an earlier call. A missing policy or a zero
@@ -1088,9 +1098,10 @@ mod policy_engine_type {
             let now = env.ledger().timestamp();
             let grace =
                 persist_get::<PolicyConfig>(&env, &DataKey::Policy).map_or(0, |c| c.dms_grace_secs);
-            let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+            let last_heartbeat =
+                persist_get::<Option<u64>>(&env, &DataKey::LastHeartbeat).flatten();
 
-            if grace > 0 && last_heartbeat != 0 && now.saturating_sub(last_heartbeat) > grace {
+            if grace > 0 && last_heartbeat.is_some_and(|hb| now.saturating_sub(hb) > grace) {
                 let recorded = persist_get::<u64>(&env, &DataKey::AutoFrozenAt).unwrap_or(0);
                 if recorded == 0 {
                     persist_set(&env, &DataKey::AutoFrozenAt, &now);
@@ -1110,9 +1121,9 @@ mod policy_engine_type {
             let admin = Self::admin_or_panic(&env);
             persist_set(&env, &DataKey::AdminFrozen, &false);
             let now = env.ledger().timestamp();
-            let last = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
-            let rearmed_dms = last != now;
-            persist_set(&env, &DataKey::LastHeartbeat, &now);
+            let last = persist_get::<Option<u64>>(&env, &DataKey::LastHeartbeat).flatten();
+            let rearmed_dms = last != Some(now);
+            persist_set(&env, &DataKey::LastHeartbeat, &Some(now));
             emit_unfrozen(&env, &admin, rearmed_dms);
         }
 
@@ -1190,7 +1201,7 @@ mod policy_engine_type {
             let Some(cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
                 return crate::types::DmsHealthStatus::Ok;
             };
-            let last = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
+            let last = persist_get::<Option<u64>>(&env, &DataKey::LastHeartbeat).flatten();
             let now = env.ledger().timestamp();
             engine::dms_health(now, last, &cfg)
         }

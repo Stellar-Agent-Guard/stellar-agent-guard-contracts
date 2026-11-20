@@ -46,7 +46,7 @@ const DECISION_PATH_CPU_BUDGET: u64 = 100_000_000;
 fn alive() -> AccountState {
     AccountState {
         admin_frozen: false,
-        last_heartbeat: 0,
+        last_heartbeat: None,
     }
 }
 
