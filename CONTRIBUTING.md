@@ -379,7 +379,10 @@ layer and must not silently diverge.
    re-request review after pushing.
 3. Describe the *why* in the PR body: what was broken/wrong, what the fix does,
    and — for enforcement changes — how it was verified (tests, and testnet
-   evidence where applicable).
+   evidence where applicable). Use the
+   [`.github/pull_request_template.md`](.github/pull_request_template.md)
+   checklist when opening the PR; its *Why* section and enforcement-impact item
+   make this rule and the SPEC/test co-change rule reviewable at a glance.
 
 ## Required security review on the enforcement path
 
