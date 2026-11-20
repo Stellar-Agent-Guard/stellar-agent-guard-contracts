@@ -203,11 +203,24 @@ pub fn set_policy(env: Env, config: PolicyConfig)
 Admin-only (`require_auth(Admin)`). Replaces the policy. A policy *edit* — any `set_policy`
 while a policy is already installed — **preserves the rolling window and the
 dead-man-switch clock** ([issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289)):
-pausing, tightening, or widening a policy no longer hands the agent a fresh budget or a
+pausing, tightening, or widening a policy does not hand the agent a fresh budget or a
 fresh grace period. Only a *first* install (no policy stored, including an install after
 `revoke_policy`) seeds an empty window and arms the dead-man-switch clock at install time
 (a fresh policy gets full grace). To zero the window explicitly, call
 [`reset_window`](#reset_window) below. The `PolicyConfig` fields:
+
+> ⚠️ **Caps are not continuous across every policy change.** An ordinary edit keeps the
+> ledger, so the cap keeps binding against the same accumulated spend — but two admin-attested
+> actions *do* reset the budget. First, editing `window_cap` re-compares the preserved total
+> against a new ceiling, so a raise immediately admits the difference the old cap would have
+> blocked (the spend history survives; the budget does not). Second, `revoke_policy` followed
+> by `set_policy` is a first install: it starts an empty window and re-arms the dead-man
+> clock, i.e. a full budget and full grace. Read that pair as a budget reset, not as a policy
+> edit. Whether `set_policy` itself should reset the window is discussed in
+> [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289)
+> and [issue #305](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/305);
+> see [SPEC §7](SPEC.md#7-public-surface--exact-signatures-and-auth-placement) for the full
+> statement of what survives an edit.
 
 Tooling can validate this CLI JSON shape against the checked-in
 [`policy.schema.json`](policy.schema.json); the contract remains the authoritative validator.
@@ -414,7 +427,8 @@ other:
 | Control | How to set / clear | Operational effect |
 |---|---|---|
 | `AdminFrozen` | `freeze()` / `unfreeze()` | Immediate halt without changing the policy or rolling window. `unfreeze()` also sets `LastHeartbeat = now`, re-arming the dead-man clock when needed. |
-| `PolicyConfig.paused` | `set_policy()` with `paused: true` / `false` | Replaces the whole policy each time, resets the rolling window, and re-arms the dead-man clock. This is not a pause-only update; see [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289). Dedicated `pause()`/`resume()` functions are proposed in [issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/290), but are not available yet. |
+| `PolicyConfig.paused` | `pause()` / `resume()` | Flips the stored flag in place. The rolling window, the dead-man-switch clock, and every other field are untouched, so it does not hand the agent a fresh budget or a fresh grace period. |
+| `PolicyConfig.paused` (legacy route) | `set_policy()` with `paused: true` / `false` | Replaces the whole policy each time; an *edit* preserves the rolling window and the dead-man clock (issue #289), so it is a config change, not a budget reset. Prefer `pause()`/`resume()` for a pause-only change. |
 
 For gate ordering and full incident guidance, see [SPEC §4.2](SPEC.md#42-admin-freeze-and-policy-pause).
 
