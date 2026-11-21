@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-TARGET="wasm32v1-none"
+TARGET="wasm32-unknown-unknown"
 ARTIFACT="stellar_agent_guard_contracts.wasm"
 WORK_DIR="${REPRO_WORK_DIR:-target/repro-check}"
 
