@@ -49,8 +49,8 @@ fn contexts(env: &Env, guard: &Address, asset: &Address, input: &[u8]) -> Vec<Co
         let selector = input.get(index * 4 + 1).copied().unwrap_or(0) % 6;
         let amount = i128::from(input.get(index * 4 + 3).copied().unwrap_or(1));
         let context = match selector {
-            0 => transfer_context(env, asset, amount),
-            1 => transfer_from_context(env, asset, amount),
+            0 => transfer_context(env, guard, asset, amount),
+            1 => transfer_from_context(env, guard, asset, amount),
             2 => Context::Contract(ContractContext {
                 contract: guard.clone(),
                 fn_name: Symbol::new(env, "heartbeat"),
@@ -80,9 +80,10 @@ fn contexts(env: &Env, guard: &Address, asset: &Address, input: &[u8]) -> Vec<Co
     result
 }
 
-fn transfer_context(env: &Env, asset: &Address, amount: i128) -> Context {
+// The engine only scores SAC calls whose party fields bind to the guard (#10).
+fn transfer_context(env: &Env, guard: &Address, asset: &Address, amount: i128) -> Context {
     let mut args: Vec<Val> = Vec::new(env);
-    args.push_back(asset.clone().into_val(env));
+    args.push_back(guard.clone().into_val(env));
     args.push_back(Address::generate(env).into_val(env));
     args.push_back(amount.into_val(env));
     Context::Contract(ContractContext {
@@ -92,10 +93,10 @@ fn transfer_context(env: &Env, asset: &Address, amount: i128) -> Context {
     })
 }
 
-fn transfer_from_context(env: &Env, asset: &Address, amount: i128) -> Context {
+fn transfer_from_context(env: &Env, guard: &Address, asset: &Address, amount: i128) -> Context {
     let mut args: Vec<Val> = Vec::new(env);
-    args.push_back(Address::generate(env).into_val(env));
-    args.push_back(Address::generate(env).into_val(env));
+    args.push_back(guard.clone().into_val(env));
+    args.push_back(guard.clone().into_val(env));
     args.push_back(Address::generate(env).into_val(env));
     args.push_back(amount.into_val(env));
     Context::Contract(ContractContext {
@@ -176,7 +177,7 @@ fuzz_target!(|input: &[u8]| {
     assert_eq!(result.is_ok(), model_decide(input));
 
     if !model_decide(input) {
-        let valid_context = transfer_context(&env, &asset, 1);
+        let valid_context = transfer_context(&env, &guard, &asset, 1);
         let valid_payload = env.crypto().sha256(&Bytes::from_slice(&env, b"follow-up"));
         let valid_signature = BytesN::from_array(
             &env,

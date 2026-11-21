@@ -134,7 +134,7 @@ process.
 
 ## Enforcement scope — read this before relying on the caps
 
-Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces window and pause state, but per-call amount/recipient limits are not yet enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered — full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing). Elaborated with tables in [docs/enforcement-scope.md](docs/enforcement-scope.md).
+Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. A SAC context is only classified as a transfer when the guarded account is the `from` party; `transfer_from` additionally requires the guarded account to be the `spender`. A context naming another party (even with the guard as `to`) is denied as `UnknownContract` and is never scored against the window. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces window and pause state, but per-call amount/recipient limits are not yet enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered — full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing). Elaborated with tables in [docs/enforcement-scope.md](docs/enforcement-scope.md); party binding is specified in [SPEC §6.2](SPEC.md#62-asset-sac-calls--fully-enforced).
 
 ## Quick Start
 
@@ -143,7 +143,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 250 tests, isolated (no network)
+cargo test                                      # 259 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -1069,11 +1069,11 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-250 tests (unit + integration) cover the policy decision engine — including the regression
+259 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `229 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green: `259 passed; 0 failed`.
 
 These are the commands CI runs, in the order the `ci` job runs them — the same
 block a contributor can copy (see also

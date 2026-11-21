@@ -1431,7 +1431,7 @@ mod policy_engine_type {
     /// Build the auth `Context` of a SAC `transfer` call for pre-flight checks.
     fn transfer_context(env: &Env, asset: &Address, to: &Address, amount: i128) -> Context {
         let mut args: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
-        args.push_back(asset.clone().into_val(env)); // from
+        args.push_back(env.current_contract_address().into_val(env)); // from: the guard
         args.push_back(to.clone().into_val(env));
         args.push_back(amount.into_val(env));
         Context::Contract(ContractContext {

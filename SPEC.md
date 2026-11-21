@@ -977,7 +977,18 @@ Context whose `contract == env.current_contract_address()`. Allowed function set
 calls whose semantics and arguments are known:
 
 - `transfer` args: `(from, to, amount)` — the account is `from`; recipient = args[1], amount = args[2].
-- `transfer_from` args: `(from, spender, to, amount)` — the account is `from`; recipient = args[2], amount = args[3].
+- `transfer_from` args: `(from, spender, to, amount)` — the account is `from` and the spender;
+  recipient = args[2], amount = args[3].
+
+**Party binding (issue #10).** Classification is not based on contract and function name alone.
+After exact-arity validation, `args[0]` must decode to an `Address` equal to
+`env.current_contract_address()`; for `transfer_from`, `args[1]` must also decode to that same
+address. A context naming another `from` — including one where the guarded account appears only as
+`to` — or another spender is not a transfer this account is making, so it is classified as
+`Unknown` and denied with the existing stable `UnknownContract` reason. This is a deliberate
+deny-vs-`Unknown` choice: it adds no reason code, event topic, or decision-table row, while keeping
+default-deny. Malformed or non-address party fields take the same `Unknown` path, and no recipient
+or amount from such a context is ever scored against the window.
 
 Note on multi-asset batches: the window total is a unit-less sum across assets until per-asset caps
 land; operators should use single-asset policies for meaningful windows.
@@ -1908,6 +1919,50 @@ The asymmetry worth stating to a stakeholder: this is a *cheap* attack — no fu
 the account, no state — and a *bounded* one — it cannot escalate into a spend, a policy change,
 or a locked budget. Its cost is measured in operator attention, and its remedy is one
 `rotate_agent_key`.
+
+### 10.4 Reentrancy — no external call surface in `__check_auth`
+
+Verified against `PolicyEngine::__check_auth` and every function it calls in
+`src/lib.rs`, `src/engine.rs`, and `src/window.rs`. The complete host-facing call
+set is:
+
+- **Storage reads:** `env.storage().instance().get(DataKey::AgentPubkey)`;
+  `env.storage().persistent().get` for `DataKey::Policy`, `DataKey::AdminFrozen`,
+  `DataKey::LastHeartbeat`, and `DataKey::Window` (all four through
+  `AuthSnapshot::load`), plus `DataKey::PolicyRevision` through
+  `emit_auth`/`current_revision`. Every *present* persistent read is followed by
+  `env.storage().max_ttl()` and `env.storage().persistent().extend_ttl(...)`
+  per §9.5.
+- **Storage writes:** on an all-allowed authorization whose ledger changed,
+  `env.storage().persistent().set(DataKey::Window, ...)` followed by the same
+  `max_ttl()`/`extend_ttl(...)` refresh. No other key is written by
+  `__check_auth`.
+- **Host crypto:** `env.crypto().ed25519_verify(agent_pubkey, signature_payload,
+  signature)`.
+- **Host introspection:** `env.ledger().timestamp()` and
+  `env.current_contract_address()`.
+- **Events:** `EventAuthChecked` once per auth context (topics `result` and
+  `reason`; data carries `context_index` and `PolicyRevision`) and
+  `EventWindowMerged` for admitted ledger coalescence, published through
+  `env.events().publish`.
+- **Errors and pure work:** contract `Err(Error)` on policy denial and
+  deliberate `panic_with_error!(..., Error)` on invariant failure. `decide`,
+  `parse_call`, and the ledger projections do host value conversions and
+  in-memory `Vec`/`Map` work only; they make no storage or cross-contract calls.
+
+There is no `require_auth`, `invoke_contract`, `try_invoke_contract`, contract
+creation, token call, or cross-contract call anywhere on this path. Every listed
+operation is local storage, host crypto/time/self introspection, event
+publication, or computation on values the host already supplied. None transfers
+control to another contract, so none can re-enter the guard while its decision
+is in flight.
+
+**Future-change rule:** do not add an external contract call — directly or
+through a helper, parser, hook, event adapter, or policy adapter — to
+`__check_auth` or anything it calls without a written argument in this section
+that re-establishes the no-reentrancy invariant, or documents the new mitigation
+and the risk accepted. A call to another contract is not a harmless host detail;
+it changes this threat model.
 
 ---
 

@@ -94,7 +94,7 @@ fn context(env: &Env, self_call_ok: bool, kind: CallKind, valid_detail: bool) ->
         ),
         CallKind::AssetTransfer => {
             let mut args: Vec<Val> = Vec::new(env);
-            args.push_back(address(env, 9).into_val(env));
+            args.push_back(address(env, SELF_ADDRESS).into_val(env));
             args.push_back(address(env, RECIPIENT_ADDRESS).into_val(env));
             args.push_back(if valid_detail { 5_i128 } else { 0_i128 }.into_val(env));
             (address(env, ASSET_ADDRESS), "transfer", args)
