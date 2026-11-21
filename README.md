@@ -468,6 +468,26 @@ budget: it does not refund what was spent while paused.
 > `unfreeze` also re-arms the dead-man-switch clock (warning above), while `resume` touches
 > nothing but the flag.
 
+### `admin` (read)
+```rust
+pub fn admin(env: Env) -> Option<Address>
+```
+No auth. Returns the registered policy admin, or `None` before `initialize`. The
+address is already derivable from instance storage; this read makes the binding
+first-class so an operator or SDK can confirm that the admin it configured —
+including after the two-step `propose_admin_rotation` / `confirm_admin_rotation`
+handover — is the one actually on-chain.
+
+### `agent_pubkey` (read)
+```rust
+pub fn agent_pubkey(env: Env) -> Option<BytesN<32>>
+```
+No auth. Returns the registered agent's Ed25519 public key, or `None` before
+`initialize`. The value tracks `rotate_agent_key`, so an SDK can close the
+verification loop — derive the key, call `initialize`, read it back — and a
+dashboard can confirm "this key is the agent" without reading raw instance
+storage. No auth, consistent with `admin`, `policy`, and `status`.
+
 ### `policy` (read)
 ```rust
 pub fn policy(env: Env) -> Option<PolicyConfig>

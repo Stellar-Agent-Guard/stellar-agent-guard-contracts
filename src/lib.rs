@@ -1118,6 +1118,27 @@ mod policy_engine_type {
 
         // ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ─
 
+        /// The registered policy admin, or `None` before `initialize` (issue
+        /// #302). No auth: the address is already derivable from instance
+        /// storage and is not confidential. Lets an operator or SDK confirm
+        /// that the admin binding it configured (including after the two-step
+        /// rotation) is the binding actually on-chain, instead of trusting its
+        /// own records.
+        #[must_use]
+        pub fn admin(env: Env) -> Option<Address> {
+            env.storage().instance().get(&DataKey::Admin)
+        }
+
+        /// The registered agent Ed25519 public key, or `None` before
+        /// `initialize` (issue #302). No auth, consistent with the rest of the
+        /// read surface. Tracks `rotate_agent_key`, so deriving a key, calling
+        /// `initialize`, and reading it back is a closed verification loop for
+        /// operators, SDKs, and dashboards.
+        #[must_use]
+        pub fn agent_pubkey(env: Env) -> Option<BytesN<32>> {
+            env.storage().instance().get(&DataKey::AgentPubkey)
+        }
+
         #[allow(clippy::must_use_candidate)] // public read surface
         pub fn policy(env: Env) -> Option<PolicyConfig> {
             persist_get(&env, &DataKey::Policy)

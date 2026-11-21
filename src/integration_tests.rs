@@ -1726,6 +1726,43 @@ fn policy_format_version_is_recorded_at_initialize() {
     );
 }
 
+/// Issue #302: identity reads return `None` (not a trap, not a zeroed key) on
+/// an account that has never been initialized.
+#[test]
+fn admin_and_agent_pubkey_are_none_before_initialize() {
+    let env = Env::default();
+    let guard = env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&env, &guard);
+
+    assert_eq!(client.admin(), None);
+    assert_eq!(client.agent_pubkey(), None);
+}
+
+/// Issue #302: both reads report exactly what `initialize` stored, and
+/// `agent_pubkey` follows `rotate_agent_key` while the admin binding stays put.
+#[test]
+fn admin_and_agent_pubkey_read_back_initialize_and_rotation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let guard = env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&env, &guard);
+    let initial_pubkey = BytesN::from_array(&env, &[3u8; 32]);
+
+    client.initialize(&admin, &initial_pubkey);
+    assert_eq!(client.admin(), Some(admin.clone()));
+    assert_eq!(client.agent_pubkey(), Some(initial_pubkey));
+
+    let rotated_pubkey = BytesN::from_array(&env, &[4u8; 32]);
+    client.rotate_agent_key(&rotated_pubkey);
+    assert_eq!(
+        client.admin(),
+        Some(admin),
+        "rotating the agent key must not move the admin binding"
+    );
+    assert_eq!(client.agent_pubkey(), Some(rotated_pubkey));
+}
+
 /// Issue #339: the read never traps and reports `0` (never a valid format
 /// version) on an account that has not been initialized.
 #[test]
