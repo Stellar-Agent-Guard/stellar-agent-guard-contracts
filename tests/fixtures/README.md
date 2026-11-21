@@ -468,7 +468,10 @@ Two notes that matter when these rows are used to triage a live incident:
 1. `cargo build --release --target wasm32v1-none` (contract) and
    `cd tools/agent-tx && cargo build --release` (submission helper).
 2. Fund fresh accounts via Friendbot, deploy the guard + token, mint, and
-   `initialize` (see setup txs above).
+   `initialize` (see setup txs above). The ordered sequence — upload, create,
+   initialize, `set_policy`, `status` verification — is the
+   [deployment runbook](../../docs/operations/deployment-runbook.md); the setup
+   transactions above are this deployment's record.
 3. Install the scenario policies (JSON in `--config`), then run the
    `agent-tx` invocations above. Use `--expect-blocked` for scenarios 2–5.
 

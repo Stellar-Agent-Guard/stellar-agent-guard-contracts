@@ -227,6 +227,13 @@ reason") requires knowing which surface produced which observation:
   event and no `fn_call … __check_auth` diagnostic line at all — the absence of
   both is what distinguishes a signature failure from a policy denial.
 
+**Reason symbols are a published, additive-first compatibility surface.** A reason you have never
+seen is still a denial: treat an unknown symbol as **blocked**, log the raw symbol (and the
+`Error(Contract, #N)` code from the diagnostics), and do not crash or assume it means `allowed`.
+New reasons may be added in a release; existing reasons are not renamed or repurposed without a
+breaking contract release. The full policy — and why there is no per-event version field — is
+SPEC §9.1 (issue #342).
+
 The full mapping — observable error → policy reason → reversal path, with a
 verbatim live capture and the rejection classes — is
 [`docs/functions/check-auth.md`](docs/functions/check-auth.md#what-an-operator-sees-when-this-rejects-issue-425).
@@ -299,7 +306,11 @@ Before deploying a released artifact:
 
 - The policy admin holds **no fund-moving authority**; only the registered agent
   key moves funds, and only within policy. Losing the admin key means losing the
-  ability to change policy or unfreeze — it does not put funds at risk.
+  ability to change policy or unfreeze — it does not let anyone steal funds, but
+  it can make them permanently unspendable. With `dms_grace_secs > 0` armed, the
+  admin key is a liveness dependency for the whole balance, and an expired grace
+  has no reversal that does not start with an admin signature. See the
+  [incident playbook](docs/operations/incident-playbook-admin-key-lost.md).
 - The account is **default-deny**: unlisted contracts and functions are blocked.
   Adding a protocol is an explicit policy act.
 - Contract creation by the account is denied in v1.

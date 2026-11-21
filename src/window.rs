@@ -357,7 +357,7 @@ fn admit_to_ledger(
     }
     entries.push_back(SpendEntry { ts: now, amount });
     *total = total.saturating_add(amount);
-    if entries.len() as usize > MAX_WINDOW_ENTRIES {
+    if entries.len() > MAX_WINDOW_ENTRIES {
         // Conservative merge: the merged entry keeps the NEWER of the two
         // timestamps, so the older amount expires later than it truly
         // should — over-counting only.
@@ -441,7 +441,7 @@ fn admit_to_protocol_call_ledger(
     }
     entries.push_back(ProtocolCallEntry { ts: now, count: 1 });
     *total = total.saturating_add(1);
-    if entries.len() as usize > MAX_WINDOW_ENTRIES {
+    if entries.len() > MAX_WINDOW_ENTRIES {
         // Conservative merge: keep the newer timestamp
         let older = entries
             .first()
@@ -536,7 +536,7 @@ mod tests {
 
             self.entries.push(ReferenceEntry { ts: now, amount });
             self.total = self.total.saturating_add(amount);
-            if self.entries.len() > MAX_WINDOW_ENTRIES {
+            if self.entries.len() > usize::try_from(MAX_WINDOW_ENTRIES).expect("bound fits usize") {
                 let older = self.entries.remove(0);
                 let newer = self.entries.remove(0);
                 self.entries.insert(
@@ -846,10 +846,10 @@ mod tests {
         let mut total = 0i128;
         let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
         for i in 0..(MAX_WINDOW_ENTRIES + 10) {
-            admit_to_ledger(&mut total, &mut entries, i as u64, 1);
+            admit_to_ledger(&mut total, &mut entries, u64::from(i), 1);
         }
-        assert!((entries.len() as usize) <= MAX_WINDOW_ENTRIES);
-        assert_eq!(total, (MAX_WINDOW_ENTRIES + 10) as i128);
+        assert!(entries.len() <= MAX_WINDOW_ENTRIES);
+        assert_eq!(total, i128::from(MAX_WINDOW_ENTRIES + 10));
     }
 
     /// Rebuilding from entries recomputes the total from scratch.
@@ -863,22 +863,22 @@ mod tests {
         let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
 
         // Fill to exactly MAX_WINDOW_ENTRIES with distinct seconds: no merge.
-        for i in 0..MAX_WINDOW_ENTRIES as u64 {
+        for i in 0..u64::from(MAX_WINDOW_ENTRIES) {
             admit_to_ledger(&mut total, &mut entries, i, 1);
         }
-        assert_eq!(entries.len() as usize, MAX_WINDOW_ENTRIES);
-        assert_eq!(total, MAX_WINDOW_ENTRIES as i128);
+        assert_eq!(entries.len(), MAX_WINDOW_ENTRIES);
+        assert_eq!(total, i128::from(MAX_WINDOW_ENTRIES));
         assert_eq!(entries.first().unwrap().ts, 0);
         assert_eq!(
             entries.get(entries.len() - 1).unwrap().ts,
-            (MAX_WINDOW_ENTRIES - 1) as u64
+            u64::from(MAX_WINDOW_ENTRIES - 1)
         );
 
         // The next distinct second crosses the bound and merges the two oldest
         // entries forward into one entry at the NEWER timestamp.
-        admit_to_ledger(&mut total, &mut entries, MAX_WINDOW_ENTRIES as u64, 1);
-        assert_eq!(entries.len() as usize, MAX_WINDOW_ENTRIES);
-        assert_eq!(total, (MAX_WINDOW_ENTRIES + 1) as i128);
+        admit_to_ledger(&mut total, &mut entries, u64::from(MAX_WINDOW_ENTRIES), 1);
+        assert_eq!(entries.len(), MAX_WINDOW_ENTRIES);
+        assert_eq!(total, i128::from(MAX_WINDOW_ENTRIES + 1));
         let head = entries.first().unwrap();
         assert_eq!(head.ts, 1, "merged ts is the newer of {{0, 1}}");
         assert_eq!(head.amount, 2, "merged amount is the sum");
@@ -886,7 +886,7 @@ mod tests {
         assert_eq!(entries.get(1).unwrap().ts, 2);
         assert_eq!(
             entries.get(entries.len() - 1).unwrap().ts,
-            MAX_WINDOW_ENTRIES as u64
+            u64::from(MAX_WINDOW_ENTRIES)
         );
     }
 
