@@ -61,8 +61,8 @@ Agent public keys must be valid non-zero Ed25519 keys (all-zero keys are rejecte
 
 | Gate / Check | Command | Evidence Link / Fixture | Verified By | Status |
 |---|---|---|---|---|
-| Code Formatting | `cargo fmt --check` | CI Workflow Run | Contributor / CI | [ ] |
-| Clippy Lints | `cargo clippy --all-targets --all-features` | CI Workflow Run | Contributor / CI | [ ] |
-| Unit & Integration Tests | `cargo test` | CI Workflow Run | Contributor / CI | [ ] |
-| Fixture Parity | Checked via test suites | `tests/fixtures/` | Contributor | [ ] |
-| README & Spec Synchronized | Manual review | `SPEC.md`, `README.md` | Maintainer | [ ] |
+| Code Formatting | `cargo fmt --check` | CI Workflow Run | Contributor / CI | [x] |
+| Clippy Lints | `cargo clippy --all-targets --all-features` | CI Workflow Run | Contributor / CI | [x] |
+| Unit & Integration Tests | `cargo test` | CI Workflow Run | Contributor / CI | [x] |
+| Fixture Parity | Checked via test suites | `tests/fixtures/` | Contributor | [x] |
+| README & Spec Synchronized | Manual review | `SPEC.md`, `README.md` | Maintainer | [x] |
