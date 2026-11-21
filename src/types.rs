@@ -27,6 +27,8 @@ pub enum Error {
     InvalidAmount = 21,
     InvalidAdmin = 22,
     InvalidAgentKey = 23,
+    NoPolicy = 24,
+    FunctionNotAllowed = 25,
 }
 
 #[contracttype]
@@ -39,7 +41,7 @@ pub struct PolicyConfig {
     pub protocols: Vec<ProtocolRule>,
     pub recipients: Vec<Address>,
     pub recipient_window_caps: Vec<RecipientCap>,
-    pub blocked_recipients: Vec<Address>,
+    pub blocked_recipients: Vec<Address>
     pub asset_caps: Vec<AssetCap>,
     pub allow_any_recipient: bool,
     pub active_from: u64,
