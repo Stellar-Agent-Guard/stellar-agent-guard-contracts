@@ -224,6 +224,21 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    [end-to-end checklist](#how-to-add-a-new-error-variant-end-to-end) below and the
    comprehensive walkthrough in
    [`docs/contributing.md`](docs/contributing.md#how-to-add-a-new-error-variant-end-to-end).
+10. **`#[contracttype]` field names and declaration order are wire format** — a
+   `contracttype` struct is encoded as an `ScVal` map keyed by field names, its
+   generated decoder reads entries positionally against the sorted field list, and
+   its XDR shape follows declaration order. Renaming or reordering a field on
+   `PolicyConfig`, `ProtocolRule`, `WindowState`, `SpendEntry`, `Status`, or any
+   other `#[contracttype]` is therefore a breaking change for hard-coded encoders,
+   the `policy_hash` stream, and off-chain decoders, even though it compiles
+   cleanly. Call such a change out in the PR body — and for `PolicyConfig` update
+   `policy.schema.json` and SPEC §3.2 in the same PR — with
+   `tests/policyconfig_scval_encoding.rs` and `tests/abi_snapshot.rs`
+   (regenerate via `UPDATE_SNAPSHOTS=1 cargo test --test abi_snapshot`) as the
+   enforcement gate. The `0 = disabled` sentinel on `per_tx_cap`, `window_cap`,
+   `dms_grace_secs`, and `protocol_calls_per_window` is defined once, by the
+   `PolicyConfig::*_enabled()` accessors — read it through them, never by
+   comparing raw fields, so the contract and the docs agree on one definition.
 
 ## How to read this codebase
 

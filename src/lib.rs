@@ -39,6 +39,7 @@ use soroban_sdk::{
 };
 pub use types::MAX_AUTH_CONTEXTS;
 pub use types::NO_POLICY_DIGEST;
+pub use types::POLICY_FORMAT_VERSION;
 pub use types::{
     AssetCap, BatchCheckResult, BatchTransfer, CheckDetail, Error, PolicyConfig, ProtocolRule,
     RecipientCap, RecipientWindowState, ValidationOutcome,
@@ -176,6 +177,19 @@ mod event_types {
     #[derive(Clone)]
     pub(super) struct EventWindowReset {
         pub(super) by: Address,
+    }
+
+    /// Admin rolling-window cap top-up: data `by` (the admin address that
+    /// acted), `old_cap`, `new_cap`, and `revision` — the `PolicyRevision` this
+    /// call produced, preserving the §9 join-key invariant (same revision ⟺
+    /// same effective policy; issue #349).
+    #[contractevent]
+    #[derive(Clone)]
+    pub(super) struct EventWindowCapIncreased {
+        pub(super) by: Address,
+        pub(super) old_cap: i128,
+        pub(super) new_cap: i128,
+        pub(super) revision: u64,
     }
 
     /// Agent key rotation: data `by` (the admin that acted) plus truncated
@@ -478,7 +492,7 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     if cfg.per_tx_cap < 0 || cfg.window_cap < 0 {
         return Err(PolicyRuleId::AmountSign);
     }
-    if cfg.window_cap > 0 && cfg.window_secs == 0 {
+    if cfg.window_cap_enabled() && cfg.window_secs == 0 {
         return Err(PolicyRuleId::WindowRequiresWidth);
     }
     // Per-tx cap cannot exceed rolling window cap when both are enabled
@@ -486,7 +500,7 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     // and amounts between the two would pass per-tx only to fail on window.
     // That advertised range is never admitted, so we reject as InvalidConfig.
     // Skipped when either cap is disabled (0). Equal values are allowed.
-    if cfg.per_tx_cap > 0 && cfg.window_cap > 0 && cfg.per_tx_cap > cfg.window_cap {
+    if cfg.per_tx_cap_enabled() && cfg.window_cap_enabled() && cfg.per_tx_cap > cfg.window_cap {
         return Err(PolicyRuleId::PerTxCapExceedsWindowCap);
     }
     if cfg.active_until != 0 && cfg.active_until <= cfg.active_from {
@@ -678,6 +692,16 @@ fn emit_window_reset(env: &Env, by: &Address) {
     EventWindowReset { by: by.clone() }.publish(env);
 }
 
+fn emit_window_cap_increased(env: &Env, by: &Address, old_cap: i128, new_cap: i128) {
+    EventWindowCapIncreased {
+        by: by.clone(),
+        old_cap,
+        new_cap,
+        revision: current_revision(env),
+    }
+    .publish(env);
+}
+
 fn emit_agent_rotated(env: &Env, by: &Address, old: &BytesN<32>, new: &BytesN<32>) {
     EventAgentRotated {
         by: by.clone(),
@@ -725,6 +749,48 @@ mod policy_engine_type {
     #[contract]
     pub struct PolicyEngine;
 
+    fn status_snapshot(env: &Env, as_of: u64) -> Status {
+        let policy = persist_get::<PolicyConfig>(env, &DataKey::Policy);
+        let policy_revision = persist_get::<u64>(env, &DataKey::PolicyRevision).unwrap_or(0);
+        let admin_frozen = persist_get::<bool>(env, &DataKey::AdminFrozen).unwrap_or(false);
+        let last_heartbeat = persist_get::<u64>(env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let dms_enabled = policy.as_ref().is_some_and(PolicyConfig::dms_enabled);
+        let (paused, window_remaining, outside_active_window, dms_grace_secs) = match &policy {
+            None => (false, None, false, 0),
+            Some(cfg) => {
+                let (mut ledger, _) = load_window(env);
+                if cfg.window_cap_enabled() || !cfg.recipient_window_caps.is_empty() {
+                    ledger.prune(as_of, cfg.window_secs);
+                }
+                (
+                    cfg.paused,
+                    engine::global_window_remaining(cfg, &ledger),
+                    (cfg.active_from != 0 && as_of < cfg.active_from)
+                        || (cfg.active_until != 0 && as_of > cfg.active_until),
+                    cfg.dms_grace_secs,
+                )
+            }
+        };
+        let heartbeat_expires_at = (dms_enabled && last_heartbeat != 0)
+            .then(|| last_heartbeat.saturating_add(dms_grace_secs));
+
+        Status {
+            has_policy: policy.is_some(),
+            policy_revision,
+            admin_frozen,
+            heartbeat_expired: dms_enabled
+                && last_heartbeat != 0
+                && as_of.saturating_sub(last_heartbeat) > dms_grace_secs,
+            dms_grace_secs,
+            heartbeat_expires_at,
+            last_heartbeat,
+            now: as_of,
+            paused,
+            window_remaining,
+            outside_active_window,
+        }
+    }
+
     #[contractimpl]
     #[allow(clippy::needless_pass_by_value)] // contract ABI requires owned args
     impl PolicyEngine {
@@ -732,6 +798,10 @@ mod policy_engine_type {
 
         /// Registers the policy `admin` and the agent's Ed25519 public key.
         /// One-time; the account is default-deny until a policy is installed.
+        ///
+        /// Also records [`POLICY_FORMAT_VERSION`] in instance storage, so the
+        /// deployed policy-model version is readable (`policy_version`) without
+        /// consulting the policy, and a migration can assert the starting state.
         pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>) {
             let already: Option<bool> = env.storage().instance().get(&DataKey::Initialized);
             if already.unwrap_or(false) {
@@ -742,6 +812,9 @@ mod policy_engine_type {
             env.storage()
                 .instance()
                 .set(&DataKey::AgentPubkey, &agent_pubkey);
+            env.storage()
+                .instance()
+                .set(&DataKey::PolicyVersion, &POLICY_FORMAT_VERSION);
             env.storage().instance().set(&DataKey::Initialized, &true);
             persist_set(&env, &DataKey::AdminFrozen, &false);
             persist_set(&env, &DataKey::LastHeartbeat, &0u64);
@@ -802,6 +875,44 @@ mod policy_engine_type {
             let admin = Self::admin_or_panic(&env);
             env.storage().persistent().remove(&DataKey::Window);
             emit_window_reset(&env, &admin);
+        }
+
+        /// Raises the installed policy's global `window_cap` in place without
+        /// resetting the rolling spend ledger (issue #349). Admin-only.
+        ///
+        /// Companion to [`PolicyEngine::set_policy`] and
+        /// [`PolicyEngine::reset_window`] (issue #289): an operator can top up
+        /// a throttled agent's budget mid-window while keeping every
+        /// non-expired spend entry counted. Leaves `DataKey::Window` and
+        /// `LastHeartbeat` untouched, bumps `PolicyRevision`, and emits
+        /// `window_cap_increased` carrying `by`, `old_cap`, `new_cap`, and
+        /// `revision`.
+        ///
+        /// Rejects with `NoPolicy` when no policy is installed, and with
+        /// `InvalidConfig` when `new_cap <= cfg.window_cap` (not an increase;
+        /// also rejects `<= 0`), when `new_cap` is below the live pruned
+        /// rolling total (silently setting a cap below the current total would
+        /// block the account with no recourse), or when the resulting policy
+        /// violates SPEC §8 (e.g. `window_secs == 0` or
+        /// `per_tx_cap > new_cap`).
+        pub fn increase_window_cap(env: Env, new_cap: i128) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            let (mut ledger, _) = load_window(&env);
+            if cfg.window_secs > 0 {
+                ledger.prune(env.ledger().timestamp(), cfg.window_secs);
+            }
+            if new_cap <= cfg.window_cap || new_cap < ledger.total {
+                panic_with_error!(&env, Error::InvalidConfig);
+            }
+            let old_cap = cfg.window_cap;
+            cfg.window_cap = new_cap;
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_window_cap_increased(&env, &admin, old_cap, new_cap);
         }
 
         /// Policy-level kill switch (issue #290): flips the stored policy's
@@ -1012,6 +1123,21 @@ mod policy_engine_type {
             persist_get(&env, &DataKey::Policy)
         }
 
+        /// The policy-model format version this contract implements (issue
+        /// #339): the [`POLICY_FORMAT_VERSION`] value recorded in instance
+        /// storage at `initialize`. Returns `0` before initialization (never a
+        /// valid format version) and never traps, so indexers and SDKs can read
+        /// it permissionlessly and refuse to construct a policy a deployed
+        /// contract would reject. Changes only with a contract upgrade; see
+        /// SPEC §3 (storage table) and §7 (version policy).
+        #[must_use]
+        pub fn policy_version(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&DataKey::PolicyVersion)
+                .unwrap_or(0)
+        }
+
         /// Canonical encoding fingerprint for cheap policy drift detection
         /// (`policy_hash`): SHA-256 over the deterministic canonical encoding of
         /// the installed policy (SPEC §7.3), or `NO_POLICY_DIGEST` (the SHA-256 of
@@ -1086,44 +1212,24 @@ mod policy_engine_type {
         ///   headroom is recipient-targeted; use `check_detailed` for that.
         /// - `outside_active_window` evaluates the same bounds the §4 gate uses
         ///   (`false` with no policy or an unrestricted window).
+        /// - `dms_grace_secs` reports the configured grace (zero when disabled),
+        ///   and `heartbeat_expires_at` is the recorded heartbeat plus that grace
+        ///   when both are nonzero.
         #[allow(clippy::must_use_candidate)] // public read surface
         pub fn status(env: Env) -> Status {
-            let policy = persist_get::<PolicyConfig>(&env, &DataKey::Policy);
-            let policy_revision = persist_get::<u64>(&env, &DataKey::PolicyRevision).unwrap_or(0);
-            let admin_frozen = persist_get::<bool>(&env, &DataKey::AdminFrozen).unwrap_or(false);
-            let last_heartbeat = persist_get::<u64>(&env, &DataKey::LastHeartbeat).unwrap_or(0);
-            let now = env.ledger().timestamp();
-            let (paused, window_remaining, outside_active_window, grace) = match &policy {
-                None => (false, None, false, 0),
-                Some(cfg) => {
-                    // Prune a local copy of the ledger so remaining headroom never
-                    // counts expired entries. No storage write: this is a read.
-                    let (mut ledger, _) = load_window(&env);
-                    if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
-                        ledger.prune(now, cfg.window_secs);
-                    }
-                    (
-                        cfg.paused,
-                        engine::global_window_remaining(cfg, &ledger),
-                        (cfg.active_from != 0 && now < cfg.active_from)
-                            || (cfg.active_until != 0 && now > cfg.active_until),
-                        cfg.dms_grace_secs,
-                    )
-                }
-            };
-            Status {
-                has_policy: policy.is_some(),
-                policy_revision,
-                admin_frozen,
-                heartbeat_expired: grace > 0
-                    && last_heartbeat != 0
-                    && now.saturating_sub(last_heartbeat) > grace,
-                last_heartbeat,
-                now,
-                paused,
-                window_remaining,
-                outside_active_window,
-            }
+            status_snapshot(&env, env.ledger().timestamp())
+        }
+
+        /// Evaluates the operational snapshot at a caller-supplied unix timestamp.
+        /// This additive read preserves the existing `status()` signature while
+        /// allowing clients to project the heartbeat and active-window gates.
+        ///
+        /// `heartbeat_expired` follows the enforcement boundary: it becomes true
+        /// strictly after `last_heartbeat + dms_grace_secs`. The expiry timestamp
+        /// is `None` when grace is disabled or no heartbeat has been recorded.
+        #[allow(clippy::must_use_candidate)] // public read surface
+        pub fn status_at(env: Env, as_of: u64) -> Status {
+            status_snapshot(&env, as_of)
         }
 
         /// Preflight / simulate a transfer (`check`): permissionless pre-flight
@@ -1195,7 +1301,7 @@ mod policy_engine_type {
             let now = env.ledger().timestamp();
             let self_addr = env.current_contract_address();
 
-            if policy.window_cap > 0 || !policy.recipient_window_caps.is_empty() {
+            if policy.window_cap_enabled() || !policy.recipient_window_caps.is_empty() {
                 ledger.prune(now, policy.window_secs);
             }
 
