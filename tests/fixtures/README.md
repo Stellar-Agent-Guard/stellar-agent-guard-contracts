@@ -365,7 +365,7 @@ machine contract, and `schema_version` is what a consumer checks first.
 | `scenarios[].tx` | string \| null | Confirmed transaction hash, or `null` — blocked scenarios are caught pre-broadcast and have no hash. |
 | `scenarios[].ledger` | int \| null | Ledger index of `tx`; `null` when blocked or not recorded. |
 | `scenarios[].recorded_utc` | string \| null | Horizon `created_at` time of `tx`, when recorded. |
-| `scenarios[].event_topics` | array | Recorded auth_checked topics. The canonical full vocabulary, including the empty reason topic on allowed outcomes, is in [`auth-checked-vocabulary.json`](auth-checked-vocabulary.json). |
+| `scenarios[].event_topics` | array | Recorded auth_checked topics. The canonical full vocabulary, including `[event_auth_checked, allowed, ok]` for allowed outcomes, is in [`auth-checked-vocabulary.json`](auth-checked-vocabulary.json). |
 | `scenarios[].notes[]` | array | The caveats the prose carries for that scenario. |
 | `scenarios[4].reversal` | object | DMS reversal: `action`, `by` (admin address), `tx`, `ledger`, `event_topics` (`[event_unfrozen]`). |
 | `scenarios[4].post_reversal` | object | The transfer that succeeded after `unfreeze()`: `outcome`, `expected_reason`, `amount`, `tx`, `ledger`, `recorded_utc`, `notes`. |
@@ -415,8 +415,8 @@ drift:
 [`auth-checked-vocabulary.json`](auth-checked-vocabulary.json) is the complete,
 machine-readable matrix of the allowed path and every `Error` code/reason
 symbol. Each entry pins its event topics, data map fields, and SPEC reference.
-Allowed decisions carry an empty reason topic because the contract publishes a
-`Symbol("")` when no block reason exists. The `auth_checked_vocabulary`
+Allowed decisions carry the real reason symbol `ok` — every outcome publishes a
+non-empty reason topic (issue #300). The `auth_checked_vocabulary`
 integration test deserializes this fixture and fails if it drifts from the
 `Error` enum or its reason-symbol mapping.
 
@@ -446,7 +446,7 @@ is
 
 | Scenario | Exit code from `agent-tx` | Reason an operator can decode | Reversal |
 |---|---|---|---|
-| 1 allowed | `0` | `topics: [event_auth_checked, allowed, ""]` — the reason topic is empty on an allow ([`auth-checked-vocabulary.json`](auth-checked-vocabulary.json)) | none needed |
+| 1 allowed | `0` | `topics: [event_auth_checked, allowed, ok]` — the reason topic is the real `ok` symbol on an allow ([`auth-checked-vocabulary.json`](auth-checked-vocabulary.json)) | none needed |
 | 2 per-tx cap | `1` | `per_tx_cap_exceeded`, contract code 22 | lower the amount, or `set_policy` to raise `per_tx_cap` |
 | 3 rolling window | `1` | `window_cap_exceeded`, code 23 | wait for the oldest spend to age out of the window; `set_policy` resets the ledger |
 | 4 allowlist | `1` | `recipient_not_allowed`, code 21 | `set_policy` to add the recipient |
