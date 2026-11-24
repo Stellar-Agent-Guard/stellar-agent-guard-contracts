@@ -101,11 +101,15 @@ mod event_types {
         pub(super) at: u64,
     }
 
-    /// Admin lifecycle events: data `by` (the admin address that acted).
+    /// Contract initialization: data `by` (the admin address that acted) plus
+    /// `agent_fingerprint` — the first 4 bytes of the registered Ed25519 public
+    /// key (SPEC §9). A correlation prefix, not the full key: the key is
+    /// already public in instance storage, so this leaks nothing new.
     #[contractevent]
     #[derive(Clone)]
     pub(super) struct EventInitialized {
         pub(super) by: Address,
+        pub(super) agent_fingerprint: BytesN<4>,
     }
 
     #[contractevent]
@@ -637,8 +641,12 @@ fn emit_dms_auto_frozen(env: &Env, at: u64) {
     EventDmsAutoFrozen { at }.publish(env);
 }
 
-fn emit_initialized(env: &Env, by: &Address) {
-    EventInitialized { by: by.clone() }.publish(env);
+fn emit_initialized(env: &Env, by: &Address, agent_pubkey: &BytesN<32>) {
+    EventInitialized {
+        by: by.clone(),
+        agent_fingerprint: pubkey_prefix(env, agent_pubkey),
+    }
+    .publish(env);
 }
 fn emit_frozen(env: &Env, by: &Address) {
     EventFrozen { by: by.clone() }.publish(env);
@@ -664,6 +672,18 @@ fn emit_policy_revoked(env: &Env, by: &Address) {
     }
     .publish(env);
 }
+/// First 4 bytes of the agent public key, published by `initialized` so setup
+/// is correlatable from telemetry alone (SPEC §9). This is a short prefix, not
+/// a security fingerprint: 32 bits collide by birthday around 77k keys, and the
+/// full key is already public in instance storage.
+fn pubkey_prefix(env: &Env, pubkey: &BytesN<32>) -> BytesN<4> {
+    let bytes = pubkey.to_array();
+    let mut prefix = [0u8; 4];
+    // `bytes` is fixed at 32 bytes, so this constant 0..4 range is in bounds.
+    prefix.copy_from_slice(&bytes[..4]);
+    BytesN::from_array(env, &prefix)
+}
+
 /// Compact key fingerprint: the first 8 bytes of `SHA-256(pubkey)`. Rendered
 /// as 16 lowercase hex characters off-chain (greppable, small event payload);
 /// deliberately truncating so events never carry a full pubkey.
@@ -824,7 +844,7 @@ mod policy_engine_type {
             env.storage().instance().set(&DataKey::Initialized, &true);
             persist_set(&env, &DataKey::AdminFrozen, &false);
             persist_set(&env, &DataKey::LastHeartbeat, &0u64);
-            emit_initialized(&env, &admin);
+            emit_initialized(&env, &admin, &agent_pubkey);
         }
 
         // ── Policy management (admin only) ───────────────────────────────────

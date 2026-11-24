@@ -48,9 +48,12 @@ cargo build --release --target wasm32v1-none
 # 7. Check the release WASM for panic/unwrap strings
 bash scripts/check-wasm-panic-strings.sh
 
-# 8. Audit README claims and verify docs reachability
+# 8. Audit README claims, verify docs reachability, and check that the
+#    enforcement-scope statement matches across SPEC §2, README, and
+#    docs/enforcement-scope.md.
 scripts/verify-readme.sh
 scripts/verify-docs-reachability.sh
+scripts/check-enforcement-scope.sh
 
 # 9. tools/agent-tx is a separate cargo project (its own Cargo.toml and
 #    Cargo.lock — not a workspace member), so steps 1-8 never see it. CI gates
@@ -161,10 +164,11 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2)
    must stay word-for-word consistent with the code; that consistency is
    a review requirement, not a nicety. Scope *wording* itself is single-sourced:
-   edit the canonical paragraph in SPEC §2 only — the README and
-   `docs/enforcement-scope.md` carry short excerpts plus a
-   `full statement: SPEC §2` link that auto-follows (re-sync an excerpt only if
-   the quoted sentence itself changes). Copies in sibling repositories
+   edit the canonical paragraph in SPEC §2, then paste the identical paragraph
+   into the README and `docs/enforcement-scope.md` (each keeps its
+   `full statement: SPEC §2` link). `scripts/check-enforcement-scope.sh` runs in
+   the `ci` job and fails on any divergence, so the three copies are mechanically
+   word-for-word, not by convention. Copies in sibling repositories
    (`stellar-agent-guard-sdk`, `stellar-agent-guard-dashboard`) are out of scope
    here; they are tracked in their own issue trackers.
 
@@ -298,6 +302,30 @@ implementation in [`src/lib.rs`](src/lib.rs) and the SDK contract recorded in
 Host exposure of both contract-creation context variants is exercised by
 `contract_creation_denied_through_real_host_path` in
 [`src/integration_tests.rs`](src/integration_tests.rs).
+
+## Architecture decision records (ADRs)
+
+[`docs/adr/`](docs/adr/README.md) records the mechanism decisions that took real
+reasoning, including the alternatives rejected and the observable conditions that
+would reopen them. Read the [ADR index](docs/adr/README.md) before proposing a
+change to the mechanism; if you are re-litigating a settled decision, cite the ADR
+and say which revisit condition has changed.
+
+The settled decisions recorded so far:
+
+1. [ADR-0001](docs/adr/0001-custom-account-abstraction-over-wrapper-contract.md) —
+   Soroban Custom Account Abstraction rather than a wrapper contract.
+2. [ADR-0002](docs/adr/0002-rolling-window-over-fixed-bucket.md) — a genuinely
+   rolling spend window rather than a fixed bucket.
+3. [ADR-0003](docs/adr/0003-ed25519-single-key-over-multisig-v1.md) — one
+   registered Ed25519 key in v1 rather than multi-sig.
+4. [ADR-0004](docs/adr/0004-deny-by-default-classification.md) — deny-by-default
+   classification of auth contexts.
+
+When a change introduces a new settled decision, copy the template from the ADR
+index into `docs/adr/NNNN-short-title.md` and add it to the index. Never rewrite an
+accepted ADR to change its decision: add a new ADR and mark the old one
+`Superseded by ADR-NNNN`.
 
 ## How to add a new Error variant end-to-end
 

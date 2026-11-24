@@ -23,6 +23,8 @@ implements the Soroban `CustomAccountInterface`. From then on, the agent's **add
 contract's address**: any transaction that needs the agent to authorize an action (any
 `require_auth` on that address) is routed by the host through the contract's `__check_auth`
 before the action can touch a target protocol. `__check_auth` is the single enforcement vector.
+The mechanism choice and the alternatives rejected are recorded in
+[ADR-0001](docs/adr/0001-custom-account-abstraction-over-wrapper-contract.md).
 
 - **Non-custodial.** Funds live in the agent's own smart account (balances held at the contract
   address by Stellar Asset Contracts). There is no third-party vault, no `top_up`, no deposit
@@ -121,8 +123,9 @@ rolling-window spend accounting are not applied to non-SAC calls; extending fine
 enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered.**
 
 *Canonical statement: the paragraph above is the single source of truth for the scope
-wording. The README and `docs/enforcement-scope.md` carry short excerpts that link back
-here; scope-wording edits touch this section only (CONTRIBUTING rule 2).*
+wording. The README and `docs/enforcement-scope.md` quote the same paragraph word for
+word and link back here; `scripts/check-enforcement-scope.sh` fails CI if the three
+copies diverge (CONTRIBUTING rule 2).*
 
 What "window and pause state" means for non-SAC calls is made exact in §6.4: the account is a
 **default-deny** environment — every call must match the protocol allowlist (contract, and
@@ -136,7 +139,9 @@ trustworthy way.
 This boundary is an inherent property of the platform (an independent current confirmation:
 OpenZeppelin's Soroban `spending_limit` plugin likewise only meters transfer contexts and
 rejects non-transfer calls outright), **not** a gap this project hides or overclaims. The README
-and `docs/enforcement-scope.md` quote this section briefly and link here as canonical.
+and `docs/enforcement-scope.md` quote this section briefly and link here as canonical. The
+deny-by-default classification that produces this boundary is recorded in
+[ADR-0004](docs/adr/0004-deny-by-default-classification.md).
 
 **Contract creation contexts:** Host-function contract creation contexts (`CreateContractHostFn`
 and `CreateContractWithCtorHostFn`) are surfaced by the host to `__check_auth` when contract deployment
@@ -330,7 +335,9 @@ A fixed 86,400-second bucket (reset-at-midnight style) is a **different guarante
 rolling window and is rejected here. Under a fixed bucket, spend at 23:59 and spend at 00:01
 are never counted together even though they are two minutes apart; under a rolling window, any
 two spends within any 86,400-second span are counted together. The two guarantees diverge in
-exactly the burst-boundary cases a spend guard exists to catch.
+exactly the burst-boundary cases a spend guard exists to catch. The decision, its rejected
+alternatives, and the conditions that would reopen it are recorded in
+[ADR-0002](docs/adr/0002-rolling-window-over-fixed-bucket.md).
 
 Implementation (exact, lazy, bounded):
 
@@ -1093,7 +1100,9 @@ A context whose contract is not the account itself, not in `assets`, and not in 
 is blocked (`UnknownContract`). Host-function contract creation contexts (`CreateContractHostFn`
 and `CreateContractWithCtorHostFn`) are mapped by `parse_call` to `ParsedCall::CreateContract`
 and blocked with `CreateContractNotAllowed` (code 28). The account is **default-deny**: adding
-a protocol is an explicit policy act, and contract creation by the agent is disallowed.
+a protocol is an explicit policy act, and contract creation by the agent is disallowed. The
+classification rule and the rejected allow-by-default alternatives are recorded in
+[ADR-0004](docs/adr/0004-deny-by-default-classification.md).
 
 **Boundary stated exactly:** pause (#4), active-window (#5), and dead-man/admin freeze (#1–#2)
 are *transaction-level* gates applied before classification, so they bind every call the
@@ -1145,7 +1154,8 @@ authorized transactions.
 
 `__check_auth` itself enforces the ordering stated in §10.2: the agent's signature is verified
 before any policy state is read, so an unverifiable signature never reaches the decision table
-below.
+below. The single-key choice and the rejected multi-sig / delegated-signer alternatives are
+recorded in [ADR-0003](docs/adr/0003-ed25519-single-key-over-multisig-v1.md).
 
 ```rust
 // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -1681,10 +1691,47 @@ those repositories.
 
 ## 9. Events and telemetry
 
-Events are the contract's audit trail and Phase-2 telemetry vocabulary. Topics chosen for cheap
-filtering by the SDK listener.
+Events are the contract's audit trail and Phase-2 telemetry vocabulary. This
+section is the indexer contract: it states the exact **encoded shape** of every
+event — topic positions and data layout — not just the conceptual payload. A
+listener can be written from this section alone, and a field reorder is called
+out as the breaking change it is (§9.4).
 
-| Event | Topics | Data | Emitted |
+### 9.1 Encoding rules (`#[contractevent]`)
+
+Events are declared as Rust structs with `#[contractevent]`. The macro's
+encoding is the on-chain API:
+
+1. `topic[0]` is always the event-name symbol: `event_` followed by the struct
+   name converted to `lower_snake_case` (`EventAuthChecked` →
+   `event_auth_checked`). It is prepended by the macro; it is not declared as a
+   field.
+2. Every field marked `#[topic]` follows in **declaration order**: `topic[1]`,
+   `topic[2]`, and so on.
+3. Fields not marked `#[topic]` become the event data — an `ScVal::Map` keyed
+   by the field names as `ScVal::Symbol`. Soroban maps are canonically ordered
+   by key, so the encoded entries are **sorted by field name, not by declaration
+   order**. Always decode data by key.
+
+Consequences an indexer must rely on:
+
+- Topic positions are meaningful. For `auth_checked`, `result` is `topic[1]`
+  and `reason` is `topic[2]`; `src/integration_tests.rs` filters on exactly
+  those positions.
+- An event with no `#[topic]` fields still has one topic: the prepended name.
+- Data is a map, not a tuple. Decode by key and ignore unknown keys; that is
+  what makes additive fields backward-compatible (an added `#[topic]` field is
+  not additive — it shifts every later position, §9.4).
+- `Option<T>` data fields encode as `ScVal::Void` when `None` and as the inner
+  value when `Some`; `BytesN<N>` encodes as `ScVal::Bytes` of length `N`.
+
+### 9.2 Event catalogue
+
+The table is normative. `topic[0]` is shown explicitly so no reader has to
+infer the prepended name. Data keys are listed in encoded (sorted-key) order;
+read them by key regardless.
+
+| Event symbol | Topics | Data (encoded key order) | Emitted when |
 |---|---|---|---|
 | `auth_checked` | event-name topic `event_auth_checked`, then `result: Symbol` (`allowed`/`blocked`) and `reason: Symbol` (`ok` on allow, the `Error` reason on block) | Map: `context_index: u32`, `revision: u64`, `contract: Option<Address>`, `fn_name: Option<Symbol>` | every `__check_auth` / `check` decision |
 | `heartbeat` | (none) | `at: u64`, `expires_at: u64` — the attested DMS deadline as it stood at emission time, `at + dms_grace_secs` of the policy current at that moment; `0` when the dead-man switch is disabled (`dms_grace_secs == 0`, or no policy) | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
@@ -1732,6 +1779,17 @@ the same expiry the contract enforced instead of a drifting recomputation. When 
 switch is disabled the event carries `expires_at == 0` rather than `at + 0`, so `0` unambiguously
 means "no deadline was attested" and never a real timestamp (ledger timestamps are far above `0`).
 Reads `Policy` at emission time to obtain the grace; a missing policy reads as disabled.
+
+**Agent fingerprint (`initialized.agent_fingerprint`).** The `initialized` event
+carries the first 4 bytes of the registered Ed25519 public key, rendered as 8
+lowercase hex characters off-chain, so an auditor or incident responder can
+answer "which key was this account bound to at setup?" from telemetry alone
+instead of replaying the initialize transaction or reading instance storage.
+This is a **correlation prefix, not a security fingerprint**: 32 bits collide by
+the birthday bound at roughly 77,000 keys, so it must never be used to prove key
+identity or to authorize anything. It reveals nothing new — the full key is
+already public in instance storage. `agent_rotated` uses a different, longer
+fingerprint (below); the two are intentionally not comparable.
 
 **Key fingerprints (`agent_rotated`).** A fingerprint is `sha256(pubkey)[0..8]` — the first
 8 bytes of the SHA-256 digest of the agent public key, rendered as 16 lowercase hex characters
