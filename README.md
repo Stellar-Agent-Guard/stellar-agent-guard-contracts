@@ -134,7 +134,7 @@ process.
 
 ## Enforcement scope — read this before relying on the caps
 
-Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces window and pause state, but per-call amount/recipient limits are not yet enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered — full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing). Elaborated with tables in [docs/enforcement-scope.md](docs/enforcement-scope.md).
+Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces account-level gates — admin freeze, dead-man switch, pause, and the active window (`active_from` / `active_until`) — but per-call amount/recipient limits and rolling-window spend accounting are not applied to non-SAC calls; extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered. Full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing) (canonical; this paragraph is kept word-for-word identical by `scripts/check-enforcement-scope.sh`). Elaborated with tables in [docs/enforcement-scope.md](docs/enforcement-scope.md).
 
 ## Quick Start
 
@@ -143,7 +143,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 251 tests, isolated (no network)
+cargo test                                      # 259 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -265,10 +265,19 @@ single rolling window: an admitted transfer is compared against the asset's
 and the shared `window_cap` still bounds total spend across assets.
 
 **Not sure where to start?** Copy-paste presets for common operator personas —
-day-trader agent, payments bot, watch-only + heartbeat, max security — each with
-rationale, explicit "what it does NOT protect against", and unaudited/mainnet/DMS-grace
-warnings, are in [`docs/policy-templates.md`](docs/policy-templates.md). A CI test
-installs every preset documented there, so the examples stay valid.
+day-trader agent, payments bot, watch-only + heartbeat, max security — live as
+loadable JSON files in [`examples/policies/`](examples/policies/), with rationale,
+explicit "what it does NOT protect against", and unaudited/mainnet/DMS-grace
+warnings in [`docs/policy-templates.md`](docs/policy-templates.md). A CI test
+discovers and installs every file in that directory, so a preset cannot be added
+without validation.
+
+| Preset | File |
+|---|---|
+| Day-trader agent | [`examples/policies/day-trader-agent.json`](examples/policies/day-trader-agent.json) |
+| Payments bot | [`examples/policies/payments-bot.json`](examples/policies/payments-bot.json) |
+| Watch-only + heartbeat | [`examples/policies/watch-only-heartbeat.json`](examples/policies/watch-only-heartbeat.json) |
+| Max security | [`examples/policies/max-security.json`](examples/policies/max-security.json) |
 
 ### `reset_window`
 ```rust
@@ -650,7 +659,9 @@ host invokes it automatically on every authorization the account must approve. S
 4. Run the decision table (`decide`) — account-level gates first, then a per-context
    decision loop, then commit window admissions only if every context passed.
 5. Return `Ok(())` to approve the transaction, or `Err(reason)` to reject it — and emit
-   the `auth_checked` event either way. **Observability caveat:** a blocked decision rolls
+   the `auth_checked` event either way, with real topics in both cases:
+   `[event_auth_checked, allowed, ok]` on approval and
+   `[event_auth_checked, blocked, <reason>]` on denial (SPEC §9). **Observability caveat:** a blocked decision rolls
    back with its transaction, so its `auth_checked` event never becomes a committed ledger
    event — blocks reach observers via simulation diagnostics and the SDK telemetry listener
    (dual-stream), not via raw RPC `getEvents`. See
@@ -975,10 +986,12 @@ Stellar Agent Guard operates across three dedicated repositories:
 - `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat
   cadence formula (`interval ≤ grace / 3`), pre-flight `check()`, blocked-reason
   handling table, and stop conditions, with tested `agent-tx` commands.
-- `docs/policy-templates.md` — copy-paste **policy presets** for common operator
-  personas (day-trader, payments bot, watch-only, max security), each with rationale
-  and explicit "what it does NOT protect against"; kept installable by
-  `src/policy_preset_tests.rs`, which installs every preset via `set_policy` in CI.
+- `examples/policies/` — the **policy presets** as loadable JSON files
+  (day-trader, payments bot, watch-only, max security), one file per preset, each
+  validated against `policy.schema.json` and installed via `set_policy` in CI.
+- `docs/policy-templates.md` — the rationale, warnings, and "what it does NOT
+  protect against" for each preset, linking to the files in `examples/policies/`
+  as the source of truth.
 - `tests/fixtures/README.md` — the real testnet evidence for the five scenarios,
   with a machine-readable scenario index in
   [`tests/fixtures/index.json`](tests/fixtures/index.json) (scenario → tx hash →
@@ -1069,11 +1082,12 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-251 tests (unit + integration) cover the policy decision engine — including the regression
+259 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
-proves blocked transactions never consume the window, and dead-man-switch timeline edge
-cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `229 passed; 0 failed`.
+proves blocked transactions never consume the window, pruning committed on a protocol-only
+authorization, corrupted persisted entries, and dead-man-switch timeline edge cases — plus
+`__check_auth` Ed25519 signature verification and the full enforcement scenario matrix
+(SPEC §11). Verified green this session: `259 passed; 0 failed` across all test binaries.
 
 These are the commands CI runs, in the order the `ci` job runs them — the same
 block a contributor can copy (see also

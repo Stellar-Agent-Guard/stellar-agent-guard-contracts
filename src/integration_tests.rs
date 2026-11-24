@@ -1206,16 +1206,21 @@ impl Harness {
 
     /// Did the guard emit an `auth_checked` event with `result = allowed`?
     /// `#[contractevent]` prepends the event name to the topic list, so the
-    /// `result` topic (SPEC §9) is at index 1.
+    /// `result` topic (SPEC §9) is at index 1 and the reason at index 2. An
+    /// allowed decision carries the real `ok` reason symbol, never an empty one
+    /// (issue #300).
     fn emitted_allowed_auth(&self) -> bool {
         let want = ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("allowed")).unwrap());
+        let reason = symbol_val("ok");
         self.env
             .events()
             .all()
             .events()
             .iter()
             .any(|e| match &e.body {
-                xdr::ContractEventBody::V0(v0) => v0.topics.get(1) == Some(&want),
+                xdr::ContractEventBody::V0(v0) => {
+                    v0.topics.get(1) == Some(&want) && v0.topics.get(2) == Some(&reason)
+                }
             })
     }
 
@@ -5366,6 +5371,47 @@ fn status_reads_never_write_window_or_emit_events() {
     // And spend accounting was untouched: a further 60 transfer must still fit.
     h.transfer(&recv, 60);
     assert_eq!(h.status().window_remaining, Some(0));
+}
+
+#[test]
+fn protocol_only_authorization_persists_the_pruned_window() {
+    // Issue #345: pruning in memory is correct for the current decision, but
+    // without a write the expired entries stay in storage and are re-loaded and
+    // re-summed on every later authorization. A non-spending (protocol-only)
+    // authorization must commit the prune through `save_ledger`.
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    policy.window_secs = 100;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+    h.set_asset_balance(&h.guard, 100);
+
+    h.transfer(&recv, 40);
+    h.set_time(1_001);
+    h.transfer(&recv, 30);
+
+    let before = h.stored_window().expect("admissions persist the window");
+    assert_eq!(before.entries.len(), 2);
+    assert_eq!(before.total, 70);
+
+    // Both entries are expired at 1_101 (ts + window_secs <= now). `heartbeat`
+    // routes through `__check_auth` but is a self-call, so it admits no spend.
+    h.set_time(1_101);
+    h.heartbeat();
+
+    let after = h.stored_window().expect("the window key is still present");
+    assert!(
+        after.entries.is_empty(),
+        "the protocol-only authorization must commit its prune"
+    );
+    assert_eq!(after.total, 0);
+    assert!(
+        after.protocol_call_entries.is_empty(),
+        "a heartbeat must not be counted as a rate-limited protocol call"
+    );
+    assert_eq!(h.status().window_remaining, Some(policy.window_cap));
 }
 
 // ── heartbeat `expires_at` (SPEC §9) ───────────────────────────────────
