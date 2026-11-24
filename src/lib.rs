@@ -1247,6 +1247,12 @@ mod policy_engine_type {
         /// may refresh persistent TTLs; simulation does not persist those rent
         /// bumps. Emits the same `auth_checked` event as an in-path decision.
         ///
+        /// Permissionless by design: the verdict is derived from the same public
+        /// policy and operational state exposed by `policy()`/`status()`, and it
+        /// cannot influence contract state — this path only reads a snapshot,
+        /// evaluates a local ledger copy, and emits an event. SPEC §7.5 records
+        /// the disclosure analysis and the alternatives considered (issue #343).
+        ///
         /// # Example
         ///
         /// Mirrors the live Phase-1 testnet invocation (permissionless read,
@@ -1274,7 +1280,8 @@ mod policy_engine_type {
         /// This path does not change spend accounting: it mutates a local ledger
         /// copy and emits exactly the same `auth_checked` event as `check`. A
         /// submitted call may refresh persistent TTLs; simulation does not persist
-        /// those rent bumps.
+        /// those rent bumps. Like `check`, it is a permissionless, write-free read
+        /// (SPEC §7.5).
         ///
         /// # Panics
         ///
@@ -1512,6 +1519,13 @@ mod policy_engine_type {
             let now = env.ledger().timestamp();
             let self_addr = env.current_contract_address();
 
+            // Lazy pruning must be committed, not just computed in memory
+            // (issue #345). Prune once here so a protocol-only or otherwise
+            // non-spending authorization still reports whether expired entries
+            // were dropped. `decide` prunes again for its own decision path; the
+            // second pass is a no-op at the same `now`.
+            let pruned = ledger.prune(now, policy.window_secs);
+
             let verdicts = decide(
                 &env,
                 &self_addr,
@@ -1561,7 +1575,11 @@ mod policy_engine_type {
                     emit_window_merge(&env, merge);
                 }
                 let has_entries = ledger.len() > 0 || ledger_has_recipient_entries(&ledger);
-                if window_persisted || has_entries {
+                // Persist a pruning-only decision too: leaving expired entries in
+                // storage makes every later authorization re-load and re-sum them
+                // before pruning them again (issue #345). `save_ledger` is the
+                // single write path for the window and also owns its TTL bump.
+                if window_persisted || has_entries || pruned {
                     save_ledger(&env, &ledger);
                 }
                 Ok(())

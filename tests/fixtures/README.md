@@ -351,13 +351,15 @@ machine contract, and `schema_version` is what a consumer checks first.
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | int | Breaking-change marker. Bumped only when a field changes meaning or disappears; consumers must reject versions they don't know. |
+| `contract_version` | string | The deployed contract whose behavior these fixtures record. `phase1-testnet` is historical: it predates release versioning and is intentionally not the current `Cargo.toml` version. `scripts/check-fixture-vocab.sh` validates this fixture's reason symbols against the vocabulary recorded for that deployment in [`reason-vocabulary.json`](reason-vocabulary.json), not against today's enum. |
+| `contract_version_note` | string | Human explanation of how `contract_version` was identified and why it is historical. |
 | `network` | object | `name`, `protocol`, `passphrase`, `rpc`, `horizon`, `recorded_on`, `ledger_range_note` — the chain this evidence was captured on. |
 | `contracts` | object | `guard` (the deployed custom-account address) and `token` (the SAC address) from the table above. |
 | `accounts[]` | array | `role`, `address`, `key_alias` for each fixture account. |
 | `setup_transactions[]` | array | The Phase 1 setup table: `step` (stable key), `label` (prose), `tx`, and `ledger` (`null` — setup ledgers were not recorded individually). |
 | `scenarios[]` | array | Exactly five entries with `id` 1–5 matching the headings below. |
 | `scenarios[].outcome` | `"allowed"` \| `"blocked"` | Verdict of the recorded run. |
-| `scenarios[].expected_reason` | string | `allowed` when admitted, otherwise the block reason symbol (`per_tx_cap_exceeded`, `window_cap_exceeded`, `recipient_not_allowed`, `heartbeat_expired`) — the same vocabulary as [`docs/reason-glossary.md`](../../docs/reason-glossary.md). |
+| `scenarios[].expected_reason` | string | `allowed` when admitted, otherwise the block reason symbol emitted by the deployed `contract_version` (`per_tx_cap_exceeded`, `window_cap_exceeded`, `recipient_not_allowed`, `heartbeat_expired`) — the same historical vocabulary as [`docs/reason-glossary.md`](../../docs/reason-glossary.md). `scripts/check-fixture-vocab.sh` fails when a current-version fixture names a symbol outside the current `Error::reason()` vocabulary, and checks historical fixtures against their recorded version vocabulary instead. |
 | `scenarios[].guard` / `.token` / `.policy_tx` | string | Contract IDs the scenario ran against, plus the `set_policy` transaction that armed the policy in effect. |
 | `scenarios[].recipient` / `.amount` | string \| null / int | Transfer shape as recorded; `recipient` is `null` where the command above elided it. |
 | `scenarios[].tx` | string \| null | Confirmed transaction hash, or `null` — blocked scenarios are caught pre-broadcast and have no hash. |
