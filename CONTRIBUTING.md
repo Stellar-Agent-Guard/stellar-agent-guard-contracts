@@ -334,7 +334,7 @@ Adding a new denial reason touches at least five places across the repository: t
    - Add host-routed integration test in `src/integration_tests.rs` asserting the exact reason string.
 
 ### Verification Commands
-- **Deny-list CI check**: `./scripts/check-spec-coverage.sh` (validates coverage in SPEC §4/§6 and §7 enum).
+- **Deny-list CI check**: `./scripts/check-spec-coverage.sh` (validates coverage in SPEC §4/§6, the §7 enum, and the §7.1 mapping table's codes and reason symbols).
 - **Decision-table drift check**: `cargo test --test decision_table` (ensures `decision-table.json`, SPEC §4, and engine agree).
 - **Auth-checked vocabulary check**: `cargo test --test auth_checked_vocabulary` (verifies `auth-checked-vocabulary.json` coverage).
 - **Discriminant stability check**: `cargo test error_code_discriminant_stability_spec_7`.

@@ -593,6 +593,14 @@ ledger time, which Soroban code cannot forge):
 | 6 | context is a call to this account's own administrative/self functions (`heartbeat`, `check`) | allow into §5 handling (heartbeat state update only) |
 | 7 | per-context classification (§6) applies all allowlist / cap / window rules | allow or **Block** (`Reason::AssetNotAllowed`, `Reason::RecipientNotAllowed`, `Reason::PerTxCapExceeded`, `Reason::WindowCapExceeded`, `Reason::ProtocolNotAllowed`, `Reason::FunctionNotAllowed`, `Reason::UnknownContract`) |
 
+Three §7.1 variants are deliberately outside this decision table, and their absence is
+by design rather than drift: `Unauthorized` (code 1) is reserved and never emitted — a bad
+agent signature is a host `ed25519_verify` trap, not a returned error (§4.0 step 2, §7.1);
+`AlreadyInitialized` (code 2) is the one-shot `initialize` guard and never arises while
+authorizing a call; and `DecisionInvariantViolation` (code 31) is an internal engine
+consistency guard, not a policy outcome. `scripts/check-spec-coverage.sh` reads this
+paragraph as their semantic documentation.
+
 **Machine-readable twin: [`decision-table.json`](decision-table.json).** The table above is
 rendered from it (one JSON row per line, verbatim), and it also records which `Error` variants the
 engine can actually return for each row and which test pins each one. `tests/decision_table.rs`
@@ -1148,7 +1156,7 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 
 ### 7.1 Error code ↔ CheckResult variant ↔ reason symbol mapping
 
-To close the CheckResult/Error duality gap, every contract `Error` variant maps 1:1 to a `BlockReason` symbol emitted in `CheckResult::Blocked` and `auth_checked` events. The table below records the complete correspondence, including auth-only or admin-only variants that are unreachable via `check()` pre-flight reads and their rationale.
+To close the CheckResult/Error duality gap, every contract `Error` variant maps 1:1 to a block-reason `Symbol` emitted in `CheckResult::Blocked` and `auth_checked` events. There is no separate `BlockReason` Rust type: `CheckResult::Blocked` carries a `Symbol`, and that symbol is always one of the `Error::reason()` strings in the table below (the exhaustive vocabulary). The table records the complete correspondence, including auth-only or admin-only variants that are unreachable via `check()` pre-flight reads and their rationale.
 
 **Discriminant stability & frozen codes:** Contract error codes (`Error(Contract, #N)`) are permanently frozen on testnet and mainnet (`1..=9` for generic/lifecycle, `10..=19` for account-level gates, and `20..=39` for per-call decisions). The numbers are public ABI, not an implementation detail: raw codes appear in published evidence (`tests/fixtures/README.md`), operator docs, the SDK's `REASON_CODES`, and telemetry, so renumbering any code breaks SDK/telemetry decoders and invalidates published evidence. When introducing a new variant, contributors must adhere to the 'append, never insert' convention — **append at the end of the variant's numeric group; never insert between existing codes** — and execute the end-to-end checklist in [`docs/contributing.md`](docs/contributing.md#how-to-add-a-new-error-variant-end-to-end). Renumbering is only permissible with an explicit version note in this section recording the date, the reason, and the old → new mapping for every consumer, together with the corresponding SDK change.
 
@@ -1354,7 +1362,13 @@ pub enum PolicyRuleId { AmountSign, WindowRequiresWidth, ActiveWindowOrder,
 pub enum ValidationOutcome { Valid, Invalid(PolicyRuleId) }
 
 #[contracttype]
-pub enum CheckResult { Allowed, Blocked(BlockReason) }
+pub enum CheckResult { Allowed, Blocked(Symbol) }
+// Blocked carries a `Symbol`, not a dedicated enum type. Its value is always
+// one of the `Error::reason()` strings enumerated in the §7.1 mapping table
+// above (e.g. `heartbeat_expired`, `window_cap_exceeded`) — the same string
+// used as the `reason` topic of `auth_checked`. Consumers can therefore treat
+// that table as the exhaustive block-reason vocabulary; an unrecognized symbol
+// is still a denial and must be handled fail-closed (§9.1).
 
 #[contracttype]
 pub struct CheckDetail {
@@ -1674,6 +1688,7 @@ filtering by the SDK listener.
 |---|---|---|---|
 | `auth_checked` | event-name topic `event_auth_checked`, then `result: Symbol` (`allowed`/`blocked`) and `reason: Symbol` (`ok` on allow, the `Error` reason on block) | Map: `context_index: u32`, `revision: u64`, `contract: Option<Address>`, `fn_name: Option<Symbol>` | every `__check_auth` / `check` decision |
 | `heartbeat` | (none) | `at: u64`, `expires_at: u64` — the attested DMS deadline as it stood at emission time, `at + dms_grace_secs` of the policy current at that moment; `0` when the dead-man switch is disabled (`dms_grace_secs == 0`, or no policy) | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
+| `dms_auto_frozen` | (none) | `at: u64` — ledger time at which the elapsed dead-man grace was explicitly recorded | permissionless `refresh_deadman()` records an **already-true** expiry for the first time (`AutoFrozenAt` was unset); a no-op when not expired or already recorded (§5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
 | `frozen` | (none) | `by: Address` | admin freeze |
 | `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
@@ -1681,7 +1696,10 @@ filtering by the SDK listener.
 | `paused` / `resumed` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced; the counter advances only when the call actually flips `paused`, so a redundant double-pause emits the event with an unchanged revision | admin `pause()` / `resume()` (issues #289/#290) |
 | `window_reset` | (none) | `by: Address` — the admin that explicitly zeroed the rolling window (`set_policy` preserves it across edits, issue #289) | admin `reset_window()` (issue #289) |
 | `window_cap_increased` | (none) | `by: Address`, `old_cap: i128`, `new_cap: i128`, `revision: u64` — the admin that raised `window_cap` in place without resetting the ledger, plus the incremented `PolicyRevision` | admin `increase_window_cap(new_cap)` (issue #349) |
-| `agent_rotated` | (none) | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation |
+| `agent_rotated` | (none) | `by: Address`, `old_fingerprint: BytesN<8>`, `new_fingerprint: BytesN<8>` | admin agent-key rotation (`rotate_agent_key`) |
+| `admin_rotation_proposed` | (none) | `by: Address`, `proposed: Address` — the current admin that proposed and the pending admin | admin `propose_admin_rotation(new_admin)`; a self-proposal is rejected before emission |
+| `admin_rotated` | (none) | `old: Address`, `new: Address` — the outgoing and incoming admins | `confirm_admin_rotation()`; only the pending admin can confirm, and the old admin loses authority immediately |
+| `admin_rotation_cancelled` | (none) | `by: Address`, `cancelled: Address` — the admin that cancelled and the pending admin whose proposal was discarded | admin `cancel_admin_rotation()` while a proposal is pending |
 | `event_window_merged` | `ledger_kind: Symbol` (`global_spend`, `recipient_spend`, `protocol_calls`) | `(merged_ts: u64, merged_value: i128)` â€” retained newer timestamp and merged spend amount or call count | successful admission engages the 8192-entry backstop |
 
 **Policy revision join key (issue #38).** `PolicyRevision` is a persistent

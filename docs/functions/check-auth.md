@@ -84,6 +84,11 @@ For other calls, the arguments are not interpretable — see [Enforcement Scope]
 | `DecisionInvariantViolation` | 31 | Internal enforcement verdict invariant failed |
 | `TooManyAuthContexts` | 33 | Batch exceeds `MAX_AUTH_CONTEXTS` (64) contexts (§4 row 0) |
 
+The table above lists the enforcement-path codes; [SPEC §7.1](../../SPEC.md#71-error-code--checkresult-variant--reason-symbol-mapping)
+is the exhaustive ABI vocabulary, including lifecycle variants that never reach this path.
+The permissionless `check` pre-flight returns the same reasons as `CheckResult::Blocked(Symbol)` —
+a `Symbol` drawn from `Error::reason()`, not a dedicated `BlockReason` type.
+
 ## What an operator sees when this rejects (issue #425)
 
 `__check_auth` has no return channel a client reads directly. It returns `Result<(), Error>` to

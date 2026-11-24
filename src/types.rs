@@ -496,14 +496,16 @@ pub fn policy_canonical_encoding(env: &Env, cfg: &PolicyConfig) -> Bytes {
 }
 
 impl Error {
-    /// Convert an `Error` variant into its corresponding `BlockReason` symbol (as used in `CheckResult::Blocked`).
+    /// Convert an `Error` variant into its corresponding block-reason `Symbol`
+    /// (the payload of `CheckResult::Blocked` and the `reason` topic of
+    /// `auth_checked`; there is no separate `BlockReason` type — SPEC §7.1).
     #[allow(clippy::must_use_candidate)]
     pub fn to_block_reason(self) -> Symbol {
         // Uses the existing reason() string which matches SPEC §7 / reason glossary.
         Symbol::new(&soroban_sdk::Env::default(), self.reason())
     }
 
-    /// Attempt to convert a `BlockReason` symbol back to an `Error` variant.
+    /// Attempt to convert a block-reason `Symbol` back to an `Error` variant.
     #[allow(clippy::must_use_candidate)]
     pub fn from_block_reason(symbol: &Symbol) -> Option<Self> {
         let env = soroban_sdk::Env::default();
