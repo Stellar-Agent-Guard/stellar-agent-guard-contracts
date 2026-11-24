@@ -1,33 +1,15 @@
-//! Keeps copy-paste policy examples and the SPEC parity vector aligned with
-//! the machine-readable schema used by tooling.
+//! Keeps the loadable policy preset files and the SPEC parity vector aligned
+//! with the machine-readable schema used by tooling.
 
 use jsonschema::Validator;
 use serde_json::Value;
 use std::{fs, path::PathBuf};
 
+const PRESET_DIR: &str = "examples/policies";
+const MIN_PRESETS: usize = 4;
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn json_blocks(markdown: &str) -> Vec<String> {
-    let mut blocks = Vec::new();
-    let mut current: Option<String> = None;
-    for line in markdown.lines() {
-        match (current.as_mut(), line.trim()) {
-            (None, "```json") => current = Some(String::new()),
-            (Some(block), "```") => {
-                blocks.push(std::mem::take(block));
-                current = None;
-            }
-            (Some(block), _) => {
-                block.push_str(line);
-                block.push('\n');
-            }
-            (None, _) => {}
-        }
-    }
-    assert!(current.is_none(), "unclosed JSON code fence");
-    blocks
 }
 
 fn assert_valid(schema: &Validator, value: &Value, label: &str) {
@@ -50,14 +32,28 @@ fn presets_and_scval_parity_vector_match_policy_schema() {
     .expect("parse policy schema");
     let schema = jsonschema::validator_for(&schema_json).expect("compile policy schema");
 
-    let presets = fs::read_to_string(root.join("docs/policy-templates.md"))
-        .expect("read documented policy presets");
-    let blocks = json_blocks(&presets);
-    assert!(blocks.len() >= 4, "expected all documented policy presets");
-    for (index, block) in blocks.iter().enumerate() {
-        let value: Value = serde_json::from_str(block)
-            .unwrap_or_else(|error| panic!("preset #{} is invalid JSON: {error}", index + 1));
-        assert_valid(&schema, &value, &format!("policy preset #{}", index + 1));
+    // Discover presets dynamically: adding a file without schema validation
+    // cannot silently pass.
+    let preset_dir = root.join(PRESET_DIR);
+    let mut preset_paths: Vec<PathBuf> = fs::read_dir(&preset_dir)
+        .unwrap_or_else(|error| panic!("read {PRESET_DIR}: {error}"))
+        .map(|entry| entry.expect("read preset directory entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    preset_paths.sort();
+    assert!(
+        preset_paths.len() >= MIN_PRESETS,
+        "{PRESET_DIR} contains {} preset file(s); at least {MIN_PRESETS} required",
+        preset_paths.len()
+    );
+
+    for path in &preset_paths {
+        let label = format!("policy preset {}", path.display());
+        let value: Value = serde_json::from_slice(
+            &fs::read(path).unwrap_or_else(|error| panic!("read {label}: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("{label} is invalid JSON: {error}"));
+        assert_valid(&schema, &value, &label);
     }
 
     let parity: Value = serde_json::from_slice(

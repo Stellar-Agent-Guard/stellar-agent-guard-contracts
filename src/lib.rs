@@ -39,6 +39,7 @@ use soroban_sdk::{
 };
 pub use types::MAX_AUTH_CONTEXTS;
 pub use types::NO_POLICY_DIGEST;
+pub use types::POLICY_FORMAT_VERSION;
 pub use types::{
     AssetCap, BatchCheckResult, BatchTransfer, CheckDetail, Error, PolicyConfig, ProtocolRule,
     RecipientCap, RecipientWindowState, ValidationOutcome,
@@ -180,6 +181,19 @@ mod event_types {
     #[derive(Clone)]
     pub(super) struct EventWindowReset {
         pub(super) by: Address,
+    }
+
+    /// Admin rolling-window cap top-up: data `by` (the admin address that
+    /// acted), `old_cap`, `new_cap`, and `revision` — the `PolicyRevision` this
+    /// call produced, preserving the §9 join-key invariant (same revision ⟺
+    /// same effective policy; issue #349).
+    #[contractevent]
+    #[derive(Clone)]
+    pub(super) struct EventWindowCapIncreased {
+        pub(super) by: Address,
+        pub(super) old_cap: i128,
+        pub(super) new_cap: i128,
+        pub(super) revision: u64,
     }
 
     /// Agent key rotation: data `by` (the admin that acted) plus truncated
@@ -482,7 +496,7 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     if cfg.per_tx_cap < 0 || cfg.window_cap < 0 {
         return Err(PolicyRuleId::AmountSign);
     }
-    if cfg.window_cap > 0 && cfg.window_secs == 0 {
+    if cfg.window_cap_enabled() && cfg.window_secs == 0 {
         return Err(PolicyRuleId::WindowRequiresWidth);
     }
     // Per-tx cap cannot exceed rolling window cap when both are enabled
@@ -490,7 +504,7 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     // and amounts between the two would pass per-tx only to fail on window.
     // That advertised range is never admitted, so we reject as InvalidConfig.
     // Skipped when either cap is disabled (0). Equal values are allowed.
-    if cfg.per_tx_cap > 0 && cfg.window_cap > 0 && cfg.per_tx_cap > cfg.window_cap {
+    if cfg.per_tx_cap_enabled() && cfg.window_cap_enabled() && cfg.per_tx_cap > cfg.window_cap {
         return Err(PolicyRuleId::PerTxCapExceedsWindowCap);
     }
     if cfg.active_until != 0 && cfg.active_until <= cfg.active_from {
@@ -538,21 +552,24 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
             }
         }
     }
-    let mut contracts: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(env);
+    // SPEC §8: the same contract must not appear in two protocol rules
+    // (`ProtocolContractDuplicate`). Comparing each rule against the rules
+    // already validated ahead of it is the rule itself, so no temporary
+    // collection is needed to remember what has been seen.
     for i in 0..cfg.protocols.len() {
-        if let Some(pr) = cfg.protocols.get(i) {
-            for j in 0..contracts.len() {
-                if let Some(existing) = contracts.get(j) {
-                    if existing == pr.contract {
-                        return Err(PolicyRuleId::ProtocolContractDuplicate);
-                    }
+        let Some(pr) = cfg.protocols.get(i) else {
+            continue;
+        };
+        for earlier in 0..i {
+            if let Some(existing) = cfg.protocols.get(earlier) {
+                if existing.contract == pr.contract {
+                    return Err(PolicyRuleId::ProtocolContractDuplicate);
                 }
             }
-            contracts.push_back(pr.contract.clone());
-            if let Some(fns) = &pr.fns {
-                if fns.is_empty() || has_dup(env, fns) {
-                    return Err(PolicyRuleId::ProtocolFnListInvalid);
-                }
+        }
+        if let Some(fns) = &pr.fns {
+            if fns.is_empty() || has_dup(env, fns) {
+                return Err(PolicyRuleId::ProtocolFnListInvalid);
             }
         }
     }
@@ -594,7 +611,10 @@ fn emit_auth(
     context_index: u32,
 ) {
     let res = if allowed { "allowed" } else { "blocked" };
-    let reason = reason.map_or("", |e| e.reason());
+    // An allowed decision has no `Error`, but topic[1] still carries a real
+    // symbol: `ok` keeps the event shape uniform so listeners can filter on a
+    // reason without special-casing a zero-length symbol (issue #300).
+    let reason = reason.map_or("ok", |e| e.reason());
     let (contract, fn_name) = match context {
         Some(Context::Contract(ContractContext {
             contract, fn_name, ..
@@ -698,6 +718,16 @@ fn emit_window_reset(env: &Env, by: &Address) {
     EventWindowReset { by: by.clone() }.publish(env);
 }
 
+fn emit_window_cap_increased(env: &Env, by: &Address, old_cap: i128, new_cap: i128) {
+    EventWindowCapIncreased {
+        by: by.clone(),
+        old_cap,
+        new_cap,
+        revision: current_revision(env),
+    }
+    .publish(env);
+}
+
 fn emit_agent_rotated(env: &Env, by: &Address, old: &BytesN<32>, new: &BytesN<32>) {
     EventAgentRotated {
         by: by.clone(),
@@ -750,11 +780,12 @@ mod policy_engine_type {
         let policy_revision = persist_get::<u64>(env, &DataKey::PolicyRevision).unwrap_or(0);
         let admin_frozen = persist_get::<bool>(env, &DataKey::AdminFrozen).unwrap_or(false);
         let last_heartbeat = persist_get::<u64>(env, &DataKey::LastHeartbeat).unwrap_or(0);
+        let dms_enabled = policy.as_ref().is_some_and(PolicyConfig::dms_enabled);
         let (paused, window_remaining, outside_active_window, dms_grace_secs) = match &policy {
             None => (false, None, false, 0),
             Some(cfg) => {
                 let (mut ledger, _) = load_window(env);
-                if cfg.window_cap > 0 || !cfg.recipient_window_caps.is_empty() {
+                if cfg.window_cap_enabled() || !cfg.recipient_window_caps.is_empty() {
                     ledger.prune(as_of, cfg.window_secs);
                 }
                 (
@@ -766,14 +797,14 @@ mod policy_engine_type {
                 )
             }
         };
-        let heartbeat_expires_at = (dms_grace_secs > 0 && last_heartbeat != 0)
+        let heartbeat_expires_at = (dms_enabled && last_heartbeat != 0)
             .then(|| last_heartbeat.saturating_add(dms_grace_secs));
 
         Status {
             has_policy: policy.is_some(),
             policy_revision,
             admin_frozen,
-            heartbeat_expired: dms_grace_secs > 0
+            heartbeat_expired: dms_enabled
                 && last_heartbeat != 0
                 && as_of.saturating_sub(last_heartbeat) > dms_grace_secs,
             dms_grace_secs,
@@ -793,6 +824,10 @@ mod policy_engine_type {
 
         /// Registers the policy `admin` and the agent's Ed25519 public key.
         /// One-time; the account is default-deny until a policy is installed.
+        ///
+        /// Also records [`POLICY_FORMAT_VERSION`] in instance storage, so the
+        /// deployed policy-model version is readable (`policy_version`) without
+        /// consulting the policy, and a migration can assert the starting state.
         pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>) {
             let already: Option<bool> = env.storage().instance().get(&DataKey::Initialized);
             if already.unwrap_or(false) {
@@ -803,6 +838,9 @@ mod policy_engine_type {
             env.storage()
                 .instance()
                 .set(&DataKey::AgentPubkey, &agent_pubkey);
+            env.storage()
+                .instance()
+                .set(&DataKey::PolicyVersion, &POLICY_FORMAT_VERSION);
             env.storage().instance().set(&DataKey::Initialized, &true);
             persist_set(&env, &DataKey::AdminFrozen, &false);
             persist_set(&env, &DataKey::LastHeartbeat, &0u64);
@@ -863,6 +901,44 @@ mod policy_engine_type {
             let admin = Self::admin_or_panic(&env);
             env.storage().persistent().remove(&DataKey::Window);
             emit_window_reset(&env, &admin);
+        }
+
+        /// Raises the installed policy's global `window_cap` in place without
+        /// resetting the rolling spend ledger (issue #349). Admin-only.
+        ///
+        /// Companion to [`PolicyEngine::set_policy`] and
+        /// [`PolicyEngine::reset_window`] (issue #289): an operator can top up
+        /// a throttled agent's budget mid-window while keeping every
+        /// non-expired spend entry counted. Leaves `DataKey::Window` and
+        /// `LastHeartbeat` untouched, bumps `PolicyRevision`, and emits
+        /// `window_cap_increased` carrying `by`, `old_cap`, `new_cap`, and
+        /// `revision`.
+        ///
+        /// Rejects with `NoPolicy` when no policy is installed, and with
+        /// `InvalidConfig` when `new_cap <= cfg.window_cap` (not an increase;
+        /// also rejects `<= 0`), when `new_cap` is below the live pruned
+        /// rolling total (silently setting a cap below the current total would
+        /// block the account with no recourse), or when the resulting policy
+        /// violates SPEC §8 (e.g. `window_secs == 0` or
+        /// `per_tx_cap > new_cap`).
+        pub fn increase_window_cap(env: Env, new_cap: i128) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            let (mut ledger, _) = load_window(&env);
+            if cfg.window_secs > 0 {
+                ledger.prune(env.ledger().timestamp(), cfg.window_secs);
+            }
+            if new_cap <= cfg.window_cap || new_cap < ledger.total {
+                panic_with_error!(&env, Error::InvalidConfig);
+            }
+            let old_cap = cfg.window_cap;
+            cfg.window_cap = new_cap;
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_window_cap_increased(&env, &admin, old_cap, new_cap);
         }
 
         /// Policy-level kill switch (issue #290): flips the stored policy's
@@ -1073,6 +1149,21 @@ mod policy_engine_type {
             persist_get(&env, &DataKey::Policy)
         }
 
+        /// The policy-model format version this contract implements (issue
+        /// #339): the [`POLICY_FORMAT_VERSION`] value recorded in instance
+        /// storage at `initialize`. Returns `0` before initialization (never a
+        /// valid format version) and never traps, so indexers and SDKs can read
+        /// it permissionlessly and refuse to construct a policy a deployed
+        /// contract would reject. Changes only with a contract upgrade; see
+        /// SPEC §3 (storage table) and §7 (version policy).
+        #[must_use]
+        pub fn policy_version(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&DataKey::PolicyVersion)
+                .unwrap_or(0)
+        }
+
         /// Canonical encoding fingerprint for cheap policy drift detection
         /// (`policy_hash`): SHA-256 over the deterministic canonical encoding of
         /// the installed policy (SPEC §7.3), or `NO_POLICY_DIGEST` (the SHA-256 of
@@ -1179,6 +1270,12 @@ mod policy_engine_type {
         /// may refresh persistent TTLs; simulation does not persist those rent
         /// bumps. Emits the same `auth_checked` event as an in-path decision.
         ///
+        /// Permissionless by design: the verdict is derived from the same public
+        /// policy and operational state exposed by `policy()`/`status()`, and it
+        /// cannot influence contract state — this path only reads a snapshot,
+        /// evaluates a local ledger copy, and emits an event. SPEC §7.5 records
+        /// the disclosure analysis and the alternatives considered (issue #343).
+        ///
         /// # Example
         ///
         /// Mirrors the live Phase-1 testnet invocation (permissionless read,
@@ -1206,7 +1303,8 @@ mod policy_engine_type {
         /// This path does not change spend accounting: it mutates a local ledger
         /// copy and emits exactly the same `auth_checked` event as `check`. A
         /// submitted call may refresh persistent TTLs; simulation does not persist
-        /// those rent bumps.
+        /// those rent bumps. Like `check`, it is a permissionless, write-free read
+        /// (SPEC §7.5).
         ///
         /// # Panics
         ///
@@ -1236,7 +1334,7 @@ mod policy_engine_type {
             let now = env.ledger().timestamp();
             let self_addr = env.current_contract_address();
 
-            if policy.window_cap > 0 || !policy.recipient_window_caps.is_empty() {
+            if policy.window_cap_enabled() || !policy.recipient_window_caps.is_empty() {
                 ledger.prune(now, policy.window_secs);
             }
 
@@ -1444,6 +1542,13 @@ mod policy_engine_type {
             let now = env.ledger().timestamp();
             let self_addr = env.current_contract_address();
 
+            // Lazy pruning must be committed, not just computed in memory
+            // (issue #345). Prune once here so a protocol-only or otherwise
+            // non-spending authorization still reports whether expired entries
+            // were dropped. `decide` prunes again for its own decision path; the
+            // second pass is a no-op at the same `now`.
+            let pruned = ledger.prune(now, policy.window_secs);
+
             let verdicts = decide(
                 &env,
                 &self_addr,
@@ -1493,7 +1598,11 @@ mod policy_engine_type {
                     emit_window_merge(&env, merge);
                 }
                 let has_entries = ledger.len() > 0 || ledger_has_recipient_entries(&ledger);
-                if window_persisted || has_entries {
+                // Persist a pruning-only decision too: leaving expired entries in
+                // storage makes every later authorization re-load and re-sum them
+                // before pruning them again (issue #345). `save_ledger` is the
+                // single write path for the window and also owns its TTL bump.
+                if window_persisted || has_entries || pruned {
                     save_ledger(&env, &ledger);
                 }
                 Ok(())

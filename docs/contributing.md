@@ -252,7 +252,7 @@ pub enum Error {
   ```rust
   Self::NewVariant => "new_variant",
   ```
-- Add `Self::NewVariant` to the `all_errors` array in `Error::from_block_reason(&Symbol) -> Option<Self>` so bidirectional `BlockReason` conversion works cleanly.
+- Add `Self::NewVariant` to the `all_errors` array in `Error::from_block_reason(&Symbol) -> Option<Self>` so bidirectional reason-symbol conversion works cleanly.
 
 #### Step 3: Implement the decision site & update `decision-table.json`
 - Emit the error at its decision site:
@@ -274,7 +274,7 @@ pub enum Error {
   ```
   Indicate whether it is reachable via `check()` preflight reads (`Yes` or `No`, with rationale if unreachable).
 - **SPEC §7 (`pub enum Error` code block)**: Add `NewVariant = 34,` into the markdown code block.
-- *Why:* The deny-list CI check (`scripts/check-spec-coverage.sh`) requires that every variant appears in SPEC §4 or §6 and *exactly once* in the SPEC §7 enum listing.
+- *Why:* The deny-list CI check (`scripts/check-spec-coverage.sh`) requires that every variant appears in SPEC §4 or §6, *exactly once* in the SPEC §7 enum listing, and *exactly once* in the §7.1 mapping table with the code and reason symbol declared in `src/types.rs`.
 
 #### Step 6: Update event vocabulary and glossaries
 - **Consumer vocabulary fixture**: Update [`tests/fixtures/auth-checked-vocabulary.json`](../tests/fixtures/auth-checked-vocabulary.json) by adding an outcome entry under `"outcomes"`:
@@ -319,7 +319,7 @@ Run the following verification checks in order before submitting your pull reque
    ```bash
    ./scripts/check-spec-coverage.sh
    ```
-   Fails if any variant is absent from SPEC §4/§6, absent from the §7 enum listing, or duplicated.
+   Fails if any variant is absent from SPEC §4/§6, absent from or duplicated in the §7 enum listing, or absent/duplicated/drifting in the §7.1 mapping table.
 
 2. **Decision-table drift check**:
    ```bash

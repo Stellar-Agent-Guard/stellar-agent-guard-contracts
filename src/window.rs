@@ -95,8 +95,9 @@ impl Ledger {
         }
     }
 
-    /// Build from persisted state, recomputing every total so a corrupted
-    /// cached total can never admit spend.
+    /// Build from persisted state. The stored `total` is never used for
+    /// enforcement: it is recomputed from `entries` on every load, so a
+    /// corrupted cache can never admit spend.
     #[allow(clippy::must_use_candidate)]
     pub fn from_state(env: &Env, state: WindowState) -> Self {
         let global = ledger_from_entries(env, state.entries);
@@ -122,8 +123,10 @@ impl Ledger {
         }
     }
 
-    /// Serialize back to persistent state. Every `total` is recomputed on
-    /// load, so what we write here can be trusted but need not be canonical.
+    /// Serialize back to persistent state. The stored `total` is never used
+    /// for enforcement: it is recomputed from `entries` on every load, so what
+    /// we write here is for observability/ABI stability rather than a trusted
+    /// enforcement value.
     #[allow(clippy::must_use_candidate)]
     pub fn to_state(&self, env: &Env) -> WindowState {
         let mut recipient_states: soroban_sdk::Vec<RecipientWindowState> =
@@ -153,26 +156,33 @@ impl Ledger {
 
     /// Drop fully-expired entries from every tracked window and update totals.
     ///
+    /// Returns whether at least one entry was removed from any window. The
+    /// authorization path uses this to persist a pruning-only decision even
+    /// when it admits no spend (issue #345): dropping an expired entry in
+    /// memory alone would leave it in storage to be re-summed on the next
+    /// authorization.
+    ///
     /// Expiry is tested as `entry.ts + window_secs <= now` (addition form)
     /// rather than `entry.ts <= now - window_secs` (subtraction form): the
     /// two are algebraically identical but the addition form never underflows
     /// at low timestamps, so an entry recorded at ledger ts 0 cannot be
     /// wrongly treated as expired just because `now - window_secs` would clip
     /// to 0 under saturating subtraction.
-    pub fn prune(&mut self, now: u64, window_secs: u64) {
-        prune_entries(&mut self.total, &mut self.entries, now, window_secs);
+    pub fn prune(&mut self, now: u64, window_secs: u64) -> bool {
+        let mut removed = prune_entries(&mut self.total, &mut self.entries, now, window_secs);
         for i in 0..self.recipients.len() {
             if let Some(mut r) = self.recipients.get(i) {
-                prune_entries(&mut r.total, &mut r.entries, now, window_secs);
+                removed |= prune_entries(&mut r.total, &mut r.entries, now, window_secs);
                 self.recipients.set(i, r);
             }
         }
-        prune_protocol_call_entries(
+        removed |= prune_protocol_call_entries(
             &mut self.protocol_call_total,
             &mut self.protocol_call_entries,
             now,
             window_secs,
         );
+        removed
     }
 
     /// Record a spend against the global window at `now`.
@@ -255,10 +265,23 @@ impl Ledger {
 
 // ── Single rolling ledger helpers ────────────────────────────────────────────
 
+/// Rebuild one window from persisted entries. The stored `total` is never used
+/// for enforcement: it is recomputed from `entries` on every load, so a
+/// corrupted cache can never admit spend (issue #346).
+///
+/// The `amount > 0` filter is a corruption-only backstop (issue #347): no
+/// admission path can persist a non-positive entry — the engine rejects
+/// `amount <= 0` before admission and merges only add positive amounts. A
+/// discarded entry can make the counted total smaller than the real spend if
+/// corruption changed a positive amount, so this branch is deliberately pinned
+/// by `tests::from_entries_drops_non_positive_corrupted_entries` rather than
+/// treated as an enforcement guarantee.
 fn ledger_from_entries(env: &Env, mut entries: soroban_sdk::Vec<SpendEntry>) -> SingleLedger {
     let mut acc: i128 = 0;
     let mut clean: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(env);
     while let Some(e) = entries.pop_front() {
+        // Non-positive entries cannot come from an admission; seeing one means
+        // persisted state was corrupted or a future writer broke the invariant.
         if e.amount > 0 {
             acc = acc.saturating_add(e.amount);
             clean.push_back(e);
@@ -278,20 +301,21 @@ struct SingleLedger {
 }
 
 /// Drop fully-expired entries from a single window and update its total.
+/// Returns whether any entry was removed.
 fn prune_entries(
     total: &mut i128,
     entries: &mut soroban_sdk::Vec<SpendEntry>,
     now: u64,
     window_secs: u64,
-) {
+) -> bool {
     if window_secs == 0 {
-        return;
+        return false;
     }
     let Ok(n) = usize::try_from(entries.len()) else {
-        return;
+        return false;
     };
     if n == 0 {
-        return;
+        return false;
     }
 
     // Entries are ordered by timestamp, so find the expired prefix in
@@ -304,7 +328,7 @@ fn prune_entries(
         // checked add would embed a panic string in the contract WASM.
         let mid = low.saturating_add(high.saturating_sub(low) / 2);
         let Ok(index) = u32::try_from(mid) else {
-            return;
+            return false;
         };
         if let Some(entry) = entries.get(index) {
             if entry.ts.saturating_add(window_secs) <= now {
@@ -320,7 +344,7 @@ fn prune_entries(
         while !entries.is_empty() {
             entries.pop_front();
         }
-        return;
+        return true;
     }
 
     for _ in 0..low {
@@ -329,6 +353,7 @@ fn prune_entries(
             entries.pop_front();
         }
     }
+    low != 0
 }
 
 /// Admit `amount` into a single window at `now`, coalescing same-second spends.
@@ -357,7 +382,7 @@ fn admit_to_ledger(
     }
     entries.push_back(SpendEntry { ts: now, amount });
     *total = total.saturating_add(amount);
-    if entries.len() as usize > MAX_WINDOW_ENTRIES {
+    if entries.len() > MAX_WINDOW_ENTRIES {
         // Conservative merge: the merged entry keeps the NEWER of the two
         // timestamps, so the older amount expires later than it truly
         // should — over-counting only.
@@ -375,23 +400,27 @@ fn admit_to_ledger(
     None
 }
 
+/// Returns whether any protocol-call entry was removed.
 fn prune_protocol_call_entries(
     total: &mut u32,
     entries: &mut soroban_sdk::Vec<ProtocolCallEntry>,
     now: u64,
     window_secs: u64,
-) {
+) -> bool {
     if window_secs == 0 {
-        return;
+        return false;
     }
+    let mut removed = false;
     while let Some(front) = entries.first() {
         if front.ts.saturating_add(window_secs) <= now {
             *total = total.saturating_sub(front.count);
             entries.pop_front();
+            removed = true;
         } else {
             break;
         }
     }
+    removed
 }
 
 fn protocol_call_entries_from_state(
@@ -441,7 +470,7 @@ fn admit_to_protocol_call_ledger(
     }
     entries.push_back(ProtocolCallEntry { ts: now, count: 1 });
     *total = total.saturating_add(1);
-    if entries.len() as usize > MAX_WINDOW_ENTRIES {
+    if entries.len() > MAX_WINDOW_ENTRIES {
         // Conservative merge: keep the newer timestamp
         let older = entries
             .first()
@@ -536,7 +565,7 @@ mod tests {
 
             self.entries.push(ReferenceEntry { ts: now, amount });
             self.total = self.total.saturating_add(amount);
-            if self.entries.len() > MAX_WINDOW_ENTRIES {
+            if self.entries.len() > usize::try_from(MAX_WINDOW_ENTRIES).expect("bound fits usize") {
                 let older = self.entries.remove(0);
                 let newer = self.entries.remove(0);
                 self.entries.insert(
@@ -846,10 +875,10 @@ mod tests {
         let mut total = 0i128;
         let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
         for i in 0..(MAX_WINDOW_ENTRIES + 10) {
-            admit_to_ledger(&mut total, &mut entries, i as u64, 1);
+            admit_to_ledger(&mut total, &mut entries, u64::from(i), 1);
         }
-        assert!((entries.len() as usize) <= MAX_WINDOW_ENTRIES);
-        assert_eq!(total, (MAX_WINDOW_ENTRIES + 10) as i128);
+        assert!(entries.len() <= MAX_WINDOW_ENTRIES);
+        assert_eq!(total, i128::from(MAX_WINDOW_ENTRIES + 10));
     }
 
     /// Rebuilding from entries recomputes the total from scratch.
@@ -863,22 +892,22 @@ mod tests {
         let mut entries: soroban_sdk::Vec<SpendEntry> = soroban_sdk::Vec::new(&env);
 
         // Fill to exactly MAX_WINDOW_ENTRIES with distinct seconds: no merge.
-        for i in 0..MAX_WINDOW_ENTRIES as u64 {
+        for i in 0..u64::from(MAX_WINDOW_ENTRIES) {
             admit_to_ledger(&mut total, &mut entries, i, 1);
         }
-        assert_eq!(entries.len() as usize, MAX_WINDOW_ENTRIES);
-        assert_eq!(total, MAX_WINDOW_ENTRIES as i128);
+        assert_eq!(entries.len(), MAX_WINDOW_ENTRIES);
+        assert_eq!(total, i128::from(MAX_WINDOW_ENTRIES));
         assert_eq!(entries.first().unwrap().ts, 0);
         assert_eq!(
             entries.get(entries.len() - 1).unwrap().ts,
-            (MAX_WINDOW_ENTRIES - 1) as u64
+            u64::from(MAX_WINDOW_ENTRIES - 1)
         );
 
         // The next distinct second crosses the bound and merges the two oldest
         // entries forward into one entry at the NEWER timestamp.
-        admit_to_ledger(&mut total, &mut entries, MAX_WINDOW_ENTRIES as u64, 1);
-        assert_eq!(entries.len() as usize, MAX_WINDOW_ENTRIES);
-        assert_eq!(total, (MAX_WINDOW_ENTRIES + 1) as i128);
+        admit_to_ledger(&mut total, &mut entries, u64::from(MAX_WINDOW_ENTRIES), 1);
+        assert_eq!(entries.len(), MAX_WINDOW_ENTRIES);
+        assert_eq!(total, i128::from(MAX_WINDOW_ENTRIES + 1));
         let head = entries.first().unwrap();
         assert_eq!(head.ts, 1, "merged ts is the newer of {{0, 1}}");
         assert_eq!(head.amount, 2, "merged amount is the sum");
@@ -886,7 +915,7 @@ mod tests {
         assert_eq!(entries.get(1).unwrap().ts, 2);
         assert_eq!(
             entries.get(entries.len() - 1).unwrap().ts,
-            MAX_WINDOW_ENTRIES as u64
+            u64::from(MAX_WINDOW_ENTRIES)
         );
     }
 
@@ -899,6 +928,48 @@ mod tests {
             SpendEntry { ts: 1, amount: 5 },
         ];
         assert_eq!(ledger_from_entries(&env, v).total, 15);
+    }
+
+    /// Issue #347: a non-positive entry cannot be produced by any admission
+    /// path, so finding one means persisted state was corrupted. Pin the
+    /// corruption-only discard instead of leaving it incidental: the filter
+    /// drops the entry and recomputes the total from the surviving positives.
+    #[test]
+    fn from_entries_drops_non_positive_corrupted_entries() {
+        let env = Env::default();
+        let rebuilt = led(&env, &[(0, 10), (1, 0), (2, -5), (3, 7)]);
+        assert_eq!(rebuilt.total, 17, "only positive entries count");
+        assert_eq!(rebuilt.entries.len(), 2);
+        assert_eq!(rebuilt.entries.get(0).unwrap().ts, 0);
+        assert_eq!(rebuilt.entries.get(1).unwrap().ts, 3);
+    }
+
+    /// Issues #346/#347: a corrupted persisted `total` is never trusted, and
+    /// a corrupted non-positive entry is discarded on load. Both are visible
+    /// here so a future change to the load path cannot silently weaken the
+    /// recompute fail-safe.
+    #[test]
+    fn from_state_ignores_corrupted_total_and_discards_corrupted_entry() {
+        let env = Env::default();
+        let entries = vec![
+            &env,
+            SpendEntry { ts: 0, amount: 10 },
+            SpendEntry { ts: 1, amount: -5 },
+        ];
+        let state = WindowState {
+            total: i128::MAX,
+            entries,
+            recipients: soroban_sdk::Vec::new(&env),
+            protocol_call_entries: soroban_sdk::Vec::new(&env),
+        };
+
+        let ledger = Ledger::from_state(&env, state);
+        assert_eq!(
+            ledger.total, 10,
+            "stored total is never used for enforcement"
+        );
+        assert_eq!(ledger.entries.len(), 1);
+        assert_eq!(ledger.entries.first().unwrap().amount, 10);
     }
 
     /// Ledger round-trips through persisted `WindowState`.

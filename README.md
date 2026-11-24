@@ -56,7 +56,9 @@ Ed25519 public key is registered at `initialize`, and from then on the agent's a
 routed by the host through `__check_auth`, which verifies the agent's signature over the
 transaction auth payload and then evaluates the policy decision table over every auth
 context. Funds never leave the agent's own account — there is no deposit step, no vault,
-no `top_up`.
+no `top_up`. (Adopting the guard for an agent that already holds funds does require a
+one-time move of the balance to the contract address; that transfer of custody is covered
+in the [migration guide](docs/operations/migration-guide.md).)
 
 This is the mechanism the rest of the Soroban spend-guard ecosystem is converging on,
 not a niche choice:
@@ -79,6 +81,35 @@ not a niche choice:
 
 Stellar Agent Guard **is** that model, built and proven: `__check_auth` enforcement,
 non-custodial, no proxy wrappers, tested end-to-end on testnet.
+
+### Why non-custodial, concretely
+
+"Non-custodial" is a claim about what each party can reach, not only about where the
+balance sits. The contract exposes no sweep, withdraw, or arbitrary-transfer admin
+function — but that alone does not tell a reviewer what a compromised admin, SDK, or RPC
+can do. Concretely:
+
+| Party | Can reach | Cannot reach |
+|---|---|---|
+| **Registered agent key** | Move funds inside the policy (caps, rolling window, allowlists, pause/freeze/default-deny all run inside `__check_auth`). Can stop heartbeating and let the account self-freeze. | Exceed the policy, change policy, unfreeze itself, rotate its own key, or authorize a call outside the allowlists. A leaked agent key is bounded by the policy, not by the account balance. |
+| **Policy admin key** | Rewrite policy, pause/resume, freeze/unfreeze, rotate the agent key, hand over admin. | No entrypoint transfers value. But be plain about the consequence: an admin-key attacker can install a permissive policy and rotate the agent key to one it controls, so admin-key compromise is a **control compromise** and must be treated as equivalent to control of the balance. The no-fund-moving property describes the ABI, not a defence against a hostile admin (SPEC §1, §10). |
+| **SDK / RPC endpoint** | Return wrong or stale pre-flight results, censor or reorder submissions, and broadcast an already-signed payload (which is bound to its exact amount, recipient, and invocation, and is re-evaluated against policy on-chain). | Forge the agent's signature, alter a signed invocation, bypass `__check_auth`, or change policy without admin auth. Pre-flight is advisory; the on-chain decision is authoritative (SPEC §10.1). |
+| **Any third party without a key** | Read `policy`, `policy_hash`, `status`, `check*`; submit a transaction the agent already signed. | Spend, change policy, freeze, or write state. Reads are permissionless; writes are authenticated. |
+
+The enforcement boundary is part of the same argument: caps, allowlists, and the rolling
+window bind **SAC transfers** fully; arbitrary protocol calls are default-deny by
+contract/function, but per-call amount and recipient limits are a v2 item. Read
+[Enforcement scope](#enforcement-scope--read-this-before-relying-on-the-caps) and
+[SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing)
+together with this table — "non-custodial account" is not the same claim as "every call is
+amount-limited."
+
+What this argument does **not** cover is listed rather than implied: non-SAC amount limits,
+a live agent key that keeps heartbeating, admin-key compromise, and availability griefing
+by an agent-key holder are all in
+[SPEC §10](SPEC.md#10-threat-model-what-this-does-and-does-not-do). The admin key's role in
+liveness once `dms_grace_secs > 0` is in the same section and in the
+[incident playbook](docs/operations/incident-playbook-admin-key-lost.md).
 
 > ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do
 > not deploy to mainnet without an independent audit. See [SECURITY.md](SECURITY.md).
@@ -112,7 +143,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 238 tests, isolated (no network)
+cargo test                                      # 259 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -137,8 +168,10 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 ```
 One-time setup, `require_auth(admin)`. Stores the policy `admin` and the agent's Ed25519
 public key (32 bytes) in instance storage, and initializes `AdminFrozen = false`,
-`LastHeartbeat = 0`. Until `set_policy` runs, the account is **default-deny** — every
-authorization is rejected with `not_initialized`/`no_policy`.
+`LastHeartbeat = 0`. It also records the policy-model format version
+(`PolicyVersion`, readable via [`policy_version`](#policy_version-read)), so tooling can tell
+which `PolicyConfig` model this deployment implements. Until `set_policy` runs, the account is
+**default-deny** — every authorization is rejected with `not_initialized`/`no_policy`.
 
 Called twice, it fails with `AlreadyInitialized` — verified live:
 ```bash
@@ -232,10 +265,19 @@ single rolling window: an admitted transfer is compared against the asset's
 and the shared `window_cap` still bounds total spend across assets.
 
 **Not sure where to start?** Copy-paste presets for common operator personas —
-day-trader agent, payments bot, watch-only + heartbeat, max security — each with
-rationale, explicit "what it does NOT protect against", and unaudited/mainnet/DMS-grace
-warnings, are in [`docs/policy-templates.md`](docs/policy-templates.md). A CI test
-installs every preset documented there, so the examples stay valid.
+day-trader agent, payments bot, watch-only + heartbeat, max security — live as
+loadable JSON files in [`examples/policies/`](examples/policies/), with rationale,
+explicit "what it does NOT protect against", and unaudited/mainnet/DMS-grace
+warnings in [`docs/policy-templates.md`](docs/policy-templates.md). A CI test
+discovers and installs every file in that directory, so a preset cannot be added
+without validation.
+
+| Preset | File |
+|---|---|
+| Day-trader agent | [`examples/policies/day-trader-agent.json`](examples/policies/day-trader-agent.json) |
+| Payments bot | [`examples/policies/payments-bot.json`](examples/policies/payments-bot.json) |
+| Watch-only + heartbeat | [`examples/policies/watch-only-heartbeat.json`](examples/policies/watch-only-heartbeat.json) |
+| Max security | [`examples/policies/max-security.json`](examples/policies/max-security.json) |
 
 ### `reset_window`
 ```rust
@@ -248,6 +290,24 @@ admin action); it does not touch the policy, `PolicyRevision`, or the dead-man-s
 clock. Emits `EventWindowReset`. Reach for it only when a fresh budget is actually
 intended (e.g. after raising `window_cap` mid-incident); a pause, a tightening, or any
 routine policy edit leaves the window intact.
+
+### `increase_window_cap`
+```rust
+pub fn increase_window_cap(env: Env, new_cap: i128)
+```
+Admin-only. Raises the installed policy's global `window_cap` **in place** without
+resetting the rolling spend ledger or touching the dead-man-switch clock
+([issue #349](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/349),
+companion to `set_policy`'s window-preservation and explicit `reset_window` in
+[issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289)
+and [issue #305](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/305)).
+Prunes the loaded ledger against `now` to evaluate the live rolling total, rejects
+`NoPolicy` when no policy is installed, and rejects `InvalidConfig` if
+`new_cap <= cfg.window_cap` (not an increase, including `<= 0`), if `new_cap` is below
+the current live total (silently setting a cap below already-spent volume would block the
+account with no recourse), or if the updated policy violates SPEC §8 (e.g.
+`window_secs == 0` or `per_tx_cap > new_cap`). Increments `PolicyRevision` and emits
+`EventWindowCapIncreased` carrying `by`, `old_cap`, `new_cap`, and `revision`.
 
 ### `revoke_policy`
 ```rust
@@ -374,6 +434,11 @@ For gate ordering and full incident guidance, see [SPEC §4.2](SPEC.md#42-admin-
 > more. The emitted `event_unfrozen` carries `rearmed_dms: bool` (`true` = the call
 > changed `LastHeartbeat`, i.e. the clock was re-armed; `false` = it was already
 > `now`) so telemetry and audits can surface exactly that side effect. See [SPEC §5](SPEC.md#5-dead-man-switch--precise-definition).
+>
+> **If the admin key is unavailable, there is no reversal.** `unfreeze` is admin-only and
+> `propose_admin_rotation` needs the current admin's signature, so a lost admin key cannot be
+> replaced. Recognise the state with `status()` and plan for it before arming a grace:
+> [incident playbook — account DMS-frozen, admin key unavailable](docs/operations/incident-playbook-admin-key-lost.md).
 
 The real Phase-1 unfreeze — the DMS-reversal transaction verified on-chain (tx
 `dd327d32b18bfc6cebdf6c956503fe5318e28f8a8bc86a88cb7ee42c5d46b5e5`):
@@ -432,6 +497,20 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
 #    "recipients":["GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"],
 #    "window_cap":"150","window_secs":60}
 ```
+
+### `policy_version` (read)
+```rust
+pub fn policy_version(env: Env) -> u32
+```
+No auth. Returns the policy-model format version recorded in instance storage at `initialize`
+(`1` for this release), or `0` before initialization — a value that is never a valid format
+version, so the read never traps. The value is written once and never changed by `set_policy`,
+`revoke_policy`, `pause`/`resume`, or key rotation: those change policy *content*, not the
+*model*. A future change to `PolicyConfig`'s shape or meaning — additive fields included —
+bumps it, so an indexer can distinguish an upgraded deployment from the one it replaced and
+a migration runbook can assert the starting state. SDKs should refuse to construct a policy
+for a version they do not know. The version policy is recorded in
+[SPEC §7.4](SPEC.md#74-policy-format-version--migration-hook-issue-339).
 
 ### `policy_hash` (read) — cheap drift detection
 ```rust
@@ -580,7 +659,9 @@ host invokes it automatically on every authorization the account must approve. S
 4. Run the decision table (`decide`) — account-level gates first, then a per-context
    decision loop, then commit window admissions only if every context passed.
 5. Return `Ok(())` to approve the transaction, or `Err(reason)` to reject it — and emit
-   the `auth_checked` event either way. **Observability caveat:** a blocked decision rolls
+   the `auth_checked` event either way, with real topics in both cases:
+   `[event_auth_checked, allowed, ok]` on approval and
+   `[event_auth_checked, blocked, <reason>]` on denial (SPEC §9). **Observability caveat:** a blocked decision rolls
    back with its transaction, so its `auth_checked` event never becomes a committed ledger
    event — blocks reach observers via simulation diagnostics and the SDK telemetry listener
    (dual-stream), not via raw RPC `getEvents`. See
@@ -670,6 +751,10 @@ cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 
 Both builds are covered by the full local gate; the complete list of commands CI
 runs, in CI's order, is in [Testing & CI](#testing--ci).
+
+The ordered on-chain sequence — upload → create → initialize → set_policy → `status`
+verification, with the expected output and the most likely failure of each step — is the
+[deployment runbook](docs/operations/deployment-runbook.md).
 
 ### Download a released artifact (instead of building)
 
@@ -901,10 +986,12 @@ Stellar Agent Guard operates across three dedicated repositories:
 - `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat
   cadence formula (`interval ≤ grace / 3`), pre-flight `check()`, blocked-reason
   handling table, and stop conditions, with tested `agent-tx` commands.
-- `docs/policy-templates.md` — copy-paste **policy presets** for common operator
-  personas (day-trader, payments bot, watch-only, max security), each with rationale
-  and explicit "what it does NOT protect against"; kept installable by
-  `src/policy_preset_tests.rs`, which installs every preset via `set_policy` in CI.
+- `examples/policies/` — the **policy presets** as loadable JSON files
+  (day-trader, payments bot, watch-only, max security), one file per preset, each
+  validated against `policy.schema.json` and installed via `set_policy` in CI.
+- `docs/policy-templates.md` — the rationale, warnings, and "what it does NOT
+  protect against" for each preset, linking to the files in `examples/policies/`
+  as the source of truth.
 - `tests/fixtures/README.md` — the real testnet evidence for the five scenarios,
   with a machine-readable scenario index in
   [`tests/fixtures/index.json`](tests/fixtures/index.json) (scenario → tx hash →
@@ -995,11 +1082,12 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-238 tests (unit + integration) cover the policy decision engine — including the regression
+259 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
-proves blocked transactions never consume the window, and dead-man-switch timeline edge
-cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `229 passed; 0 failed`.
+proves blocked transactions never consume the window, pruning committed on a protocol-only
+authorization, corrupted persisted entries, and dead-man-switch timeline edge cases — plus
+`__check_auth` Ed25519 signature verification and the full enforcement scenario matrix
+(SPEC §11). Verified green this session: `259 passed; 0 failed` across all test binaries.
 
 These are the commands CI runs, in the order the `ci` job runs them — the same
 block a contributor can copy (see also

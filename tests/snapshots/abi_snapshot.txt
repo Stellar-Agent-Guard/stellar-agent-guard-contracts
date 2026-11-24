@@ -33,6 +33,7 @@
 pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 pub fn set_policy(env: Env, config: PolicyConfig)
 pub fn reset_window(env: Env)
+pub fn increase_window_cap(env: Env, new_cap: i128)
 pub fn pause(env: Env)
 pub fn resume(env: Env)
 pub fn revoke_policy(env: Env)
@@ -45,6 +46,7 @@ pub fn freeze(env: Env)
 pub fn refresh_deadman(env: Env)
 pub fn unfreeze(env: Env)
 pub fn policy(env: Env) -> Option<PolicyConfig>
+pub fn policy_version(env: Env) -> u32
 pub fn policy_hash(env: Env) -> BytesN<32>
 pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
 pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus
@@ -156,6 +158,7 @@ enum DataKey
   Admin
   PendingAdmin
   AgentPubkey
+  PolicyVersion
   Policy
   Window
   LastHeartbeat
