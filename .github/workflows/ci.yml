@@ -83,22 +83,24 @@ jobs:
       - name: Unit + integration tests
         run: cargo test
 
-      # Issue #121: the artifact that ships is `--release` wasm, so the suite has
-      # to pass under release codegen too, not only under the dev profile.
-      # `cargo test --release` compiles the test binaries with the
-      # `[profile.release]` settings (`opt-level = "z"`, LTO, `panic = "abort"`,
-      # `overflow-checks = true`), so arithmetic and panic-path behaviour match
-      # the shipped build. Cost is small next to the gates around it: ~2s of test
-      # execution on a warm `target` cache (~2min once, when the release
-      # dependency graph compiles cold), and the cargo cache above is shared.
-      - name: Unit + integration tests (release profile)
-        run: cargo test --release
+      # Issue #128: enforcement-evidence fixtures may only reference reason
+      # symbols that exist in the current Error::reason() vocabulary, or in the
+      # recorded vocabulary for the historical contract_version they document.
+      # Runs after tests so a vocabulary failure is reported separately from a
+      # contract-test failure.
+      - name: Fixture reason vocabulary
+        run: ./scripts/check-fixture-vocab.sh
 
       - name: Public API documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
       - name: Contract build (wasm32v1-none)
         run: cargo build --release --target wasm32v1-none
+
+      # Issue #68: must run only after the release artifact above exists. The
+      # script also writes a size table to the GitHub Actions job summary.
+      - name: Check WASM size budget
+        run: ./scripts/check-wasm-size.sh
 
       - name: Check release WASM for panic/unwrap strings
         run: bash scripts/check-wasm-panic-strings.sh
@@ -108,6 +110,13 @@ jobs:
 
       - name: Verify documentation reachability
         run: scripts/verify-docs-reachability.sh
+
+      # Issue #331: README, SPEC §2 and docs/enforcement-scope.md deliberately
+      # duplicate the enforcement-scope paragraph for three audiences. This
+      # gate keeps the copies word-for-word identical instead of relying on
+      # review memory. Runs in `ci` because main protection requires that job.
+      - name: Verify enforcement-scope statement is consistent
+        run: scripts/check-enforcement-scope.sh
 
       # tools/agent-tx is a separate cargo project (its own Cargo.toml and
       # Cargo.lock), so none of the gates above see it. It signs and submits
