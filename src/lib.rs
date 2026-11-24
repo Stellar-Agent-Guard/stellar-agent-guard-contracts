@@ -604,7 +604,10 @@ fn emit_auth(
     context_index: u32,
 ) {
     let res = if allowed { "allowed" } else { "blocked" };
-    let reason = reason.map_or("", |e| e.reason());
+    // An allowed decision has no `Error`, but topic[1] still carries a real
+    // symbol: `ok` keeps the event shape uniform so listeners can filter on a
+    // reason without special-casing a zero-length symbol (issue #300).
+    let reason = reason.map_or("ok", |e| e.reason());
     let (contract, fn_name) = match context {
         Some(Context::Contract(ContractContext {
             contract, fn_name, ..

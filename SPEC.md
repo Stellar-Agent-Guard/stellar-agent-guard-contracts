@@ -1686,7 +1686,7 @@ filtering by the SDK listener.
 
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
-| `auth_checked` | event-name topic `event_auth_checked`, then `result: Symbol` (`allowed`/`blocked`) and `reason: Symbol` (empty on allow) | Map: `context_index: u32`, `revision: u64`, `contract: Option<Address>`, `fn_name: Option<Symbol>` | every `__check_auth` / `check` decision |
+| `auth_checked` | event-name topic `event_auth_checked`, then `result: Symbol` (`allowed`/`blocked`) and `reason: Symbol` (`ok` on allow, the `Error` reason on block) | Map: `context_index: u32`, `revision: u64`, `contract: Option<Address>`, `fn_name: Option<Symbol>` | every `__check_auth` / `check` decision |
 | `heartbeat` | (none) | `at: u64`, `expires_at: u64` — the attested DMS deadline as it stood at emission time, `at + dms_grace_secs` of the policy current at that moment; `0` when the dead-man switch is disabled (`dms_grace_secs == 0`, or no policy) | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
 | `frozen` | (none) | `by: Address` | admin freeze |
@@ -1716,6 +1716,8 @@ sharing a revision were evaluated under the same policy generation; the
 `policy_hash` (§7.3) distinguishes *which* policy that generation installed.
 
 Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
+Every decision publishes a non-empty `reason` topic: an allowed decision carries `ok`
+(issue #300), so a listener filters on a real symbol and never special-cases a zero-length one.
 
 **Heartbeat expiry (`heartbeat.expires_at`).** `expires_at` is the deadline the heartbeat was
 actually attested under, derived from the `dms_grace_secs` of the policy *current at the moment
@@ -1756,6 +1758,9 @@ separately versioned API, and not a free-to-change string.** In practical terms:
   version a consumer is talking to is the deployed contract release (and, for the policy model
   specifically, `policy_version()` — §7.4). The canonical snapshot a consumer can pin is the
   committed vocabulary fixture plus the §7.1 table, not a value in event data.
+- **`ok` means allowed; every other reason means blocked.** `ok` is reserved for the allow
+  path and is never emitted for a denial. A consumer that filters `reason == ok` sees exactly
+  the admitted decisions; no outcome publishes an empty-symbol reason topic (issue #300).
 - **Unknown reason = treat as blocked.** This is the one required consumer behavior: fail closed,
   log the raw symbol, and surface it for review; never crash, never treat an unrecognized symbol
   as `allowed`, and never assume the reason set is finite or that an enum mirror is exhaustive.
