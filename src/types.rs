@@ -150,7 +150,10 @@ pub enum ValidationOutcome {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowState {
-    /// Cached rolling total (sum of non-expired entries).
+    /// Cached rolling total, kept for observability and ABI stability only.
+    /// The stored `total` is never used for enforcement: it is recomputed from
+    /// `entries` on every load, so a corrupted cache can never admit spend
+    /// (SPEC §3, issue #346).
     pub total: i128,
     /// Chronological spend entries (oldest first).
     pub entries: Vec<SpendEntry>,
@@ -167,7 +170,9 @@ pub struct WindowState {
 pub struct RecipientWindowState {
     /// Account receiving transfers tracked by this ledger.
     pub recipient: Address,
-    /// Cached rolling total (sum of non-expired entries).
+    /// Cached rolling total for this recipient, kept for observability and ABI
+    /// stability only. Never used for enforcement: recomputed from `entries` on
+    /// every load, so a corrupted cache can never admit spend (SPEC §3, #346).
     pub total: i128,
     /// Chronological spend entries (oldest first).
     pub entries: Vec<SpendEntry>,

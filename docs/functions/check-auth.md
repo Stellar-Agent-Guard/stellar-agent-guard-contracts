@@ -191,7 +191,8 @@ without `--secret` the verdict is `INDETERMINATE` and exits `2`. See
 The symbol ↔ code ↔ reachability correspondence for all 25 variants is
 [SPEC §7.1](../../SPEC.md#71-error-code--checkresult-variant--reason-symbol-mapping), and what
 each symbol means to a human reader is [docs/reason-glossary.md](../reason-glossary.md). The
-canonical topic list for every outcome, including the empty reason topic on an allow, is
+canonical topic list for every outcome, including `[event_auth_checked, allowed, ok]` on an
+allow, is
 [tests/fixtures/auth-checked-vocabulary.json](../../tests/fixtures/auth-checked-vocabulary.json).
 
 **Do not read a rejection as proof of an attack.** Enforcement is default-deny and applies to

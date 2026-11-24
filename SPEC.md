@@ -253,7 +253,8 @@ pub struct RecipientCap {
 
 #[contracttype]
 pub struct WindowState {
-    pub total: i128,                      // cached rolling global total
+    pub total: i128,                      // observability/ABI only: never read for enforcement;
+                                          // recomputed from `entries` on every load (fail-safe)
     pub entries: Vec<SpendEntry>,         // chronological global spend entries; pruned lazily on access
     pub recipients: Vec<RecipientWindowState>, // per-recipient rolling ledgers for recipients with override caps
     pub protocol_call_entries: Vec<ProtocolCallEntry>, // rolling protocol call count entries; pruned lazily
@@ -262,7 +263,8 @@ pub struct WindowState {
 #[contracttype]
 pub struct RecipientWindowState {
     pub recipient: Address,
-    pub total: i128,                      // cached rolling total for this recipient
+    pub total: i128,                      // observability/ABI only: never read for enforcement;
+                                          // recomputed from `entries` on every load (fail-safe)
     pub entries: Vec<SpendEntry>,          // chronological entries for this recipient
 }
 
@@ -272,6 +274,14 @@ pub struct SpendEntry { pub ts: u64, pub amount: i128 }
 #[contracttype]
 pub struct ProtocolCallEntry { pub ts: u64, pub count: u32 }  // coalesced call count per second
 ```
+
+**`WindowState.total` / `RecipientWindowState.total` are write-only for enforcement
+(issue #346).** The stored `total` is never used for enforcement: it is recomputed from
+`entries` on every load, so a corrupted cache can never admit spend. The field is kept in
+the persisted shape for ABI stability and introspection only — removing it would change the
+`Window` wire encoding (and every off-chain decoder) without strengthening the guard. The
+same wording is used in the `Ledger::from_state` / `ledger_from_entries` doc comments in
+`src/window.rs`.
 
 **Field names and declaration order are part of the on-chain wire format.** These are
 `#[contracttype]` shapes: Soroban encodes a struct as an `ScVal` map keyed by the field
@@ -331,6 +341,13 @@ Implementation (exact, lazy, bounded):
   equivalent `entries[0].ts <= now - window_secs`) so that a low ledger timestamp cannot
   underflow `now - window_secs` and wrongly expire a still-live entry. Evaluation is lazy — no
   cron, no background writes; the O(expired) pruning cost amortizes over accesses.
+- **Pruning is persisted on the next successful authorization, not just held in memory
+  (issue #345).** `__check_auth` prunes the loaded ledger up front and commits it through
+  `save_ledger` whenever entries were removed, even if the authorization admitted no spend
+  (for example a heartbeat or other protocol-only call). Without that write an idle account's
+  expired entries stay in storage forever and are re-loaded and re-summed before every later
+  authorization; the steady-state cost would be O(all entries ever admitted) rather than
+  O(live entries). Lazy therefore means "no background job", not "never written back".
 - A new spend coalesces into the trailing entry when it shares the same second
   (`entries.last().ts == now`), so dense bursts in one second stay one entry.
 - **Boundedness backstop:** `MAX_WINDOW_ENTRIES = 8192`. If a write would exceed it, the two
@@ -384,6 +401,16 @@ is admitted only if the running total (plus amounts already staged in the same r
 effective cap for that transfer. Per-recipient overrides maintain the same invariant in their own
 `RecipientWindowState`; recipients without an override use the global cap. Both the global cap
 and any matching per-recipient cap must be satisfied.
+
+**Corrupted persisted entries (issue #347).** No current admission path can persist a
+non-positive `SpendEntry`: `decide` rejects `amount <= 0` before admission, and the merge-backstop
+only sums two positive amounts. `ledger_from_entries` nevertheless filters `amount <= 0` when
+rebuilding from storage as a corruption-only backstop, and the discard is pinned by
+`window::tests::from_entries_drops_non_positive_corrupted_entries`. This branch cannot fire
+through normal contract use. If corruption changed a real positive spend into a non-positive
+amount, dropping it makes the recomputed total smaller than the true spend — the direction that
+weakens enforcement — so the filter is a backstop, not an enforcement guarantee. The cached
+`total` is always discarded and recomputed, so a corrupted cache can never admit spend (§3).
 
 **Mid-window cap extension (`increase_window_cap`, issue #349).** Companion to `set_policy`'s
 window-preserving edit semantics and explicit `reset_window` ([issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289),
@@ -1254,6 +1281,7 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // pure pre-flight replica of the §6.2 decision path: it does not change
     // spend accounting, but a submitted call may refresh TTLs under §9.5.
     // Simulation before signing does not persist those rent bumps.
+    // Permissionless by design; disclosure/read-only analysis in §7.5.
 pub fn check_detailed(env: Env, asset: Address, to: Address, amount: i128) -> CheckDetail
   // Same zero-write pre-flight, with remaining_window and effective cap metrics.
 pub fn check_batch(env: Env, asset: Address, transfers: Vec<BatchTransfer>) -> BatchCheckResult
@@ -1490,6 +1518,62 @@ The constant is asserted in the test suite (`policy_format_version_is_recorded_a
 so bumping it is a deliberate act that also forces this section and the §3 storage row to be
 reviewed in the same change.
 
+### 7.5 Why `check()` stays permissionless — disclosure analysis (issue #343)
+
+**Decision (recorded): keep `check()`, `check_detailed()`, and `check_batch()`
+unauthenticated.** They are advisory reads over state that is already public. Gating them
+would break the SDK's pre-flight-before-signing path without actually hiding anything.
+
+**What an unauthenticated caller can learn today.** `check(asset, to, amount)` returns
+`Allowed` or `Blocked(reason)` for an arbitrary hypothetical transfer;
+`check_detailed` adds `remaining_window`, `per_tx_cap`, `effective_per_tx_cap`, and
+`effective_window_cap`; `check_batch` adds one verdict per hypothetical transfer and an
+aggregate `admissible` flag. Comparing that with the rest of the permissionless surface:
+
+| Permissionless read | Discloses |
+|---|---|
+| `policy()` | The full `PolicyConfig`: all caps and window width, asset/recipient/protocol allowlists and blocks, active-window bounds, DMS grace, protocol rate limit, and the pause flag. |
+| `status()`, `status_at()`, `dms_health()` | Admin freeze and pause, last heartbeat and its expiry/health, current ledger time, policy revision, global window headroom (pruned), and whether the active window is open. |
+| `check()`, `check_detailed()`, `check_batch()` | Whether a *caller-supplied* `(asset, recipient, amount)` would pass the §4/§6 gates right now, plus per-call cap/headroom metrics. This is a derived answer: policy plus the public headroom already determine it for anyone willing to do the arithmetic. |
+| `policy_hash()`, `policy_version()`, `validate_policy()` | Policy drift signal, the implemented policy model, and whether a candidate policy would pass §8 validation. |
+
+The marginal disclosure is therefore a **convenience oracle for a hypothetical**, not a new
+capability: no key material, secret, or private state is involved, and everything the verdict
+depends on is already readable via `policy()` and `status()` (both unauthenticated by design).
+The design is internally consistent, and the sibling SDK depends on the unauthenticated form
+for pre-flight.
+
+**Options considered, with SDK compatibility cost.**
+
+- **Keep as-is (chosen).** No SDK or dashboard change; agents can pre-flight with
+  `simulateTransaction` / `--send=no` before signing, and the same advisory read remains
+  available to operators triaging a denial. No new storage keys or rotation paths.
+- **Gate behind caller authentication** (`require_auth` on `check*`). Breaks the core
+  "simulate before you sign" workflow: the agent cannot produce a valid auth entry for a
+  hypothetical transfer it has not decided to submit, and the admin key should never be
+  needed to read state. Requires a coordinated SDK/dashboard change and still leaves the same
+  facts available through `policy()`/`status()`.
+- **Shared secret / read-only caller check.** An on-chain secret is public by definition;
+  an off-chain one needs a new persistent key, an admin rotation path, an ABI change, and
+  secret distribution in every SDK consumer — to conceal nothing that was not already public.
+- **On-chain rate limiting.** Soroban provides no per-caller read throttle; implementing one
+  would turn a read into a write (mutable counters, rent, footprint, a shared counter that a
+  griefer can inflate). If probe throttling is needed, it belongs at the RPC/gateway/operator
+  layer, outside consensus state.
+
+**Proof that `check()` cannot influence state.** `check` delegates to `check_detailed`;
+`check_detailed` and `check_batch` call `AuthSnapshot::load` (whose only storage operations
+are `persist_get` reads), evaluate `decide` against a **local copy** of the rolling ledger, and
+emit `auth_checked` diagnostic events. None of these paths calls `persist_set`, `save_ledger`,
+`increment_revision`, `freeze`, `heartbeat`, or any other mutator: the loaded snapshot is
+discarded and no window write is staged. The only possible ledger-side effect of a *submitted*
+read is the §9.5 TTL refresh, which changes rent metadata, not any value a decision consults;
+RPC simulation (`send=no`) does not persist even that. Events are telemetry, not contract
+state, and cannot feed back into a later decision. Consequently no caller of `check` can
+change policy, spend accounting, freeze/DMS state, or any other stored value. Re-open this
+decision only if a future read path starts writing state or if a genuinely private input is
+introduced into the decision table.
+
 ---
 
 ## 8. Config validation (`set_policy`)
@@ -1602,7 +1686,7 @@ filtering by the SDK listener.
 
 | Event | Topics | Data | Emitted |
 |---|---|---|---|
-| `auth_checked` | event-name topic `event_auth_checked`, then `result: Symbol` (`allowed`/`blocked`) and `reason: Symbol` (empty on allow) | Map: `context_index: u32`, `revision: u64`, `contract: Option<Address>`, `fn_name: Option<Symbol>` | every `__check_auth` / `check` decision |
+| `auth_checked` | event-name topic `event_auth_checked`, then `result: Symbol` (`allowed`/`blocked`) and `reason: Symbol` (`ok` on allow, the `Error` reason on block) | Map: `context_index: u32`, `revision: u64`, `contract: Option<Address>`, `fn_name: Option<Symbol>` | every `__check_auth` / `check` decision |
 | `heartbeat` | (none) | `at: u64`, `expires_at: u64` — the attested DMS deadline as it stood at emission time, `at + dms_grace_secs` of the policy current at that moment; `0` when the dead-man switch is disabled (`dms_grace_secs == 0`, or no policy) | on agent heartbeat (skipped when `now == LastHeartbeat`; §5) |
 | `dms_auto_frozen` | (none) | `at: u64` — ledger time at which the elapsed dead-man grace was explicitly recorded | permissionless `refresh_deadman()` records an **already-true** expiry for the first time (`AutoFrozenAt` was unset); a no-op when not expired or already recorded (§5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
@@ -1635,7 +1719,9 @@ surfacing the new field are cross-repo follow-ups. Two `auth_checked` events
 sharing a revision were evaluated under the same policy generation; the
 `policy_hash` (§7.3) distinguishes *which* policy that generation installed.
 
-Reason symbols mirror `Error` naming so off-chain code maps one vocabulary.
+Reason symbols mirror `BlockReason`/`Error` naming so off-chain code maps one vocabulary.
+Every decision publishes a non-empty `reason` topic: an allowed decision carries `ok`
+(issue #300), so a listener filters on a real symbol and never special-cases a zero-length one.
 
 **Heartbeat expiry (`heartbeat.expires_at`).** `expires_at` is the deadline the heartbeat was
 actually attested under, derived from the `dms_grace_secs` of the policy *current at the moment
@@ -1676,6 +1762,9 @@ separately versioned API, and not a free-to-change string.** In practical terms:
   version a consumer is talking to is the deployed contract release (and, for the policy model
   specifically, `policy_version()` — §7.4). The canonical snapshot a consumer can pin is the
   committed vocabulary fixture plus the §7.1 table, not a value in event data.
+- **`ok` means allowed; every other reason means blocked.** `ok` is reserved for the allow
+  path and is never emitted for a denial. A consumer that filters `reason == ok` sees exactly
+  the admitted decisions; no outcome publishes an empty-symbol reason topic (issue #300).
 - **Unknown reason = treat as blocked.** This is the one required consumer behavior: fail closed,
   log the raw symbol, and surface it for review; never crash, never treat an unrecognized symbol
   as `allowed`, and never assume the reason set is finite or that an enum mirror is exhaustive.

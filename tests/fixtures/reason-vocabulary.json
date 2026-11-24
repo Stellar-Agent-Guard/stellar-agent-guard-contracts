@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "Reason-symbol vocabularies for enforcement-evidence fixtures that document historical contract deployments. The current vocabulary is always extracted from src/types.rs; this file only records versions that predate the current package version, so historical evidence is validated against the symbols that deployment actually emitted instead of being rewritten to today's enum.",
+  "historical": {
+    "phase1-testnet": {
+      "source": "Phase 1 testnet guard deployment: WASM upload tx d43edd086ac9b376371f33b72ad89b37a9b6b4d43bf34dfea9717a29688b887c (2026-09-08), recorded in tests/fixtures/index.json. The deployment predates release versioning, so this vocabulary lists the reason symbols its recorded auth_checked events emitted; it does not claim to be the build's complete Error enum.",
+      "symbols": [
+        "allowed",
+        "heartbeat_expired",
+        "per_tx_cap_exceeded",
+        "recipient_not_allowed",
+        "window_cap_exceeded"
+      ]
+    }
+  }
+}
