@@ -66,6 +66,7 @@ The following GitBook pages provide operational guides, setup procedures, preset
 | GitBook Page | Audience | Status / Notes |
 |---|---|---|
 | [`installation.md`](installation.md) | Developers, Operators | **Explanatory-only.** Environment setup, Rust 1.91+ toolchain, `wasm32v1-none` target, and Wasm build instructions. |
+| [`introduction.md`](introduction.md) | Operators, Integrators, Newcomers | **Explanatory-only.** Orientation tour, plus the glossary of Stellar/Soroban terms (SAC, SCVal, authorization entry, custom account, ledger sequence, TTL), each defined with a link to the governing SPEC section. |
 | [`adr/README.md`](adr/README.md) | Contributors, Auditors | **Explanatory-only.** Records the settled mechanism decisions (custom account abstraction, rolling window, single Ed25519 key, deny-by-default) with rejected alternatives and revisit conditions. Normative behavior remains in SPEC §1/§2/§3.1/§7. |
 | [`policy-templates.md`](policy-templates.md) | Operators, Integrators | **Explanatory-only.** Named starter configurations and presets (day-trader, payments bot, watch-only, max security). Config validation rules are normative in SPEC §8. |
 | [`key-rotation.md`](key-rotation.md) | Operators, Incident Responders | **Explanatory-only.** Operational runbook for agent key rotation and two-step admin handover. Rotation mechanics are normative in SPEC §6.6 and §7.2. |
@@ -221,6 +222,9 @@ preview or the GitBook editor.
   branch.
 - The repository's normal review rules apply to documentation like any other
   change: a green `ci` check and an approving review before merge.
+- Merging is not the end of a docs change: the maintainer who merges also owns
+  confirming GitBook picked the commit up. That handoff, step by step, is
+  ["Maintainer handoff" in `docs/contributing.md`](contributing.md#maintainer-handoff).
 
 ## Checklist for a documentation change
 
