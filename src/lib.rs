@@ -118,6 +118,17 @@ mod event_types {
         pub(super) by: Address,
     }
 
+    /// Agent-initiated self-lock: data `at` — the ledger time the lock was
+    /// taken — and `revision` — the `PolicyRevision` in force when it was
+    /// taken, so telemetry can attribute the halt to the exact policy
+    /// generation (issue #306, SPEC §9).
+    #[contractevent]
+    #[derive(Clone)]
+    pub(super) struct EventSelfLocked {
+        pub(super) at: u64,
+        pub(super) revision: u64,
+    }
+
     /// Admin unfreeze: data `by` (the admin address that acted) plus
     /// `rearmed_dms: bool` — whether the call also re-armed the dead-man-switch
     /// clock by changing `LastHeartbeat` (SPEC §5: the admin's signature is the
@@ -573,6 +584,18 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
             }
         }
     }
+    // A contract cannot be both a SAC asset and an allowlisted protocol
+    // (issue #296): `parse_call` classifies such a contract as an asset every
+    // time, which would silently dead-letter its `ProtocolRule` (including any
+    // `fns` allowlist) while reporting a successful install. Rejecting the
+    // overlap keeps the classification unambiguous and fail-closed.
+    for i in 0..cfg.protocols.len() {
+        if let Some(pr) = cfg.protocols.get(i) {
+            if contains_addr(&cfg.assets, &pr.contract) {
+                return Err(PolicyRuleId::AssetProtocolOverlap);
+            }
+        }
+    }
     // Sane upper bounds on every duration knob (issue #34): `window_secs` and
     // `dms_grace_secs` are `u64`, so a seconds/millis mix-up or a fat-fingered
     // `u64::MAX` silently disables pruning (or the dead-man switch) forever
@@ -650,6 +673,13 @@ fn emit_initialized(env: &Env, by: &Address, agent_pubkey: &BytesN<32>) {
 }
 fn emit_frozen(env: &Env, by: &Address) {
     EventFrozen { by: by.clone() }.publish(env);
+}
+fn emit_self_locked(env: &Env, at: u64) {
+    EventSelfLocked {
+        at,
+        revision: current_revision(env),
+    }
+    .publish(env);
 }
 fn emit_unfrozen(env: &Env, by: &Address, rearmed_dms: bool) {
     EventUnfrozen {
@@ -1106,9 +1136,26 @@ mod policy_engine_type {
             emit_frozen(&env, &admin);
         }
 
+        /// Agent-initiated self-lock (issue #306): the registered agent stops
+        /// its own spending without the admin's key. Routes through
+        /// `__check_auth` (`require_auth` on the account itself), so the engine
+        /// first verifies the agent signature and evaluates the account gates,
+        /// then admits `self_lock` as a fixed §6.1 self-call.
+        ///
+        /// Sets `AdminFrozen = true` and emits a dedicated `self_locked` event.
+        /// It is strictly a capability *reduction*: no funds move, and the
+        /// agent cannot clear the flag — revival is the admin's `unfreeze`
+        /// (SPEC §5). Useful when the admin key is unavailable and a runaway
+        /// agent must be stopped from inside its own authorization path.
+        pub fn self_lock(env: Env) {
+            env.current_contract_address().require_auth();
+            persist_set(&env, &DataKey::AdminFrozen, &true);
+            emit_self_locked(&env, env.ledger().timestamp());
+        }
+
         /// Explicitly records and emits an event if the dead-man switch has expired.
         /// This is permissionless (no auth required) because it only records an
-        /// already-true fact (the account is already lazily frozen by rule #2).
+        /// already-true fact (the account is already lazily frozen by rule #3).
         /// If the account is not expired, or already recorded, this is a no-op.
         pub fn refresh_deadman(env: Env) {
             let now = env.ledger().timestamp();
@@ -1462,9 +1509,23 @@ mod policy_engine_type {
     }
 
     /// Build the auth `Context` of a SAC `transfer` call for pre-flight checks.
-    fn transfer_context(env: &Env, asset: &Address, to: &Address, amount: i128) -> Context {
+    ///
+    /// The synthetic context is a replica of the one the host hands
+    /// `__check_auth` for the real transfer, so it must have the SAC's exact
+    /// `transfer(from, to, amount)` shape with `from` = this guarded account
+    /// (`env.current_contract_address()`), never the token address (issue
+    /// #317). The decision table reads only `args[1]`/`args[2]` today; `args[0]`
+    /// is pinned so the `from`-is-the-guarded-account validation (issue #10)
+    /// can land without `check()` and `__check_auth` disagreeing.
+    pub(crate) fn transfer_context(
+        env: &Env,
+        asset: &Address,
+        to: &Address,
+        amount: i128,
+    ) -> Context {
         let mut args: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
-        args.push_back(asset.clone().into_val(env)); // from
+        // SAC `from`: the guarded account that would authorize this transfer.
+        args.push_back(env.current_contract_address().into_val(env));
         args.push_back(to.clone().into_val(env));
         args.push_back(amount.into_val(env));
         Context::Contract(ContractContext {

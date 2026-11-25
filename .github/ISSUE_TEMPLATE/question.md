@@ -2,10 +2,10 @@
 name: "Question"
 description: "Ask about usage, policy design, or contributing"
 title: "[question]: "
-labels: []
+labels: ["question"]
 ---
 
-<!-- Maintainers: tag one `complexity: trivial|small|medium|large` label per CONTRIBUTING.md ("Issue backlog"). -->
+<!-- Maintainers: keep the template type label and add one `complexity: trivial|small|medium|large` label per CONTRIBUTING.md ("Triage labels and ownership"). -->
 
 ## Summary
 

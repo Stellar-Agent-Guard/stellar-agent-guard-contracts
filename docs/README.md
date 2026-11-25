@@ -55,6 +55,7 @@ The table below maps every section and subsection of [`SPEC.md`](../SPEC.md) to 
 | [`§10.2. Verification ordering guarantee`](../SPEC.md#102-verification-ordering-guarantee) | [`architecture.md`](architecture.md#1-signature-verification), [`audit-pack.md`](audit-pack.md) | Security Auditors, Protocol Engineers | **Normative in SPEC.** GitBook pages are explanatory. Invariant that signature verification precedes all state reads and policy evaluations. |
 | [`§10.3. Availability: a compromised agent key can grief-block its own transactions (issue #424)`](../SPEC.md#103-availability-a-compromised-agent-key-can-grief-block-its-own-transactions-issue-424) | [`audit-pack.md`](audit-pack.md), [`faq.md`](faq.md) | Threat Modelers, Security Auditors, Operators | **Normative in SPEC.** GitBook pages are explanatory. Analysis of agent key griefing vectors and admin mitigation. |
 | [`§11. Testnet proof plan (scenarios 1–8: five proven, three planned)`](../SPEC.md#11-testnet-proof-plan-scenarios-18-five-proven-three-planned) | [`verification.md`](verification.md), [`audit-pack.md`](audit-pack.md) | Auditors, Quality Engineers, Community | **Normative in SPEC.** GitBook pages are explanatory evidence records. Eight testnet scenarios and proof fixture links. |
+| [`Appendix A. Scoped session grants (research spike, issue #308)`](../SPEC.md#appendix-a--scoped-session-grants-research-spike-issue-308) | [`research/scoped-session-grants.md`](research/scoped-session-grants.md) | Protocol Engineers, Security Auditors, Operators | **Non-normative in SPEC** (explicitly not implemented in v1). The research note is the full ADR: representations, replay/expiry/revocation analysis, cap interaction, and the v2 decision. |
 
 ---
 
@@ -65,6 +66,7 @@ The following GitBook pages provide operational guides, setup procedures, preset
 | GitBook Page | Audience | Status / Notes |
 |---|---|---|
 | [`installation.md`](installation.md) | Developers, Operators | **Explanatory-only.** Environment setup, Rust 1.91+ toolchain, `wasm32v1-none` target, and Wasm build instructions. |
+| [`introduction.md`](introduction.md) | Operators, Integrators, Newcomers | **Explanatory-only.** Orientation tour, plus the glossary of Stellar/Soroban terms (SAC, SCVal, authorization entry, custom account, ledger sequence, TTL), each defined with a link to the governing SPEC section. |
 | [`adr/README.md`](adr/README.md) | Contributors, Auditors | **Explanatory-only.** Records the settled mechanism decisions (custom account abstraction, rolling window, single Ed25519 key, deny-by-default) with rejected alternatives and revisit conditions. Normative behavior remains in SPEC §1/§2/§3.1/§7. |
 | [`policy-templates.md`](policy-templates.md) | Operators, Integrators | **Explanatory-only.** Named starter configurations and presets (day-trader, payments bot, watch-only, max security). Config validation rules are normative in SPEC §8. |
 | [`key-rotation.md`](key-rotation.md) | Operators, Incident Responders | **Explanatory-only.** Operational runbook for agent key rotation and two-step admin handover. Rotation mechanics are normative in SPEC §6.6 and §7.2. |
@@ -220,6 +222,9 @@ preview or the GitBook editor.
   branch.
 - The repository's normal review rules apply to documentation like any other
   change: a green `ci` check and an approving review before merge.
+- Merging is not the end of a docs change: the maintainer who merges also owns
+  confirming GitBook picked the commit up. That handoff, step by step, is
+  ["Maintainer handoff" in `docs/contributing.md`](contributing.md#maintainer-handoff).
 
 ## Checklist for a documentation change
 

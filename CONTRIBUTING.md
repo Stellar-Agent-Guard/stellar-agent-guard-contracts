@@ -466,8 +466,53 @@ SPEC.md              # Architecture specification (mechanism is settled)
 
 Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the
 [issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues);
-each carries exactly one `complexity: trivial|small|medium|large` label. Good
-first tasks for the Drips Stellar Wave contributor sprints.
+each carries exactly one type label (`bug`, `enhancement`, `documentation`, or
+`question`) and one `complexity: trivial|small|medium|large` label. Good first
+tasks for the Drips Stellar Wave contributor sprints.
+
+### Triage labels and ownership
+
+Triage is public for normal defects, features, documentation, and questions. It
+is deliberately **not** public for vulnerabilities: see [Security reports are
+never triaged publicly](#security-reports-are-never-triaged-publicly) before
+asking for reproduction details.
+
+The type label comes from the issue template, so a reporter does not need to
+know the taxonomy in advance:
+
+| Label | Use for | Template | Triage outcome |
+|---|---|---|---|
+| `bug` | Something in the repository is broken or behaves differently from SPEC/README | [Bug report](.github/ISSUE_TEMPLATE/bug.md) | Confirm reproduction, then add one complexity label |
+| `enhancement` | A new feature, API, workflow, or behavior change | [Feature request](.github/ISSUE_TEMPLATE/feature.md) | Confirm the proposed scope and acceptance criteria, then add one complexity label |
+| `documentation` | A docs-only correction or addition; the change does not alter contract behavior | Bug or feature template (the reporter may not know it is docs-only) | Add one complexity label; link the affected page and SUMMARY entry |
+| `question` | Usage, policy-design, or contributing questions that are not a defect or a committed feature | [Question](.github/ISSUE_TEMPLATE/question.md) | Answer or point to the owning doc; close when answered, or convert to `bug`/`enhancement` if it exposes work |
+
+Complexity is always exactly one of `complexity: trivial`, `complexity: small`,
+`complexity: medium`, or `complexity: large` (the labels include the space after
+the colon). Maintainers may also add `good first issue`, `help wanted`, or
+`Stellar Wave` when the issue is suitable for a contributor sprint; those are
+routing aids, not a substitute for the type and complexity labels.
+
+Ownership follows [`.github/CODEOWNERS`](.github/CODEOWNERS), not the labels.
+The enforcement path (`src/`, `.github/workflows/`, and `SECURITY.md`) is owned
+by the maintainer and requires a security-literate approving review even when
+the issue is labelled `complexity: trivial`; a label never lowers that review
+bar. Maintainers own triage: apply the labels, ask for the missing reproduction
+or acceptance criteria, and route security reports away from public discussion.
+
+#### Security reports are never triaged publicly
+
+Do **not** open a public issue for a suspected vulnerability and do not add a
+public label to one. Follow [SECURITY.md](SECURITY.md#reporting-a-vulnerability)
+and use the private GitHub security advisory:
+
+<https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/security/advisories/new>
+
+If a report that contains vulnerability details lands in the public tracker,
+maintainers should not ask for exploit details there. Move the discussion to a
+private advisory, redact or close the public issue with a neutral note, and keep
+the advisory as the only record. The issue-template picker also surfaces the
+private route (see [`.github/ISSUE_TEMPLATE/config.yml`](.github/ISSUE_TEMPLATE/config.yml)).
 
 ### Complexity labels
 
@@ -479,25 +524,25 @@ weigh both expected effort **and** the risk of getting it wrong.
 
 | Label | Expected effort | Scope and risk |
 |---|---|---|
-| `complexity:trivial` | ≤ 0.5 day | Very small, isolated changes with minimal risk |
-| `complexity:small` | Approximately 1 day | Limited changes with straightforward validation |
-| `complexity:medium` | 2–3 days | Multiple files or components requiring meaningful testing and review |
-| `complexity:large` | Multi-day | Broad, risky, architectural, or security-sensitive changes |
+| `complexity: trivial` | ≤ 0.5 day | Very small, isolated changes with minimal risk |
+| `complexity: small` | Approximately 1 day | Limited changes with straightforward validation |
+| `complexity: medium` | 2–3 days | Multiple files or components requiring meaningful testing and review |
+| `complexity: large` | Multi-day | Broad, risky, architectural, or security-sensitive changes |
 
 What the labels mean in practice:
 
-- **`complexity:trivial`** — a typo, a broken link, a narrow script fix, or a
+- **`complexity: trivial`** — a typo, a broken link, a narrow script fix, or a
   documentation clarification. One area of the repository, no behavior change,
   and a reviewer can verify it by reading the diff. Example: #116 (document
   this complexity taxonomy).
-- **`complexity:small`** — a contained change with an obvious test story, such
+- **`complexity: small`** — a contained change with an obvious test story, such
   as moving documented configuration into standalone files or tightening one
   CI message. You touch a few files, but no enforcement semantics move.
   Example: #150 (extract the policy presets into loadable JSON files).
-- **`complexity:medium`** — several files or components, a new CI gate, or a
+- **`complexity: medium`** — several files or components, a new CI gate, or a
   change that needs fixtures plus reviewer judgment about edge cases. Example:
   #68 (WASM size budget) and #128 (version-aware fixture reason vocabulary).
-- **`complexity:large`** — broad or security-sensitive work: changes to
+- **`complexity: large`** — broad or security-sensitive work: changes to
   `__check_auth`, the decision table, policy semantics, signature handling, or
   cross-cutting release/reproducibility guarantees. It needs design review,
   adversarial tests, and often SPEC updates. Examples: the reproducible-build
