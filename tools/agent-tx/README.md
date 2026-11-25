@@ -81,7 +81,7 @@ agent-tx transfer --guard C... --token C... --to G... --amount 110 \
     --agent-secret "$AGENT_SECRET" --json
 ```
 
-Three shapes cover every run. An admitted decision, with the ledger the run
+Four shapes cover every run. An admitted decision, with the ledger the run
 observed:
 
 ```json
@@ -102,9 +102,29 @@ track:
 {"outcome":"allowed","tx_hash":"4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8","ledger":4566285,"network":"testnet"}
 ```
 
+A run that never produced an admission verdict, or whose submission failed —
+here a submitted transfer that was never confirmed. The hash is still present so
+the transaction stays trackable:
+
+```json
+{"outcome":"failed","reason":"timeout","tx_hash":"4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8","ledger":4566285,"network":"testnet"}
+```
+
+That same shape covers a transaction the RPC refused
+(`{"outcome":"failed","reason":"submission_failed",...}`), an unsigned
+`preflight` (`unsigned_simulation`), and a failed on-chain inclusion
+(`tx_failed`, with its `tx_hash`).
+
 `ledger` is absent where the command never queries one (`check`), and `network`
 is absent where no preset named the endpoint (a custom `--rpc-url`); neither is
 guessed.
+
+Every example above is safe to copy as-is: the agent secret is passed by
+reference (`"$AGENT_SECRET"`) rather than written on the command line, and the
+object never contains the seed, an address, or a signature — only the five
+fields below. When pasting a real run into an issue or a report, the guard and
+recipient addresses and the `tx_hash` are public, but treat the surrounding
+`AGENT_TX_DEBUG` envelope as sensitive: it prints signed XDR, never the seed.
 
 ### Fields
 
@@ -148,8 +168,8 @@ On a `failed` run the symbol names the failure itself:
 
 ### Subcommands without a transfer verdict
 
-- `status` already prints a single documented JSON object (below); `--json` is
-  accepted there and does not change that output.
+- `status` and `verify` already print a single documented JSON object (below);
+  `--json` is accepted there and does not change that output.
 - `policy` prints `null` or the rendered policy as prose by default, and a
   single `{"policy": ...}` object under `--json` (the same rendering, as a JSON
   string).
@@ -159,9 +179,22 @@ On a `failed` run the symbol names the failure itself:
   never produce an object.
 
 For the subcommands that produce a verdict (`check`, `preflight`, `transfer`,
-`heartbeat`), exit codes are identical with and without `--json` — the
-`preflight` table below — so switching a fixture or a script to the structured
-output cannot change what either of them treats as success.
+`heartbeat`), exit codes are identical with and without `--json`, so switching
+a fixture or a script to the structured output cannot change what either of
+them treats as success:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Admitted, or a policy block that `--expect-blocked` expected. |
+| `1` | Blocked by policy, rejected pre-broadcast, or `failed` (`expect_block_unmet`, `submission_failed`, `tx_failed`, `timeout`); also a usage error, in both modes. |
+| `2` | `preflight` without an agent secret: admission is inconclusive (`unsigned_simulation`). |
+| `3` | RPC timeout, transport, or HTTP failure. |
+| `4` | JSON-RPC rejection or an invalid RPC response. |
+
+Exit codes `3` and `4` end the run inside the RPC layer before any verdict
+exists, so they print no object even under `--json` (the diagnostic goes to
+stderr). A driver should read a missing object with a nonzero exit as a
+transport failure rather than as an absent verdict.
 
 ## Read-only diagnostics
 
@@ -192,6 +225,68 @@ Example:
   "now": 1788863857
 }
 ```
+
+### `verify`
+
+Confirm the live configuration in one read-only pass: the policy hash, the pause
+and freeze state, and the registered admin and agent key.
+
+```bash
+agent-tx verify --guard C...
+```
+
+It simulates the contract's own `status()` and `policy_hash()` reads and fetches
+the instance entry, so it signs nothing, submits nothing, and writes nothing —
+run it as often as needed, including as a scheduled drift check. RPC failures
+exit `3`/`4` like every other subcommand; a readable configuration always exits
+`0`.
+
+Example (a freshly deployed, policy-installed guard with the DMS disabled):
+
+```json
+{
+  "guard": "C...",
+  "network": "testnet",
+  "ledger": 123456,
+  "initialized": true,
+  "admin": "G...",
+  "agent_pubkey": "<64 hex characters>",
+  "policy_version": 1,
+  "policy_hash": "<64 hex characters>",
+  "status": {
+    "admin_frozen": false,
+    "dms_grace_secs": 0,
+    "has_policy": true,
+    "heartbeat_expired": false,
+    "heartbeat_expires_at": null,
+    "last_heartbeat": 1788855212,
+    "now": 1788863857,
+    "outside_active_window": false,
+    "paused": false,
+    "policy_revision": 1,
+    "window_remaining": 500
+  }
+}
+```
+
+Fields:
+
+- `guard`, `network` (absent for a custom `--rpc-url`), `ledger`: what was read.
+- `initialized`, `admin`, `agent_pubkey`, `policy_version`: the instance
+  configuration (`initialize`, SPEC §7). `null` before initialization.
+- `policy_hash`: SPEC §7.3 digest, or `NO_POLICY_DIGEST`
+  (`e3b0c4…b855`) when no policy is installed.
+- `status`: the contract's `status()` snapshot verbatim (SPEC §7), including
+  `paused` and `outside_active_window`.
+
+A `policy_hash` that differs from the value recorded at deployment means the
+policy changed — every field, including `paused`, is part of the digest.
+
+The command reads `status()` and `policy_hash()`, so a guard whose WASM predates
+those entrypoints (the recorded `phase1-testnet` fixture does not export
+`policy_hash`) ends in a simulation error naming the missing function instead of
+a configuration object. That is a property of the old deployment, not a
+wrong-address or wrong-network symptom.
 
 ### `policy`
 
