@@ -367,7 +367,7 @@ AGENT_TX_DEBUG=1 agent-tx check --guard C... --asset C... --to G... --amount 110
 
 ## Prototype for SDK signing path
 
-This tool serves as the prototype for the SDK signing path. Its design decisions — particularly the five-step flow, strict input validation, and separation of read-only vs submission commands — are informed by the architecture described in [ARCHITECTURE.md](../../ARCHITECTURE.md). The SDK will follow the same principles for constructing and signing Soroban transactions on behalf of the guard's custom account.
+This tool serves as the prototype for the SDK signing path. Its design decisions — particularly the five-step flow, strict input validation, and separation of read-only vs submission commands — are informed by the architecture described in [docs/architecture.md](../../docs/architecture.md). The SDK will follow the same principles for constructing and signing Soroban transactions on behalf of the guard's custom account.
 
 ## Troubleshooting
 

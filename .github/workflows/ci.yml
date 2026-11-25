@@ -108,7 +108,11 @@ jobs:
       - name: Verify README claims
         run: scripts/verify-readme.sh
 
-      - name: Verify documentation reachability
+      # Issue #630: one action runs both directions of documentation integrity —
+      # every local Markdown link resolves, and every docs/ page is reachable
+      # from docs/SUMMARY.md. Failures name the source file and the broken
+      # target, so a contributor can fix the link without reading the script.
+      - name: Verify documentation links and SUMMARY reachability
         run: scripts/verify-docs-reachability.sh
 
       # Issue #331: README, SPEC §2 and docs/enforcement-scope.md deliberately

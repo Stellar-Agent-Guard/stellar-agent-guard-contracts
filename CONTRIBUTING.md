@@ -48,9 +48,9 @@ cargo build --release --target wasm32v1-none
 # 7. Check the release WASM for panic/unwrap strings
 bash scripts/check-wasm-panic-strings.sh
 
-# 8. Audit README claims, verify docs reachability, and check that the
-#    enforcement-scope statement matches across SPEC §2, README, and
-#    docs/enforcement-scope.md.
+# 8. Audit README claims, verify Markdown link integrity and docs reachability,
+#    and check that the enforcement-scope statement matches across SPEC §2,
+#    README, and docs/enforcement-scope.md.
 scripts/verify-readme.sh
 scripts/verify-docs-reachability.sh
 scripts/check-enforcement-scope.sh
@@ -122,7 +122,8 @@ workflow in `.github/workflows/`. What gets synced, what triggers a sync, how
 to preview a change, who can publish, and which file wins between
 `gitbook-docs.yaml` and `docs/SUMMARY.md` are documented in
 [`docs/README.md`](docs/README.md). Read that before adding, moving, or renaming
-a page; after any such change, run `scripts/verify-docs-reachability.sh`.
+a page; after any such change, run `scripts/verify-docs-reachability.sh`, which
+also checks that every repository-local Markdown link resolves.
 
 The `stellar` CLI cannot sign Soroban authorization entries whose address is a
 contract. Heartbeat testing uses the guard contract's own address, so the CLI
