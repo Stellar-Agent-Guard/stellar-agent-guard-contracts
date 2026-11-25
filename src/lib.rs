@@ -118,6 +118,17 @@ mod event_types {
         pub(super) by: Address,
     }
 
+    /// Agent-initiated self-lock: data `at` — the ledger time the lock was
+    /// taken — and `revision` — the `PolicyRevision` in force when it was
+    /// taken, so telemetry can attribute the halt to the exact policy
+    /// generation (issue #306, SPEC §9).
+    #[contractevent]
+    #[derive(Clone)]
+    pub(super) struct EventSelfLocked {
+        pub(super) at: u64,
+        pub(super) revision: u64,
+    }
+
     /// Admin unfreeze: data `by` (the admin address that acted) plus
     /// `rearmed_dms: bool` — whether the call also re-armed the dead-man-switch
     /// clock by changing `LastHeartbeat` (SPEC §5: the admin's signature is the
@@ -662,6 +673,13 @@ fn emit_initialized(env: &Env, by: &Address, agent_pubkey: &BytesN<32>) {
 }
 fn emit_frozen(env: &Env, by: &Address) {
     EventFrozen { by: by.clone() }.publish(env);
+}
+fn emit_self_locked(env: &Env, at: u64) {
+    EventSelfLocked {
+        at,
+        revision: current_revision(env),
+    }
+    .publish(env);
 }
 fn emit_unfrozen(env: &Env, by: &Address, rearmed_dms: bool) {
     EventUnfrozen {
