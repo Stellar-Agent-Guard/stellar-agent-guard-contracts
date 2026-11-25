@@ -199,3 +199,10 @@ cd tools/agent-tx && cargo build --release      # submission helper
 3. Install the scenario policies (JSON in `--config`), then run the `agent-tx` invocations above. Use `--expect-blocked` for scenarios 2–5.
 
 The five blocked/emitted events above are the contract's own `event_auth_checked` topics — grep the enforced-simulation output for `blocked, <reason>` to confirm each.
+
+## Packaging evidence for an incident
+
+This page is the published, steady-state evidence set. For a live incident, collect the same
+material — policy hash, transaction hashes, events, toolchain versions — in the redaction-safe
+[incident evidence bundle](operations/incident-evidence-bundle.md) format instead of pasting raw
+output, so the record can be shared without exposing keys.

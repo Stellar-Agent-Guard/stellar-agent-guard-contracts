@@ -223,8 +223,37 @@ Keep these with the deployment, because every later incident question starts fro
 - `policy_hash` after the first install, and the `set_policy` transaction;
 - `dms_grace_secs` and the heartbeat cadence the agent runtime is configured with.
 
+## Announcing a release to sibling repositories
+
+Downstream consumers pin bytes, not "latest". The dashboard currently pins a single WASM hash,
+so **every release that changes the artifact invalidates that pin** and the dashboard cannot
+deploy the new contract until someone updates it by hand. Treat the announcement as part of the
+release, not a follow-up:
+
+- The GitHub Release body (or the PR that cuts the tag) states the tag, the released
+  `stellar_agent_guard_contracts.wasm.sha256`, and where `provenance.txt` and `sbom.cdx.json`
+  live. Do not announce a short hash prefix — consumers need the full 64 hex characters.
+- Link the consumer-side tracking in the same announcement: in the dashboard repository,
+  multi-artifact support is tracked by
+  [issue #13](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/13),
+  the pinned-artifact maintainer checklist by
+  [issue #561](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/561),
+  and deploy-time bytecode provenance by
+  [issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/290).
+- The cross-repo dependency is tracked here as
+  [issue #90](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/90).
+  A release that silently changes the hash re-opens it.
+
+A release whose hash is not announced is still valid on-chain; it is simply invisible to a
+consumer that pins the previous hash. The announcement is what turns a published artifact into a
+deployable one.
+
 ## See also
 
+- [Rollback and policy recovery](rollback-and-recovery.md) — safe recovery after a bad policy
+  installation, and the difference between pause, replacement, and key rotation.
+- [Incident evidence bundle](incident-evidence-bundle.md) — the redaction-safe evidence layout
+  for an incident review.
 - [Migration guide](migration-guide.md) — moving an existing funded wallet into the account.
 - [Incident playbook — DMS-frozen, admin key unavailable](incident-playbook-admin-key-lost.md) —
   what arming the dead-man switch commits you to.
