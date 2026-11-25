@@ -1,0 +1,21 @@
+# WASM size budget for the deployable contract artifact (issue #68).
+#
+# Artifact measured when this budget was committed:
+#   target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
+# built with the repository's real release command:
+#   cargo build --release --target wasm32v1-none
+# on the pinned toolchain in rust-toolchain.toml.
+#
+# Baseline: 105716 bytes
+# Budget:   111002 bytes (= ceil(105716 * 1.05), about 5% headroom)
+#
+# To increase the budget deliberately:
+#   1. Rebuild the WASM with `cargo build --release --target wasm32v1-none`.
+#   2. Measure the new artifact (`wc -c < target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm`).
+#   3. Update `bytes` below to the new size plus the intended headroom.
+#   4. Explain the size increase and its rationale in the PR.
+# Never raise this number just to make CI green.
+#
+# Exactly one `bytes=<positive integer>` line is required. Comments and blank
+# lines are ignored.
+bytes=111002
