@@ -31,6 +31,9 @@ mod engine_property_tests;
 #[cfg(test)]
 mod policy_preset_tests;
 
+#[cfg(test)]
+mod malformed_scval_fixtures_tests;
+
 use engine::{cap_metrics, contains_addr, decide, effective_per_tx_cap, AccountState, Decision};
 use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
 use soroban_sdk::{
@@ -1684,7 +1687,7 @@ pub use policy_engine_type::PolicyEngineClient;
 
 // ── Test utilities (exposed via `testutils` feature) ──────────────────────
 /// Test-only access to the decision engine and Soroban helpers.
-#[cfg(feature = "testutils")]
+#[cfg(any(test, feature = "testutils"))]
 #[allow(clippy::must_use_candidate, clippy::len_without_is_empty)]
 #[allow(missing_docs)] // Test-only helper re-exports are not contract API.
 pub mod testutils {

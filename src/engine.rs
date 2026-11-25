@@ -276,24 +276,29 @@ pub fn effective_per_tx_cap(cfg: &PolicyConfig, asset: &Address) -> Option<i128>
 // ── Context parsing (SPEC §6) ────────────────────────────────────────────
 
 /// Classifies one auth context into a [`ParsedCall`] (SPEC §6); test-only entry point.
-#[cfg(feature = "testutils")]
+///
+/// Symbols are host-allocated objects, so this test entry point builds the two
+/// constant asset function names per call; the production `decide` path builds
+/// them once per authorization check and reuses them across contexts (issue #298).
+#[cfg(any(test, feature = "testutils"))]
 #[allow(clippy::must_use_candidate)]
 pub fn parse_call(env: &Env, self_addr: &Address, ctx: &Context, cfg: &PolicyConfig) -> ParsedCall {
-    parse_call_inner(env, self_addr, ctx, cfg)
+    let fn_transfer = Symbol::new(env, "transfer");
+    let fn_transfer_from = Symbol::new(env, "transfer_from");
+    parse_call_with_symbols(env, self_addr, ctx, cfg, &fn_transfer, &fn_transfer_from)
 }
 
-#[cfg(not(feature = "testutils"))]
+/// Core classifier. The two constant asset-function symbols are passed in so
+/// `decide` can construct them once per authorization check instead of once
+/// per context (issue #298).
 #[allow(clippy::must_use_candidate)]
-fn parse_call(env: &Env, self_addr: &Address, ctx: &Context, cfg: &PolicyConfig) -> ParsedCall {
-    parse_call_inner(env, self_addr, ctx, cfg)
-}
-
-#[allow(clippy::must_use_candidate)]
-fn parse_call_inner(
+fn parse_call_with_symbols(
     env: &Env,
     self_addr: &Address,
     ctx: &Context,
     cfg: &PolicyConfig,
+    fn_transfer: &Symbol,
+    fn_transfer_from: &Symbol,
 ) -> ParsedCall {
     match ctx {
         Context::Contract(ContractContext {
@@ -308,11 +313,9 @@ fn parse_call_inner(
             }
             let is_asset = contains_addr(&cfg.assets, contract);
             let is_protocol = cfg.protocols.iter().any(|r| r.contract == *contract);
-            let fn_transfer = Symbol::new(env, "transfer");
-            let fn_transfer_from = Symbol::new(env, "transfer_from");
 
-            if is_asset && (fn_name == &fn_transfer || fn_name == &fn_transfer_from) {
-                let (to_idx, amt_idx) = if fn_name == &fn_transfer {
+            if is_asset && (fn_name == fn_transfer || fn_name == fn_transfer_from) {
+                let (to_idx, amt_idx) = if fn_name == fn_transfer {
                     (1u32, 2u32)
                 } else {
                     (2u32, 3u32)
@@ -321,7 +324,7 @@ fn parse_call_inner(
                 // Extra trailing args or short arg lists are rejected -- we do not
                 // partially parse a call whose effective meaning we do not fully
                 // understand (SPEC section 6.2). Falling through to Unknown = default deny.
-                let expected_arity: u32 = if fn_name == &fn_transfer { 3 } else { 4 };
+                let expected_arity: u32 = if fn_name == fn_transfer { 3 } else { 4 };
                 if args.len() != expected_arity {
                     return ParsedCall::Unknown {
                         contract: contract.clone(),
@@ -449,9 +452,14 @@ pub fn decide(
     let mut pending_recipient_amounts: Vec<i128> = Vec::new(env);
     let mut pending_protocol_calls: u32 = 0;
     let mut all_passed = true;
+    // Constant function names are host-allocated symbols: build them once for
+    // the whole authorization check rather than once per context (#298).
+    let fn_transfer = Symbol::new(env, "transfer");
+    let fn_transfer_from = Symbol::new(env, "transfer_from");
 
     for ctx in contexts.iter() {
-        let call = parse_call(env, self_addr, &ctx, cfg);
+        let call =
+            parse_call_with_symbols(env, self_addr, &ctx, cfg, &fn_transfer, &fn_transfer_from);
         let ctx_decision = match call {
             ParsedCall::SelfCall { fname } => {
                 // SPEC §6.1: the fixed self-call allowlist. `self_lock` is a
