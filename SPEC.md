@@ -1299,6 +1299,11 @@ pub fn self_lock(env: Env)
     // Blocked by the §4 account gates like any other authorization.
 
 // ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ──
+pub fn admin(env: Env) -> Option<Address>             // registered policy admin (issue #302);
+                                                      // None before initialize
+pub fn agent_pubkey(env: Env) -> Option<BytesN<32>>   // registered agent Ed25519 public key
+                                                      // (issue #302); tracks rotate_agent_key;
+                                                      // None before initialize
 pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
 pub fn policy_version(env: Env) -> u32                // policy-model format version (issue #339);
                                                       // 0 before initialize, never traps

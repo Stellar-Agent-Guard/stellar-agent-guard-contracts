@@ -46,6 +46,8 @@ pub fn freeze(env: Env)
 pub fn self_lock(env: Env)
 pub fn refresh_deadman(env: Env)
 pub fn unfreeze(env: Env)
+pub fn admin(env: Env) -> Option<Address>
+pub fn agent_pubkey(env: Env) -> Option<BytesN<32>>
 pub fn policy(env: Env) -> Option<PolicyConfig>
 pub fn policy_version(env: Env) -> u32
 pub fn policy_hash(env: Env) -> BytesN<32>
