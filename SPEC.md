@@ -2162,3 +2162,56 @@ Per [`CONTRIBUTING.md` Coding Standard 6](CONTRIBUTING.md#coding-standards) and 
      - The change must provide a deterministic unit/integration test in the Soroban test environment ([`src/integration_tests.rs`](src/integration_tests.rs)) covering the exact enforcement path.
      - The PR description and proof documentation must include a written rationale explaining why testnet demonstration is impractical and how the deterministic test suite validates the invariant.
 
+
+## Appendix A — Scoped session grants (research spike, issue #308)
+
+**Status:** Decision recorded, **not implemented**. This appendix is
+non-normative for v1: no storage key, decision row, error variant, event, or
+`__check_auth` behavior described here exists on-chain. The full analysis is
+[`docs/research/scoped-session-grants.md`](docs/research/scoped-session-grants.md).
+
+**Question.** Should an admin be able to mint a short-lived, amount-capped
+capability ("session grant") that the agent consumes between policy edits,
+instead of editing the account-global policy to adjust a routine budget?
+
+**Current state.** The motivating "every policy edit resets the window" premise
+does not hold at this revision: `set_policy` preserves the rolling window and
+DMS clock (issue #289), and `increase_window_cap` raises the global cap in place
+without resetting the ledger (issue #349). The remaining gap is a budget that is
+*scoped* (asset + recipient set), *time-boxed*, and *revocable* without an
+account-wide policy rewrite.
+
+**Decision.** Build in v2 as a **contract-stored grant keyed by a monotonic
+nonce**. Reject the off-chain signed-grant representation for v2: `__check_auth`
+has no side-channel for a grant, so it would require changing
+`CustomAccountInterface::Signature` from `BytesN<64>`, adds a second admin trust
+root, and still needs on-chain consumption state to prevent replay.
+
+**v2 shape (bounded summary).**
+
+- One live `SessionGrant` per account in persistent storage, plus a monotonic
+  `LastGrantNonce`; admin-only `mint_grant` and `revoke_grant`.
+- Bound to the contract, admin, `AgentPubkey`, `policy_revision`, asset,
+  recipient scope, `per_tx_cap`, `total_cap`, and `expires_at`.
+- **Eligibility intersects policy:** a grant cannot bypass `AdminFrozen`, DMS,
+  `NoPolicy`, `paused`, the active window, asset/recipient allowlists, or call
+  classification. It affects only monetary limits on an already-admissible SAC
+  `transfer` / `transfer_from`.
+- **Monetary caps substitute on overflow:** the policy path is evaluated first;
+  a matching grant is consulted only when the policy blocks with
+  `PerTxCapExceeded` or `WindowCapExceeded`. Grant-funded spend is tracked in
+  the grant's `consumed` counter, **not** in `WindowState`; if the grant does not
+  cover the call, the original policy denial reason is returned.
+- **Revocation is lazy and explicit:** `revoke_grant` takes effect on the next
+  authorization; any policy-mutating admin call, `revoke_policy`, or
+  `rotate_agent_key` makes outstanding grants inert through the revision/key
+  binding. Revocation never reverses an already-settled spend, and no
+  background process exists or is needed. This is the same lazy model as §5 and
+  §9.5.
+- A compromised agent key can consume outstanding grants; short lifetimes, small
+  caps, and key rotation bound that loss. Grants add no new signer or bearer
+  authority.
+
+**Out of scope here:** contract code, storage keys, error variants, events,
+ABI snapshots, and testnet proofs. The v2 build requires the full Phase-1 gate
+plus testnet evidence per §11.1.
