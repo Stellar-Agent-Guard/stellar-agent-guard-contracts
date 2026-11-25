@@ -182,7 +182,7 @@ fn parsed_call_kinds() -> BTreeSet<String> {
 /// The engine with its test module removed — the branches that ship.
 fn engine_source() -> String {
     let engine = read_repo_file(ENGINE);
-    match engine.split_once("#[cfg(test)]") {
+    match engine.split_once("#[cfg(test)]\nmod tests {") {
         Some((shipped, _tests)) => shipped.to_owned(),
         None => engine,
     }

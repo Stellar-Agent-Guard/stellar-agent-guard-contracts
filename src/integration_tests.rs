@@ -2668,6 +2668,19 @@ fn test_only_decision_trace_covers_allow_deny_and_malformed_paths() {
         DecisionGate::ActiveWindow,
         DecisionGate::Classified,
     ];
+    let transfer_context = |to: &Address| {
+        let args = soroban_sdk::vec![
+            &h.env,
+            h.guard.clone().into_val(&h.env),
+            to.clone().into_val(&h.env),
+            5_i128.into_val(&h.env)
+        ];
+        Context::Contract(ContractContext {
+            contract: h.asset.clone(),
+            fn_name: Symbol::new(&h.env, "transfer"),
+            args,
+        })
+    };
 
     let mut ledger = Ledger::empty(&h.env);
     let (verdicts, trace) = decide_traced(
@@ -2677,10 +2690,7 @@ fn test_only_decision_trace_covers_allow_deny_and_malformed_paths() {
         &state,
         &mut ledger,
         1_000,
-        soroban_sdk::vec![
-            &h.env,
-            crate::policy_engine_type::transfer_context(&h.env, &h.asset, &recv, 5)
-        ],
+        soroban_sdk::vec![&h.env, transfer_context(&recv)],
     );
     assert_eq!(verdicts, std::vec![Decision::Allowed]);
     let mut expected = prefix.to_vec();
@@ -2703,10 +2713,7 @@ fn test_only_decision_trace_covers_allow_deny_and_malformed_paths() {
         &state,
         &mut ledger,
         1_000,
-        soroban_sdk::vec![
-            &h.env,
-            crate::policy_engine_type::transfer_context(&h.env, &h.asset, &other, 5)
-        ],
+        soroban_sdk::vec![&h.env, transfer_context(&other)],
     );
     assert_eq!(
         verdicts,
