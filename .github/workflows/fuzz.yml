@@ -19,3 +19,17 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Run bounded check-auth smoke test
         run: cargo +nightly fuzz run check_auth_full_path --fuzz-dir fuzz -- -max_total_time=60
+
+  # Issue #607: time-based emergency paths get bounded malformed-input
+  # pressure too. The target also asserts the account-gate precedence, so a
+  # panic or an unstable reason fails the job.
+  heartbeat-input:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run bounded heartbeat smoke test
+        run: cargo +nightly fuzz run heartbeat_input --fuzz-dir fuzz -- -max_total_time=60 -max_len=4096

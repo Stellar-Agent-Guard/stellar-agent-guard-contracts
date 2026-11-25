@@ -185,6 +185,23 @@ agent-tx transfer --guard CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4C
 
 ---
 
+## Local release-mode integration run
+
+The testnet scenarios above prove the deployed contract. To exercise the same
+`__check_auth` and enforcement paths locally under release settings (optimizer,
+LTO, and `overflow-checks = true` differ from a debug build), run from a clean
+checkout with the pinned toolchain:
+
+```bash
+cargo test --release integration_tests:: -- --test-threads=1
+```
+
+This selects the host-routed integration suite in `src/integration_tests.rs` and
+is reproducible without network access or testnet accounts. `--test-threads=1`
+keeps failure output in a stable order. See
+[CONTRIBUTING.md § Release-mode integration tests](../CONTRIBUTING.md#release-mode-integration-tests-issue-605)
+for when to run it alongside the full `cargo test` gate.
+
 ## How to re-run
 
 1. Build the contract and submission helper:

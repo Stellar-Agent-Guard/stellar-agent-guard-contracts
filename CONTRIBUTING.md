@@ -80,6 +80,28 @@ One CI step has no separate command: the **unwrap/expect guard** greps
 (see Coding Standards item 1). Keep that rule in mind while editing enforcement
 code; CI enforces it even if no test catches it.
 
+### Release-mode integration tests (issue #605)
+
+Debug and release builds can differ in optimizer behavior and panic-string
+output, so run the highest-value enforcement tests once with release settings
+before opening a PR that touches `__check_auth`, the decision engine, or the
+storage layout:
+
+```bash
+# Reproducible from a clean checkout with the pinned toolchain.
+cargo test --release integration_tests:: -- --test-threads=1
+```
+
+The filter selects the host-routed integration suite (`src/integration_tests.rs`,
+compiled as `crate::integration_tests`), which exercises the real entry points
+and enforcement scenarios rather than the pure-engine unit tests. The release
+profile applies `opt-level = "z"`, LTO, `overflow-checks = true`,
+`debug-assertions = false`, and `panic = "abort"` to contract code, so this run
+catches arithmetic and assertion behavior that a debug-only run can mask.
+`--test-threads=1` keeps failure output in a stable order. The full debug gate
+(`cargo test`) still covers the unit and fuzz-fixture suites; this command is an
+additional, not a replacement, check.
+
 The pin is what makes the released WASM hash verifiable: a `stable` toolchain
 would move and change the bytes without any change to the repository. Bumping
 `channel` in `rust-toolchain.toml` changes the released artifact hash, so do it

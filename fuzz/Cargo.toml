@@ -29,8 +29,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "heartbeat_input"
+path = "fuzz_targets/heartbeat_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "seed-policy-config"
 path = "src/bin/seed_policy_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seed-heartbeat"
+path = "src/bin/seed_heartbeat.rs"
 test = false
 doc = false
 bench = false

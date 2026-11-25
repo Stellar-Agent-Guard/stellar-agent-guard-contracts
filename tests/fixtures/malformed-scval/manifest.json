@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Minimized malformed ScVal fixtures for the policy decoder. Each file is a valid XDR ScVal map that the production shape guard and PolicyConfig conversion must reject with the stable InvalidConfig error. They are byte-identical to the committed fuzz corpus entries named in `corpus_entry`, so reproducing a failure needs no regenerator.",
+  "reproduction": "cargo +nightly fuzz run policy_config_deserialization --fuzz-dir fuzz -- tests/fixtures/malformed-scval/<file>",
+  "fixtures": [
+    {
+      "file": "assets-bool-element.xdr",
+      "corpus_entry": "invalid-assets-bool-element",
+      "shape": "`assets` contains ScVal::Bool where the guard requires an address",
+      "expected_error": "InvalidConfig",
+      "bytes": 544
+    },
+    {
+      "file": "assets-muxed-account.xdr",
+      "corpus_entry": "invalid-assets-muxed-account",
+      "shape": "`assets` contains a muxed account, which is not a Contract/Account address the guard admits",
+      "expected_error": "InvalidConfig",
+      "bytes": 712
+    },
+    {
+      "file": "policy-field-typo.xdr",
+      "corpus_entry": "invalid-policy-field-symbol",
+      "shape": "misspelled field key `allow_any_reciPient` and missing `asset_caps`, so the exact-field-set guard rejects it",
+      "expected_error": "InvalidConfig",
+      "bytes": 504
+    }
+  ]
+}
