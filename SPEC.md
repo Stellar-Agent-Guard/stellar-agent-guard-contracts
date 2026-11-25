@@ -676,8 +676,8 @@ entry points.
 | Activation | Admin calls `freeze()`, which sets the persistent `AdminFrozen` flag. | Admin calls `set_policy()` with the complete policy and `paused: true`. |
 | What it blocks | The first decision gate rejects each authorization context with `AdminFrozen`, including heartbeat authorization. | The policy gate rejects each authorization context with `Paused`, including heartbeat authorization. |
 | Reversal | Admin calls `unfreeze()`, which clears `AdminFrozen`. It also sets `LastHeartbeat = now`. | Admin calls `set_policy()` again with the complete policy and `paused: false`. |
-| Side effects | `freeze()` changes no persistent state besides `AdminFrozen` and emits `EventFrozen`. `unfreeze()` also resets `LastHeartbeat` to now and emits `EventUnfrozen`, re-arming the dead-man clock when its timestamp changes (see §5). | Every `set_policy()` replaces the policy, increments `PolicyRevision`, resets the rolling window to empty, sets `LastHeartbeat = now` (re-arming the dead-man clock), and emits `policy_set`. These effects also apply when only `paused` was intended to change. The reset behavior is tracked in [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289). |
-| Incident-response use | Use `freeze()` for an immediate administrative halt when the installed policy and spend window should remain unchanged. Plan for `unfreeze()` to re-arm the dead-man clock. | Use `set_policy()` when intentionally replacing policy as well as changing pause state; do not treat it as a pause-only operation. During an incident it can erase accumulated window spend and restart the dead-man grace period. Dedicated `pause()`/`resume()` functions are proposed in [issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/290), but are not current contract entry points. |
+| Side effects | `freeze()` changes no persistent state besides `AdminFrozen` and emits `EventFrozen`. `unfreeze()` also resets `LastHeartbeat` to now and emits `EventUnfrozen`, re-arming the dead-man clock when its timestamp changes (see §5). | A `set_policy()` that **edits** an installed policy replaces the policy and increments `PolicyRevision`, but leaves the rolling window and the `LastHeartbeat` clock untouched ([issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289)): accumulated spend stays counted and a DMS-expired account stays expired. A **first** install (no policy stored, including an install after `revoke_policy`) seeds an empty window and stamps `LastHeartbeat = now`. Both emit `policy_set`, and both apply even when only `paused` was intended to change. The explicit, admin-attested budget reset is `reset_window()` (§7). |
+| Incident-response use | Use `freeze()` for an immediate administrative halt when the installed policy and spend window should remain unchanged. Plan for `unfreeze()` to re-arm the dead-man clock. | Use `set_policy()` when intentionally replacing policy as well as changing pause state; do not treat it as a pause-only operation. It does **not** refund accumulated window spend or restart the dead-man grace — an edit preserves both (issue #289); only a `revoke_policy` → `set_policy` cycle, which is a first install, starts from a fresh window and a fresh grace. For a pause-only change prefer `pause()`/`resume()` (§7), which flip the flag in place. |
 
 The controls are not interchangeable: clearing one does not clear the other, and the remaining
 gate can continue to deny authorization.
@@ -803,11 +803,11 @@ off the combination, not off the reason:
 
 | Gates true at once | Reason reported | `unfreeze` clears | `set_policy` clears | Trap when only one half is applied |
 |---|---|---|---|---|
-| dead-man + active window | `heartbeat_expired` | the dead-man leg only | both legs (renewed window **and** `LastHeartbeat = now`; §5.1) | `unfreeze` alone leaves the account blocked, now reporting `outside_active_window` |
-| admin freeze + dead-man | `admin_frozen` | both legs (`unfreeze` clears `AdminFrozen` **and** stamps `LastHeartbeat`) | the dead-man leg only | `set_policy` alone leaves it reporting `admin_frozen`; `unfreeze` is the call that ends this pair |
-| admin freeze + active window | `admin_frozen` | the freeze leg only | the window leg (and it re-arms the dead-man clock as a side effect) | `unfreeze` alone leaves it reporting `outside_active_window`; `set_policy` alone leaves `admin_frozen` |
+| dead-man + active window | `heartbeat_expired` | the dead-man leg only | both legs (renewed window **and** `LastHeartbeat = now`) — only via `revoke_policy` → `set_policy`, since a first install stamps `LastHeartbeat` and an edit does not (issue #289); `unfreeze` + an edit also covers both | `unfreeze` alone leaves the account blocked, now reporting `outside_active_window` |
+| admin freeze + dead-man | `admin_frozen` | both legs (`unfreeze` clears `AdminFrozen` **and** stamps `LastHeartbeat`) | neither (an edit preserves the clock; `revoke_policy` → `set_policy` re-arms it) | `set_policy` alone leaves it reporting `admin_frozen`; `unfreeze` is the call that ends this pair |
+| admin freeze + active window | `admin_frozen` | the freeze leg only | the window leg (an edit moves `active_until` and preserves the dead-man clock) | `unfreeze` alone leaves it reporting `outside_active_window`; `set_policy` alone leaves `admin_frozen` |
 | `paused` + active window | `paused` | neither (`unfreeze` never mutates `PolicyConfig`) | both, in one call (`paused: false` + renewed window) | `unfreeze` changes nothing observable: the account still reports `paused` |
-| dead-man + `paused` | `heartbeat_expired` | the dead-man leg only | both (`set_policy` stamps `LastHeartbeat` and installs `paused: false`) | `unfreeze` alone leaves it reporting `paused` |
+| dead-man + `paused` | `heartbeat_expired` | the dead-man leg only | the `paused` leg only — an edit installs `paused: false` but preserves the expired clock (issue #289) | `set_policy` alone leaves it reporting `heartbeat_expired`; the dead-man leg still needs `unfreeze` |
 
 Two structural facts produce every row above, and both are stated in §5.1 but worth restating
 in combination form because they are the trap:
@@ -815,11 +815,12 @@ in combination form because they are the trap:
 - `unfreeze()` performs exactly two state transitions — `AdminFrozen = false` and
   `LastHeartbeat = now`. It cannot touch `paused`, `active_from`, or `active_until`, because
   those live in `PolicyConfig` and it never writes one.
-- `set_policy()` writes the whole `PolicyConfig`, resets the window, **and** stamps
-  `LastHeartbeat = now` (`src/lib.rs`, `set_policy`). It is therefore the only single call that
-  revives an account bound by both the dead-man switch and the active window — and it re-arms
-  the dead-man clock while doing so, which is the same admin-attested re-arm §5 records for
-  `unfreeze`.
+- `set_policy()` writes the whole `PolicyConfig` but, on an **edit**, preserves both the window
+  and `LastHeartbeat` (`src/lib.rs`, `set_policy`, issue #289). It therefore revives an account
+  bound by the active window but **not** one bound by the dead-man switch: an expired clock stays
+  expired through an edit, and the reversal path for expiry remains `unfreeze` (§5.1). Only a
+  first install — no policy stored, including an install after `revoke_policy` — seeds an empty
+  window and stamps `LastHeartbeat = now`; see §7.
 
 Pinned by `heartbeat_expiry_and_active_window_both_firing_reports_heartbeat_expired`
 (`src/engine.rs`), which walks the first row in both directions: with a stale `LastHeartbeat`
@@ -1312,6 +1313,37 @@ impl CustomAccountInterface for PolicyEngine {
     // 5. Events (§9) + TTL refreshes (§9.5); spend-accounting writes only on admission.
 }
 ```
+
+**`set_policy` — what a policy edit does to the window and the dead-man clock (issue #289).**
+An operator-visible statement of the guarantee, not merely the mechanics. `set_policy` on an
+**installed** policy is an *edit*: it replaces `PolicyConfig` and increments `PolicyRevision`,
+and it **preserves the rolling window and the dead-man-switch clock**. The accumulated spend
+stays counted and a DMS-expired account stays expired, so a routine edit — adding a recipient,
+extending the protocol allowlist, changing `per_tx_cap` — never hands the agent a fresh budget
+or a fresh grace period. Caps are therefore **continuous across a policy edit**: the cap in
+force after an edit is the same cap, measured against the same spend ledger.
+
+Continuity is broken in exactly two admin-attested ways, and an operator should read both as
+budget resets rather than as edits:
+
+1. **Editing `window_cap` itself moves the ceiling without resetting the ledger.** The preserved
+   running total is re-compared against the new number, so raising `window_cap` (directly, or via
+   `increase_window_cap`, §3.1) admits spend the old cap would have blocked; lowering it can
+   block an account whose live total already exceeds the new value. The spend history survives;
+   the budget does not.
+2. **`revoke_policy` → `set_policy` is a first install.** `revoke_policy` removes `Policy`
+   *and* `Window`, so the next `set_policy` takes the first-install path: it seeds an empty
+   window and stamps `LastHeartbeat = now`. The agent starts with a full budget and full grace.
+   Anything that must survive a revoke/reinstall cycle has to be re-asserted by the admin.
+
+Only a first install (no policy stored, including an install after `revoke_policy`) seeds an
+empty window and arms the dead-man clock at install time. The explicit, admin-attested zeroing
+of the window is `reset_window()` (below), which touches neither the policy, `PolicyRevision`,
+nor `LastHeartbeat`, and then only when a fresh budget is actually intended. Whether an edit
+*should* reset the window — the behaviour documented here is the resolution of that question —
+is tracked in [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289),
+with the surrounding semantics in [issue #305](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/305)
+and [issue #303](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/303).
 
 `Status` / `CheckResult` / `CheckDetail` / reasons:
 
