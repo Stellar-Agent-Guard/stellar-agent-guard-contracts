@@ -202,7 +202,8 @@ use soroban_sdk::xdr::{
     SorobanCredentials, WriteXdr,
 };
 use soroban_sdk::{
-    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, InvokeError, Symbol, Val,
+    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, InvokeError, Symbol,
+    TryFromVal, Val,
 };
 use std::format;
 
@@ -1206,16 +1207,21 @@ impl Harness {
 
     /// Did the guard emit an `auth_checked` event with `result = allowed`?
     /// `#[contractevent]` prepends the event name to the topic list, so the
-    /// `result` topic (SPEC §9) is at index 1.
+    /// `result` topic (SPEC §9) is at index 1 and the reason at index 2. An
+    /// allowed decision carries the real `ok` reason symbol, never an empty one
+    /// (issue #300).
     fn emitted_allowed_auth(&self) -> bool {
         let want = ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("allowed")).unwrap());
+        let reason = symbol_val("ok");
         self.env
             .events()
             .all()
             .events()
             .iter()
             .any(|e| match &e.body {
-                xdr::ContractEventBody::V0(v0) => v0.topics.get(1) == Some(&want),
+                xdr::ContractEventBody::V0(v0) => {
+                    v0.topics.get(1) == Some(&want) && v0.topics.get(2) == Some(&reason)
+                }
             })
     }
 
@@ -2289,6 +2295,76 @@ fn allow_any_recipient_with_empty_list_still_enforces_both_caps() {
         CheckResult::Blocked(Symbol::new(&h.env, "window_cap_exceeded"))
     );
     h.transfer_expect_blocked(&other, 1);
+}
+
+/// Issue #317: `check()`'s synthetic context must be a faithful replica of the
+/// context the host hands `__check_auth` for the real transfer — SAC
+/// `transfer(from, to, amount)` with `from` = the guarded account, not the
+/// token address.
+///
+/// Nothing in the decision table reads `args[0]` today, so a wrong slot
+/// changes no verdict; the shape is pinned here so the
+/// `from`-is-the-guarded-account validation (issue #10) can land on top of a
+/// pre-flight path that already agrees with on-chain authorization. The second
+/// half of the test runs the identical transfer through both paths and asserts
+/// the same verdict — one allowed, one blocked.
+#[test]
+fn check_and_check_auth_agree_on_the_synthetic_transfer_context() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    h.install_policy(&h.base_policy());
+    h.set_time(1_000);
+
+    // 1. Shape: the synthetic context is `transfer(from, to, amount)` with
+    //    `from` = the account that would authorize it.
+    let synthetic = h.env.as_contract(&h.guard, || {
+        crate::policy_engine_type::transfer_context(&h.env, &h.asset, &recv, 5)
+    });
+    let Context::Contract(ContractContext {
+        contract,
+        fn_name,
+        args,
+    }) = synthetic
+    else {
+        panic!("preflight must build a contract-call context");
+    };
+    assert_eq!(contract, h.asset, "the synthetic call targets the SAC");
+    assert_eq!(fn_name, Symbol::new(&h.env, "transfer"));
+    assert_eq!(args.len(), 3, "SAC transfer arity is exactly 3");
+    let slot = |i: u32| {
+        Address::try_from_val(&h.env, &args.get(i).expect("arg slot")).expect("address arg")
+    };
+    assert_eq!(
+        slot(0),
+        h.guard,
+        "args[0] must be the guarded account (the SAC `from`), not the token address"
+    );
+    assert_eq!(slot(1), recv, "args[1] is the SAC `to`");
+    assert_eq!(
+        i128::try_from_val(&h.env, &args.get(2).expect("amount slot")).expect("i128 arg"),
+        5,
+        "args[2] is the SAC `amount`"
+    );
+
+    // 2. Allowed case: pre-flight and the host-routed authorization agree.
+    let preflight = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check(h.env.clone(), h.asset.clone(), recv.clone(), 5)
+    });
+    assert_eq!(preflight, CheckResult::Allowed);
+    h.transfer(&recv, 5); // `__check_auth` admits the identical transfer
+
+    // 3. Blocked case: pre-flight names the same reason `__check_auth` does.
+    let preflight = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check(h.env.clone(), h.asset.clone(), other.clone(), 5)
+    });
+    assert_eq!(
+        preflight,
+        CheckResult::Blocked(Symbol::new(&h.env, "recipient_not_allowed"))
+    );
+    // `transfer_expect_blocked` re-runs the pre-flight, asserts the host log
+    // carries that same reason, and proves the blocked transfer moved nothing.
+    h.transfer_expect_blocked(&other, 5);
 }
 
 #[test]
@@ -3558,7 +3634,17 @@ fn revoke_policy_is_instant_default_deny() {
 
 // ── revoke_policy mid-flight (issue #95) ────────────────────────────────
 //
-// SPEC §7 documents `revoke_policy` as "Removes Policy and Window ->\n// default-deny immediately", and SPEC §3's storage table makes `Window` the\n// account's only rolling spend ledger. The behaviour those two statements\n// jointly promise is *not* pinned by any test, and the interesting part is\n// precisely the interaction an admin could exploit: because the window is\n// **cleared** (not merely paused), an admin cycling revoke -> set_policy starts\n// the account on a fresh window, so spend history does not survive the cycle.\n// That is admin-attested by design (SPEC §7: "fresh window on every policy\n// change"), so the tests below pin it as intentional rather than let it read\n// as an accident.
+// SPEC §7 documents `revoke_policy` as "Removes Policy and Window ->
+// default-deny immediately", and SPEC §3's storage table makes `Window` the
+// account's only rolling spend ledger. The behaviour those two statements
+// jointly promise is *not* pinned by any test, and the interesting part is
+// precisely the interaction an admin could exploit: because the window is
+// **cleared** (not merely paused), an admin cycling revoke -> set_policy starts
+// the account on a fresh window, so spend history does not survive the cycle.
+// That is admin-attested by design: `set_policy` preserves the window only on
+// an *edit* of an installed policy (issue #289), so with no `Policy` stored
+// the next call is a first install and seeds an empty window (SPEC §7). The
+// tests below pin it as intentional rather than let it read as an accident.
 //
 // SPEC §4 rule 3 is the gate the cleared policy falls through to: with no\n// `Policy` stored, every context blocks with `Reason::NoPolicy`.
 
@@ -5291,6 +5377,47 @@ fn status_reads_never_write_window_or_emit_events() {
     // And spend accounting was untouched: a further 60 transfer must still fit.
     h.transfer(&recv, 60);
     assert_eq!(h.status().window_remaining, Some(0));
+}
+
+#[test]
+fn protocol_only_authorization_persists_the_pruned_window() {
+    // Issue #345: pruning in memory is correct for the current decision, but
+    // without a write the expired entries stay in storage and are re-loaded and
+    // re-summed on every later authorization. A non-spending (protocol-only)
+    // authorization must commit the prune through `save_ledger`.
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    policy.window_secs = 100;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+    h.set_asset_balance(&h.guard, 100);
+
+    h.transfer(&recv, 40);
+    h.set_time(1_001);
+    h.transfer(&recv, 30);
+
+    let before = h.stored_window().expect("admissions persist the window");
+    assert_eq!(before.entries.len(), 2);
+    assert_eq!(before.total, 70);
+
+    // Both entries are expired at 1_101 (ts + window_secs <= now). `heartbeat`
+    // routes through `__check_auth` but is a self-call, so it admits no spend.
+    h.set_time(1_101);
+    h.heartbeat();
+
+    let after = h.stored_window().expect("the window key is still present");
+    assert!(
+        after.entries.is_empty(),
+        "the protocol-only authorization must commit its prune"
+    );
+    assert_eq!(after.total, 0);
+    assert!(
+        after.protocol_call_entries.is_empty(),
+        "a heartbeat must not be counted as a rate-limited protocol call"
+    );
+    assert_eq!(h.status().window_remaining, Some(policy.window_cap));
 }
 
 // ── heartbeat `expires_at` (SPEC §9) ───────────────────────────────────

@@ -30,9 +30,10 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 # Build the contract WASM (Soroban 27 targets wasm32v1-none)
 cargo build --release --target wasm32v1-none
 
-# README claim audit + docs link check
+# README claim audit + docs link check + enforcement-scope drift check
 scripts/verify-readme.sh
 scripts/verify-docs-reachability.sh
+scripts/check-enforcement-scope.sh
 
 # tools/agent-tx is a separate cargo project: fmt, clippy, test, build
 cargo fmt --manifest-path tools/agent-tx/Cargo.toml --check
@@ -45,7 +46,7 @@ cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 
 1. **No `unwrap()` / `expect()` / indexing without bounds in contract code** — the contract runs in the host with `panic = "abort"`; failures on the authorization path must be deliberate `panic_with_error!` calls that surface as stable `Error` reasons, never accidental traps.
 
-2. **Every policy change must update SPEC.md and the tests together** — the decision table and the enforcement-scope statement must stay word-for-word consistent with the code; that consistency is a review requirement, not a nicety.
+2. **Every policy change must update SPEC.md and the tests together** — the decision table and the enforcement-scope statement must stay word-for-word consistent with the code; that consistency is enforced, not merely reviewed. Scope wording is single-sourced in SPEC §2: edit the canonical paragraph there, then paste the identical paragraph into the README and `docs/enforcement-scope.md`. `scripts/check-enforcement-scope.sh` fails the `ci` job when the three copies diverge.
 
 3. **`clippy::all` and `clippy::pedantic` clean** — enforced in CI with `-D warnings`.
 
@@ -251,7 +252,7 @@ pub enum Error {
   ```rust
   Self::NewVariant => "new_variant",
   ```
-- Add `Self::NewVariant` to the `all_errors` array in `Error::from_block_reason(&Symbol) -> Option<Self>` so bidirectional `BlockReason` conversion works cleanly.
+- Add `Self::NewVariant` to the `all_errors` array in `Error::from_block_reason(&Symbol) -> Option<Self>` so bidirectional reason-symbol conversion works cleanly.
 
 #### Step 3: Implement the decision site & update `decision-table.json`
 - Emit the error at its decision site:
@@ -273,7 +274,7 @@ pub enum Error {
   ```
   Indicate whether it is reachable via `check()` preflight reads (`Yes` or `No`, with rationale if unreachable).
 - **SPEC §7 (`pub enum Error` code block)**: Add `NewVariant = 34,` into the markdown code block.
-- *Why:* The deny-list CI check (`scripts/check-spec-coverage.sh`) requires that every variant appears in SPEC §4 or §6 and *exactly once* in the SPEC §7 enum listing.
+- *Why:* The deny-list CI check (`scripts/check-spec-coverage.sh`) requires that every variant appears in SPEC §4 or §6, *exactly once* in the SPEC §7 enum listing, and *exactly once* in the §7.1 mapping table with the code and reason symbol declared in `src/types.rs`.
 
 #### Step 6: Update event vocabulary and glossaries
 - **Consumer vocabulary fixture**: Update [`tests/fixtures/auth-checked-vocabulary.json`](../tests/fixtures/auth-checked-vocabulary.json) by adding an outcome entry under `"outcomes"`:
@@ -318,7 +319,7 @@ Run the following verification checks in order before submitting your pull reque
    ```bash
    ./scripts/check-spec-coverage.sh
    ```
-   Fails if any variant is absent from SPEC §4/§6, absent from the §7 enum listing, or duplicated.
+   Fails if any variant is absent from SPEC §4/§6, absent from or duplicated in the §7 enum listing, or absent/duplicated/drifting in the §7.1 mapping table.
 
 2. **Decision-table drift check**:
    ```bash

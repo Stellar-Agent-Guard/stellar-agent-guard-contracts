@@ -48,9 +48,12 @@ cargo build --release --target wasm32v1-none
 # 7. Check the release WASM for panic/unwrap strings
 bash scripts/check-wasm-panic-strings.sh
 
-# 8. Audit README claims and verify docs reachability
+# 8. Audit README claims, verify docs reachability, and check that the
+#    enforcement-scope statement matches across SPEC §2, README, and
+#    docs/enforcement-scope.md.
 scripts/verify-readme.sh
 scripts/verify-docs-reachability.sh
+scripts/check-enforcement-scope.sh
 
 # 9. tools/agent-tx is a separate cargo project (its own Cargo.toml and
 #    Cargo.lock — not a workspace member), so steps 1-8 never see it. CI gates
@@ -161,10 +164,11 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2)
    must stay word-for-word consistent with the code; that consistency is
    a review requirement, not a nicety. Scope *wording* itself is single-sourced:
-   edit the canonical paragraph in SPEC §2 only — the README and
-   `docs/enforcement-scope.md` carry short excerpts plus a
-   `full statement: SPEC §2` link that auto-follows (re-sync an excerpt only if
-   the quoted sentence itself changes). Copies in sibling repositories
+   edit the canonical paragraph in SPEC §2, then paste the identical paragraph
+   into the README and `docs/enforcement-scope.md` (each keeps its
+   `full statement: SPEC §2` link). `scripts/check-enforcement-scope.sh` runs in
+   the `ci` job and fails on any divergence, so the three copies are mechanically
+   word-for-word, not by convention. Copies in sibling repositories
    (`stellar-agent-guard-sdk`, `stellar-agent-guard-dashboard`) are out of scope
    here; they are tracked in their own issue trackers.
 
@@ -299,6 +303,30 @@ Host exposure of both contract-creation context variants is exercised by
 `contract_creation_denied_through_real_host_path` in
 [`src/integration_tests.rs`](src/integration_tests.rs).
 
+## Architecture decision records (ADRs)
+
+[`docs/adr/`](docs/adr/README.md) records the mechanism decisions that took real
+reasoning, including the alternatives rejected and the observable conditions that
+would reopen them. Read the [ADR index](docs/adr/README.md) before proposing a
+change to the mechanism; if you are re-litigating a settled decision, cite the ADR
+and say which revisit condition has changed.
+
+The settled decisions recorded so far:
+
+1. [ADR-0001](docs/adr/0001-custom-account-abstraction-over-wrapper-contract.md) —
+   Soroban Custom Account Abstraction rather than a wrapper contract.
+2. [ADR-0002](docs/adr/0002-rolling-window-over-fixed-bucket.md) — a genuinely
+   rolling spend window rather than a fixed bucket.
+3. [ADR-0003](docs/adr/0003-ed25519-single-key-over-multisig-v1.md) — one
+   registered Ed25519 key in v1 rather than multi-sig.
+4. [ADR-0004](docs/adr/0004-deny-by-default-classification.md) — deny-by-default
+   classification of auth contexts.
+
+When a change introduces a new settled decision, copy the template from the ADR
+index into `docs/adr/NNNN-short-title.md` and add it to the index. Never rewrite an
+accepted ADR to change its decision: add a new ADR and mark the old one
+`Superseded by ADR-NNNN`.
+
 ## How to add a new Error variant end-to-end
 
 Adding a new denial reason touches at least five places across the repository: the enum, the `reason()` mapping, the decision site & `decision-table.json`, the `SPEC.md` §4/§6/§7 tables, and the consumer event vocabulary. Forgetting any one of these breaks CI.
@@ -334,7 +362,7 @@ Adding a new denial reason touches at least five places across the repository: t
    - Add host-routed integration test in `src/integration_tests.rs` asserting the exact reason string.
 
 ### Verification Commands
-- **Deny-list CI check**: `./scripts/check-spec-coverage.sh` (validates coverage in SPEC §4/§6 and §7 enum).
+- **Deny-list CI check**: `./scripts/check-spec-coverage.sh` (validates coverage in SPEC §4/§6, the §7 enum, and the §7.1 mapping table's codes and reason symbols).
 - **Decision-table drift check**: `cargo test --test decision_table` (ensures `decision-table.json`, SPEC §4, and engine agree).
 - **Auth-checked vocabulary check**: `cargo test --test auth_checked_vocabulary` (verifies `auth-checked-vocabulary.json` coverage).
 - **Discriminant stability check**: `cargo test error_code_discriminant_stability_spec_7`.
@@ -430,8 +458,52 @@ SPEC.md              # Architecture specification (mechanism is settled)
 
 Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the
 [issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues);
-each carries one `complexity: trivial|small|medium|large` label. Good first
-tasks for the Drips Stellar Wave contributor sprints.
+each carries exactly one `complexity: trivial|small|medium|large` label. Good
+first tasks for the Drips Stellar Wave contributor sprints.
+
+### Complexity labels
+
+Complexity describes the **implementation and review burden** of an issue, not
+the number of lines in its diff. A ten-line change to the authorization path can
+be more demanding than a 300-line documentation edit, because it needs deeper
+reasoning, more tests, and a more careful reviewer. When self-selecting work,
+weigh both expected effort **and** the risk of getting it wrong.
+
+| Label | Expected effort | Scope and risk |
+|---|---|---|
+| `complexity:trivial` | ≤ 0.5 day | Very small, isolated changes with minimal risk |
+| `complexity:small` | Approximately 1 day | Limited changes with straightforward validation |
+| `complexity:medium` | 2–3 days | Multiple files or components requiring meaningful testing and review |
+| `complexity:large` | Multi-day | Broad, risky, architectural, or security-sensitive changes |
+
+What the labels mean in practice:
+
+- **`complexity:trivial`** — a typo, a broken link, a narrow script fix, or a
+  documentation clarification. One area of the repository, no behavior change,
+  and a reviewer can verify it by reading the diff. Example: #116 (document
+  this complexity taxonomy).
+- **`complexity:small`** — a contained change with an obvious test story, such
+  as moving documented configuration into standalone files or tightening one
+  CI message. You touch a few files, but no enforcement semantics move.
+  Example: #150 (extract the policy presets into loadable JSON files).
+- **`complexity:medium`** — several files or components, a new CI gate, or a
+  change that needs fixtures plus reviewer judgment about edge cases. Example:
+  #68 (WASM size budget) and #128 (version-aware fixture reason vocabulary).
+- **`complexity:large`** — broad or security-sensitive work: changes to
+  `__check_auth`, the decision table, policy semantics, signature handling, or
+  cross-cutting release/reproducibility guarantees. It needs design review,
+  adversarial tests, and often SPEC updates. Examples: the reproducible-build
+  ratchet (#67) and policy-window semantics changes such as #289.
+
+Rules of thumb for self-selection:
+
+- If you cannot yet explain how the change will be verified, treat it as one
+  level harder than it first looks.
+- If the issue touches fund movement, authorization, or policy validation, the
+  risk level — not the diff size — decides the label.
+- If you are unsure between two labels, pick the smaller one and ask in the
+  issue; maintainers can widen the scope, but an underestimated `large` task is
+  hard to finish well.
 
 ## Dependency drift check
 
