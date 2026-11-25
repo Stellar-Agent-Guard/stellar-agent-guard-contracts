@@ -776,8 +776,10 @@ Each tagged release (`v*`) publishes the contract WASM built by the
 [`release` workflow](.github/workflows/release.yml) — after the full gate
 suite (format, clippy, tests) went green — together with a SHA-256 checksum,
 a build-provenance file (git tag, commit SHA, toolchain version), and a
-CycloneDX SBOM. Prefer this over a local build when you want the exact bytes
-CI blessed:
+CycloneDX SBOM. Every staged asset is also signed with a GitHub artifact
+attestation (Sigstore build provenance), so the checksum is backed by the
+release workflow's OIDC identity rather than only by a filename. Prefer this
+over a local build when you want the exact bytes CI blessed:
 
 ```bash
 VERSION=v0.1.0  # pick a release from the Releases page
@@ -786,13 +788,22 @@ curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_g
 curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm.sha256
 sha256sum -c stellar_agent_guard_contracts.wasm.sha256
 # → stellar_agent_guard_contracts.wasm: OK
+
+gh attestation verify stellar_agent_guard_contracts.wasm \
+  --repo "$REPO" \
+  --signer-workflow "$REPO/.github/workflows/release.yml" \
+  --source-ref "refs/tags/$VERSION" \
+  --deny-self-hosted-runners
+# → Loaded attestations ... / verification succeeded
 ```
 
 Then cross-check `provenance.txt` from the same release (it pins the git tag,
 commit, and `rustc` version the WASM was built from — see
 [Reproducible builds](#reproducible-builds)) and `sbom.cdx.json` for the
-dependency inventory. See [SECURITY.md](SECURITY.md) for the full verification
-steps.
+dependency inventory. The signed-checksum publication recipe and the full
+consumer verification steps are in
+[docs/verification.md](docs/verification.md#signed-release-checksums) and
+[SECURITY.md](SECURITY.md#signed-release-checksums-github-attestations).
 
 ### Reproducible builds
 

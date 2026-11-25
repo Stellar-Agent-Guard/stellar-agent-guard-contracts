@@ -276,7 +276,9 @@ To verify what a deployment contains:
 
 Every tagged release (`v*`) publishes four assets, built only after the full
 gate suite (format, clippy, tests) went green — a failed gate blocks the
-release (see `.github/workflows/release.yml`):
+release (see `.github/workflows/release.yml`). Each staged asset also receives
+a signed GitHub artifact attestation, so the checksum is not just a file next
+to the download (see [Signed release checksums](#signed-release-checksums-github-attestations)):
 
 - `stellar_agent_guard_contracts.wasm` — the deployable contract build.
 - `stellar_agent_guard_contracts.wasm.sha256` — its SHA-256 checksum.
@@ -301,6 +303,57 @@ Before deploying a released artifact:
    release cut after the pin.
 3. Diff the SBOM component list against a locally regenerated one as described
    above.
+
+### Signed release checksums (GitHub attestations)
+
+The checksums are signed, not merely published. The `release` workflow requests
+a GitHub Actions OIDC token and uses
+[`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)
+to publish a Sigstore build-provenance attestation for every staged release
+asset — the WASM, its `.sha256` checksum, `provenance.txt`, `sbom.cdx.json`,
+and any tool artifact published alongside them. The attestation binds each
+file's SHA-256 digest to:
+
+- this repository,
+- the `.github/workflows/release.yml` signer workflow,
+- the tagged commit/ref that triggered the release,
+- the GitHub Actions OIDC identity, recorded in the Sigstore transparency log.
+
+**Who signs.** The signer is the repository's release workflow, not an
+individual holding a long-lived private key. A maintainer with tag-push rights
+triggers it by pushing the `v*` tag (or by dispatching the workflow from that
+tag); the workflow's GitHub-issued OIDC identity is the signing identity.
+There is no release signing key stored in the repository, in a contributor
+checkout, or in a GitHub secret for this path.
+
+**How consumers verify.** Install the GitHub CLI (`gh`) and run the command
+against the downloaded file. `--source-ref` pins the tag, and
+`--signer-workflow` pins the workflow that is allowed to sign:
+
+```bash
+REPO=Stellar-Agent-Guard/stellar-agent-guard-contracts
+VERSION=v0.1.0
+
+gh attestation verify stellar_agent_guard_contracts.wasm \
+  --repo "$REPO" \
+  --signer-workflow "$REPO/.github/workflows/release.yml" \
+  --source-ref "refs/tags/$VERSION" \
+  --deny-self-hosted-runners
+
+gh attestation verify stellar_agent_guard_contracts.wasm.sha256 \
+  --repo "$REPO" \
+  --signer-workflow "$REPO/.github/workflows/release.yml" \
+  --source-ref "refs/tags/$VERSION" \
+  --deny-self-hosted-runners
+```
+
+A successful check prints the verified attestation and its transparency-log
+timestamps. A missing attestation, a different repository/workflow, a different
+tag, or a digest mismatch is a failed verification — do not deploy the file.
+The attestation proves the digest was produced by this release workflow; it
+does not replace the reproducibility and SBOM checks above. Offline or
+air-gapped verification can download the attestation bundle with
+`gh attestation download` and pass it with `--bundle`.
 
 ## Security Considerations
 
