@@ -168,8 +168,8 @@ On a `failed` run the symbol names the failure itself:
 
 ### Subcommands without a transfer verdict
 
-- `status` already prints a single documented JSON object (below); `--json` is
-  accepted there and does not change that output.
+- `status` and `verify` already print a single documented JSON object (below);
+  `--json` is accepted there and does not change that output.
 - `policy` prints `null` or the rendered policy as prose by default, and a
   single `{"policy": ...}` object under `--json` (the same rendering, as a JSON
   string).
@@ -225,6 +225,68 @@ Example:
   "now": 1788863857
 }
 ```
+
+### `verify`
+
+Confirm the live configuration in one read-only pass: the policy hash, the pause
+and freeze state, and the registered admin and agent key.
+
+```bash
+agent-tx verify --guard C...
+```
+
+It simulates the contract's own `status()` and `policy_hash()` reads and fetches
+the instance entry, so it signs nothing, submits nothing, and writes nothing —
+run it as often as needed, including as a scheduled drift check. RPC failures
+exit `3`/`4` like every other subcommand; a readable configuration always exits
+`0`.
+
+Example (a freshly deployed, policy-installed guard with the DMS disabled):
+
+```json
+{
+  "guard": "C...",
+  "network": "testnet",
+  "ledger": 123456,
+  "initialized": true,
+  "admin": "G...",
+  "agent_pubkey": "<64 hex characters>",
+  "policy_version": 1,
+  "policy_hash": "<64 hex characters>",
+  "status": {
+    "admin_frozen": false,
+    "dms_grace_secs": 0,
+    "has_policy": true,
+    "heartbeat_expired": false,
+    "heartbeat_expires_at": null,
+    "last_heartbeat": 1788855212,
+    "now": 1788863857,
+    "outside_active_window": false,
+    "paused": false,
+    "policy_revision": 1,
+    "window_remaining": 500
+  }
+}
+```
+
+Fields:
+
+- `guard`, `network` (absent for a custom `--rpc-url`), `ledger`: what was read.
+- `initialized`, `admin`, `agent_pubkey`, `policy_version`: the instance
+  configuration (`initialize`, SPEC §7). `null` before initialization.
+- `policy_hash`: SPEC §7.3 digest, or `NO_POLICY_DIGEST`
+  (`e3b0c4…b855`) when no policy is installed.
+- `status`: the contract's `status()` snapshot verbatim (SPEC §7), including
+  `paused` and `outside_active_window`.
+
+A `policy_hash` that differs from the value recorded at deployment means the
+policy changed — every field, including `paused`, is part of the digest.
+
+The command reads `status()` and `policy_hash()`, so a guard whose WASM predates
+those entrypoints (the recorded `phase1-testnet` fixture does not export
+`policy_hash`) ends in a simulation error naming the missing function instead of
+a configuration object. That is a property of the old deployment, not a
+wrong-address or wrong-network symptom.
 
 ### `policy`
 
