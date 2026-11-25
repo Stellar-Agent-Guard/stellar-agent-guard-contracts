@@ -179,19 +179,18 @@ fn parsed_call_kinds() -> BTreeSet<String> {
         .collect()
 }
 
-/// The engine with its test module removed — the branches that ship.
+/// The engine source before its test module, including code after any
+/// individually gated test helpers.
 fn engine_source() -> String {
     let engine = read_repo_file(ENGINE);
-    match engine.split_once("#[cfg(test)]") {
+    match engine.split_once("\nmod tests {") {
         Some((shipped, _tests)) => shipped.to_owned(),
         None => engine,
     }
 }
 
-/// Names of every `#[test] fn` in the engine (the tests live *after* the
-/// `#[cfg(test)]` marker, so this reads the whole file). A doc comment may sit
-/// between the attribute and the signature, so the attribute is a sticky flag
-/// rather than an adjacency assumption.
+/// Names of every `#[test] fn` in the engine. A doc comment may sit between
+/// the attribute and the signature, so the scan remembers the attribute.
 fn engine_test_names() -> BTreeSet<String> {
     read_repo_file(ENGINE)
         .lines()

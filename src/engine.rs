@@ -463,6 +463,12 @@ fn parse_call_inner(
 
 // ── Decision ─────────────────────────────────────────────────────────────
 
+struct AccountGates<'a> {
+    policy: Option<&'a PolicyConfig>,
+    state: &'a AccountState,
+    now: u64,
+}
+
 /// Evaluates the SPEC §4 decision table over every auth context, returning one
 /// [`Decision`] per context. Oversized batches return one aggregate blocking
 /// decision before any context is evaluated. Window admissions are staged and
@@ -480,10 +486,8 @@ pub fn decide(
     decide_inner(
         env,
         self_addr,
-        policy,
-        state,
+        AccountGates { policy, state, now },
         ledger,
-        now,
         contexts,
         #[cfg(test)]
         None,
@@ -505,10 +509,8 @@ pub(crate) fn decide_traced(
     let decisions = decide_inner(
         env,
         self_addr,
-        policy,
-        state,
+        AccountGates { policy, state, now },
         ledger,
-        now,
         contexts,
         Some(&mut trace),
     );
@@ -519,13 +521,12 @@ pub(crate) fn decide_traced(
 fn decide_inner(
     env: &Env,
     self_addr: &Address,
-    policy: Option<&PolicyConfig>,
-    state: &AccountState,
+    gates: AccountGates<'_>,
     ledger: &mut Ledger,
-    now: u64,
     contexts: soroban_sdk::Vec<Context>,
     #[cfg(test)] mut trace: Option<&mut DecisionTrace>,
 ) -> alloc::vec::Vec<Decision> {
+    let AccountGates { policy, state, now } = gates;
     let mut verdicts = alloc::vec::Vec::new();
 
     if contexts.len() as usize > crate::types::MAX_AUTH_CONTEXTS {
@@ -1318,9 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_transfer_denial_precedence_covers_every_adjacent_boundary() {
-        let env = Env::default();
-        let sa = self_addr(&env);
+    fn asset_transfer_denial_precedence_matches_decision_table() {
         let decision_table: serde_json::Value =
             serde_json::from_str(include_str!("../decision-table.json"))
                 .expect("decision-table.json is valid JSON");
@@ -1353,7 +1352,12 @@ mod tests {
                 AssetTransferGate::WindowCap,
             ]
         );
+    }
 
+    #[test]
+    fn asset_transfer_denial_precedence_covers_every_adjacent_boundary() {
+        let env = Env::default();
+        let sa = self_addr(&env);
         let mut p = base_policy(&env);
         p.asset_caps = vec![
             &env,
