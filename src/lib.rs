@@ -1462,9 +1462,23 @@ mod policy_engine_type {
     }
 
     /// Build the auth `Context` of a SAC `transfer` call for pre-flight checks.
-    fn transfer_context(env: &Env, asset: &Address, to: &Address, amount: i128) -> Context {
+    ///
+    /// The synthetic context is a replica of the one the host hands
+    /// `__check_auth` for the real transfer, so it must have the SAC's exact
+    /// `transfer(from, to, amount)` shape with `from` = this guarded account
+    /// (`env.current_contract_address()`), never the token address (issue
+    /// #317). The decision table reads only `args[1]`/`args[2]` today; `args[0]`
+    /// is pinned so the `from`-is-the-guarded-account validation (issue #10)
+    /// can land without `check()` and `__check_auth` disagreeing.
+    pub(crate) fn transfer_context(
+        env: &Env,
+        asset: &Address,
+        to: &Address,
+        amount: i128,
+    ) -> Context {
         let mut args: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
-        args.push_back(asset.clone().into_val(env)); // from
+        // SAC `from`: the guarded account that would authorize this transfer.
+        args.push_back(env.current_contract_address().into_val(env));
         args.push_back(to.clone().into_val(env));
         args.push_back(amount.into_val(env));
         Context::Contract(ContractContext {

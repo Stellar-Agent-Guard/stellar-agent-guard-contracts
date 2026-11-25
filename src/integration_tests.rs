@@ -202,7 +202,8 @@ use soroban_sdk::xdr::{
     SorobanCredentials, WriteXdr,
 };
 use soroban_sdk::{
-    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, InvokeError, Symbol, Val,
+    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, InvokeError, Symbol,
+    TryFromVal, Val,
 };
 use std::format;
 
@@ -2294,6 +2295,76 @@ fn allow_any_recipient_with_empty_list_still_enforces_both_caps() {
         CheckResult::Blocked(Symbol::new(&h.env, "window_cap_exceeded"))
     );
     h.transfer_expect_blocked(&other, 1);
+}
+
+/// Issue #317: `check()`'s synthetic context must be a faithful replica of the
+/// context the host hands `__check_auth` for the real transfer — SAC
+/// `transfer(from, to, amount)` with `from` = the guarded account, not the
+/// token address.
+///
+/// Nothing in the decision table reads `args[0]` today, so a wrong slot
+/// changes no verdict; the shape is pinned here so the
+/// `from`-is-the-guarded-account validation (issue #10) can land on top of a
+/// pre-flight path that already agrees with on-chain authorization. The second
+/// half of the test runs the identical transfer through both paths and asserts
+/// the same verdict — one allowed, one blocked.
+#[test]
+fn check_and_check_auth_agree_on_the_synthetic_transfer_context() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    h.install_policy(&h.base_policy());
+    h.set_time(1_000);
+
+    // 1. Shape: the synthetic context is `transfer(from, to, amount)` with
+    //    `from` = the account that would authorize it.
+    let synthetic = h.env.as_contract(&h.guard, || {
+        crate::policy_engine_type::transfer_context(&h.env, &h.asset, &recv, 5)
+    });
+    let Context::Contract(ContractContext {
+        contract,
+        fn_name,
+        args,
+    }) = synthetic
+    else {
+        panic!("preflight must build a contract-call context");
+    };
+    assert_eq!(contract, h.asset, "the synthetic call targets the SAC");
+    assert_eq!(fn_name, Symbol::new(&h.env, "transfer"));
+    assert_eq!(args.len(), 3, "SAC transfer arity is exactly 3");
+    let slot = |i: u32| {
+        Address::try_from_val(&h.env, &args.get(i).expect("arg slot")).expect("address arg")
+    };
+    assert_eq!(
+        slot(0),
+        h.guard,
+        "args[0] must be the guarded account (the SAC `from`), not the token address"
+    );
+    assert_eq!(slot(1), recv, "args[1] is the SAC `to`");
+    assert_eq!(
+        i128::try_from_val(&h.env, &args.get(2).expect("amount slot")).expect("i128 arg"),
+        5,
+        "args[2] is the SAC `amount`"
+    );
+
+    // 2. Allowed case: pre-flight and the host-routed authorization agree.
+    let preflight = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check(h.env.clone(), h.asset.clone(), recv.clone(), 5)
+    });
+    assert_eq!(preflight, CheckResult::Allowed);
+    h.transfer(&recv, 5); // `__check_auth` admits the identical transfer
+
+    // 3. Blocked case: pre-flight names the same reason `__check_auth` does.
+    let preflight = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check(h.env.clone(), h.asset.clone(), other.clone(), 5)
+    });
+    assert_eq!(
+        preflight,
+        CheckResult::Blocked(Symbol::new(&h.env, "recipient_not_allowed"))
+    );
+    // `transfer_expect_blocked` re-runs the pre-flight, asserts the host log
+    // carries that same reason, and proves the blocked transfer moved nothing.
+    h.transfer_expect_blocked(&other, 5);
 }
 
 #[test]
