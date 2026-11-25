@@ -315,6 +315,14 @@ Before deploying a released artifact:
   Adding a protocol is an explicit policy act.
 - Contract creation by the account is denied in v1.
 - Read functions are public (no DoS on reads); policy writes are admin-only.
+- `check`, `check_detailed`, and `check_batch` are deliberately permissionless.
+  They disclose the installed policy and live headroom already available through
+  `policy()`/`status()`, plus a verdict for a caller-supplied hypothetical transfer —
+  no secret or private state is involved. They are read-only: the only on-ledger effect
+  of a submitted read is the §9.5 TTL refresh, which RPC simulation does not persist.
+  The full disclosure analysis, alternatives (auth gate, shared secret, allowlist,
+  on-chain rate limiting), and the read-only proof are in SPEC §7.5 (issue #343);
+  callers needing to throttle probes should do so at their RPC/gateway layer.
 - This contract is **unaudited**. An audit is a prerequisite for mainnet use;
   track it via the issue backlog.
 
