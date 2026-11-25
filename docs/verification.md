@@ -199,3 +199,59 @@ cd tools/agent-tx && cargo build --release      # submission helper
 3. Install the scenario policies (JSON in `--config`), then run the `agent-tx` invocations above. Use `--expect-blocked` for scenarios 2–5.
 
 The five blocked/emitted events above are the contract's own `event_auth_checked` topics — grep the enforced-simulation output for `blocked, <reason>` to confirm each.
+
+---
+
+## Release artifact metadata
+
+A reproducible artifact is still hard to audit if you cannot tell which version,
+commit, target, and toolchain produced it. Every tagged release (`v*`) therefore
+ships metadata beside the bytes, and the
+[release workflow](../.github/workflows/release.yml) runs
+[`scripts/verify-release-artifacts.sh`](../scripts/verify-release-artifacts.sh)
+after staging and before publishing. That check fails the release on a missing
+or mismatched package version, tag, commit SHA, target, pinned toolchain, build
+command, checksum, or SBOM field.
+
+### What is published
+
+| Asset | Meaning |
+|---|---|
+| `stellar_agent_guard_contracts.wasm` | Deployable contract build (`wasm32v1-none`). |
+| `stellar_agent_guard_contracts.wasm.sha256` | SHA-256 of the WASM bytes. |
+| `provenance.txt` | `package`, `version`, `tag`, `commit`, `target`, `build command`, `rustc`, `cargo`, `runner`, and `sha256` for the WASM. |
+| `sbom.cdx.json` | CycloneDX inventory of the crates compiled into the WASM. |
+| `agent-tx` | Linux runner build of the submission helper. |
+| `agent-tx.sha256` | SHA-256 of the tool binary. |
+| `agent-tx.provenance.txt` | The same metadata fields for `agent-tx`, with its host target. |
+
+### Inspect a release
+
+```bash
+VERSION=v0.1.0
+REPO=Stellar-Agent-Guard/stellar-agent-guard-contracts
+gh release download "$VERSION" --repo "$REPO" --dir "release-$VERSION"
+cd "release-$VERSION"
+
+sha256sum -c stellar_agent_guard_contracts.wasm.sha256
+sha256sum -c agent-tx.sha256
+
+grep -E '^(package|version|tag|commit|target|build command|rustc|cargo|runner|sha256):' provenance.txt
+grep -E '^(package|version|tag|commit|target|build command|rustc|cargo|runner|sha256):' agent-tx.provenance.txt
+
+jq '.metadata.component, (.components | length)' sbom.cdx.json
+```
+
+Compare the `version`, `tag`, and `commit` lines with the release page, and the
+`target` line with the artifact you actually intend to use. The `rustc` and
+`cargo` lines must match the pinned `channel` in
+[`rust-toolchain.toml`](../rust-toolchain.toml). A checksum that disagrees with
+the bytes, or a provenance line that disagrees with `Cargo.toml`, is a failed
+verification — do not deploy.
+
+To run the same gate locally against a staged `dist/` directory:
+
+```bash
+GITHUB_REF_NAME=v0.1.0 GITHUB_SHA="$(git rev-parse HEAD)" \
+  scripts/verify-release-artifacts.sh dist
+```
