@@ -516,6 +516,7 @@ pub(crate) fn decide_traced(
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)] // by-value host Vec avoids slice/coercion limits
+#[allow(clippy::too_many_arguments)] // the test-only trace adds an eighth argument to the evaluator
 fn decide_inner(
     env: &Env,
     self_addr: &Address,
@@ -1318,9 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_transfer_denial_precedence_covers_every_adjacent_boundary() {
-        let env = Env::default();
-        let sa = self_addr(&env);
+    fn asset_transfer_denial_precedence_matches_decision_table() {
         let decision_table: serde_json::Value =
             serde_json::from_str(include_str!("../decision-table.json"))
                 .expect("decision-table.json is valid JSON");
@@ -1353,7 +1352,12 @@ mod tests {
                 AssetTransferGate::WindowCap,
             ]
         );
+    }
 
+    #[test]
+    fn asset_transfer_denial_precedence_covers_every_adjacent_boundary() {
+        let env = Env::default();
+        let sa = self_addr(&env);
         let mut p = base_policy(&env);
         p.asset_caps = vec![
             &env,
