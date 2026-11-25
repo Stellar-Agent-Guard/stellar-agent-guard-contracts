@@ -10,15 +10,22 @@ name: Release
 # (toolchain version + commit SHA), and a CycloneDX SBOM (sbom.cdx.json) that
 # inventories every crate and version compiled into that WASM build — the
 # artifact an auditor or bug bounty reviewer needs to know exactly what
-# shipped. See README ("Installation") and SECURITY.md for the verifier side.
+# shipped. Every staged file is also signed with a GitHub artifact attestation
+# (Sigstore build provenance), so consumers get an authentic integrity signal
+# beyond the asset name or an unsigned checksum. See README ("Installation"),
+# docs/verification.md, and SECURITY.md for the verifier side.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
-# Required to create/update the Release and upload assets.
+# `contents: write` creates the Release; `id-token: write` lets the workflow
+# request the OIDC token Sigstore signs with; `attestations: write` publishes
+# the resulting attestations to the repository's attestation store.
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   gates:
@@ -134,6 +141,16 @@ jobs:
             echo "wasm sha256: $(cut -d' ' -f1 dist/stellar_agent_guard_contracts.wasm.sha256)"
           } > dist/provenance.txt
           cat dist/provenance.txt
+
+      # Issue #636: sign every staged release asset, including the checksum
+      # files. The subject glob is intentional: any future release artifact
+      # (for example the agent-tx tool) is covered without editing this step.
+      # `gh attestation verify` checks the signature against this repository,
+      # workflow, commit, and tag — see SECURITY.md and docs/verification.md.
+      - name: Attest release assets (Sigstore build provenance)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3

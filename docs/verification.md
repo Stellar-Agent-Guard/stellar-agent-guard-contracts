@@ -199,3 +199,57 @@ cd tools/agent-tx && cargo build --release      # submission helper
 3. Install the scenario policies (JSON in `--config`), then run the `agent-tx` invocations above. Use `--expect-blocked` for scenarios 2–5.
 
 The five blocked/emitted events above are the contract's own `event_auth_checked` topics — grep the enforced-simulation output for `blocked, <reason>` to confirm each.
+
+---
+
+## Signed release checksums
+
+The release workflow publishes SHA-256 checksums next to the WASM and tool
+assets, and signs every staged file with a GitHub artifact attestation
+(Sigstore build provenance). This gives consumers an authentic integrity signal
+beyond the asset name: the attestation binds the file digest to this repository,
+the `release.yml` workflow, the tagged commit, and a GitHub Actions OIDC
+identity recorded in the transparency log.
+
+### Publication recipe (maintainers)
+
+1. Ensure the release commit is tagged with the version in `Cargo.toml`
+   (`vX.Y.Z`); the workflow's version gate rejects a mismatch.
+2. Push the tag (or dispatch the workflow from the tag):
+   `git push origin vX.Y.Z`.
+3. The `release` job builds the artifacts, writes their `.sha256` and
+   provenance files, runs the metadata gate, and calls
+   `actions/attest-build-provenance` with `subject-path: dist/*`. That signs
+   every file in `dist/` — the WASM, checksum, provenance, SBOM, and any tool
+   artifact staged with them — before the GitHub Release is published.
+4. No maintainer-managed signing key is involved. The signer is the release
+   workflow acting under its GitHub-issued OIDC identity; a maintainer only
+   triggers the tag. The attestations are stored by GitHub and discoverable by
+   artifact digest.
+
+If the attestation step fails, the release job fails before publishing; do not
+work around it by publishing the unsigned files manually.
+
+### Consumer verification
+
+```bash
+REPO=Stellar-Agent-Guard/stellar-agent-guard-contracts
+VERSION=v0.1.0
+
+gh attestation verify stellar_agent_guard_contracts.wasm \
+  --repo "$REPO" \
+  --signer-workflow "$REPO/.github/workflows/release.yml" \
+  --source-ref "refs/tags/$VERSION" \
+  --deny-self-hosted-runners
+```
+
+Run the same command for the checksum and provenance files (and `agent-tx`
+when that asset is present). `--source-ref` pins the tag and
+`--signer-workflow` pins the only workflow allowed to sign. A missing
+attestation, a different repository/workflow/tag, or a digest mismatch is a
+failed verification. For offline verification, download the bundle with
+`gh attestation download` and pass it to `--bundle`.
+
+See [SECURITY.md](../SECURITY.md#signed-release-checksums-github-attestations)
+for the full security rationale and the checksum/reproducibility steps that sit
+alongside the signature.
