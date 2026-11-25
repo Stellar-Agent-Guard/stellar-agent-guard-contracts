@@ -585,17 +585,18 @@ is a per-context telemetry record (`1:1` with contexts, carrying `context_index`
 `integration_tests::empty_auth_contexts_approves_without_emitting_auth_checked`.
 
 Evaluation order inside `__check_auth` (first match wins; all states below are evaluated against
-ledger time, which Soroban code cannot forge):
+ledger time, which Soroban code cannot forge). The order is stated **once**, here; §5, §5.1,
+§6.4 and the README walkthrough reference these row numbers instead of restating them.
 
 | # | Condition | Result |
 |---|---|---|
 | 0 | authorization contains more than `MAX_AUTH_CONTEXTS` contexts | **Block** (`Reason::TooManyAuthContexts`) before evaluating any context |
-| 1 | `AdminFrozen` is set | **Block** (`Reason::AdminFrozen`) |
-| 2 | dead-man switch enabled AND `LastHeartbeat != 0` AND `now - LastHeartbeat > dms_grace_secs` | **Block** (`Reason::HeartbeatExpired`) — automatic freeze, derived lazily, no background write |
-| 3 | no `Policy` stored (revoked or never set) | **Block** (`Reason::NoPolicy`) — default deny |
+| 1 | no `Policy` stored (revoked or never set) | **Block** (`Reason::NoPolicy`) — default deny |
+| 2 | `AdminFrozen` is set (admin `freeze`, or agent `self_lock`; §5) | **Block** (`Reason::AdminFrozen`) |
+| 3 | dead-man switch enabled AND `LastHeartbeat != 0` AND `now - LastHeartbeat > dms_grace_secs` | **Block** (`Reason::HeartbeatExpired`) — automatic freeze, derived lazily, no background write |
 | 4 | `paused` | **Block** (`Reason::Paused`) |
 | 5 | `active_from != 0 && now < active_from`, or `active_until != 0 && now > active_until` | **Block** (`Reason::OutsideActiveWindow`) |
-| 6 | context is a call to this account's own administrative/self functions (`heartbeat`, `check`) | allow into §5 handling (heartbeat state update only) |
+| 6 | context is a call to this account's own administrative/self functions (`heartbeat`, `self_lock`) | allow `heartbeat` (§5 state update) or `self_lock` (§5 agent-initiated freeze); any other self-function is blocked (`Reason::SelfFunctionNotAllowed`) |
 | 7 | per-context classification (§6) applies all allowlist / cap / window rules | allow or **Block** (`Reason::AssetNotAllowed`, `Reason::RecipientNotAllowed`, `Reason::PerTxCapExceeded`, `Reason::WindowCapExceeded`, `Reason::ProtocolNotAllowed`, `Reason::FunctionNotAllowed`, `Reason::UnknownContract`) |
 
 Three §7.1 variants are deliberately outside this decision table, and their absence is
@@ -617,7 +618,7 @@ the v1 engine never emits — the JSON records the engine's behavior in its `not
 audit (see [`docs/scenario-matrix.md`](docs/scenario-matrix.md) findings F-2/F-3); correcting this
 prose is a semantics call for a maintainer, not a doc-generation side effect.
 
-Note the dead-man auto-freeze (`#2`) applies even to `heartbeat` from the registered key: a
+Note the dead-man auto-freeze (`#3`) applies even to `heartbeat` from the registered key: a
 heartbeat arriving after the grace window expired cannot revive the account — revival is the
 admin's `unfreeze` (§7). This is the precise freeze/reversal boundary. The dead-man gate is evaluated against the pre-transaction heartbeat for every context in the transaction, including the heartbeat self-call.
 
@@ -627,15 +628,17 @@ flipped two ways: an admin `set_policy` carrying `paused: true|false` (a policy 
 the window and the DMS clock are preserved), or the dedicated `pause()` / `resume()` entry
 points (§7), which flip the flag **in place** on the stored config without rewriting the rest
 of the policy, without touching the rolling window, and without touching the DMS clock. The
-emergency admin brake remains `AdminFrozen` (rule #1): `freeze` binds even a policyless
-account, while `paused` exists only while a policy is installed.
+emergency admin brake remains `AdminFrozen` (rule #2): `freeze` binds even a policyless
+account, while `paused` exists only while a policy is installed. The agent's `self_lock`
+(§5) sets that same `AdminFrozen` flag through the self-call path.
 
 ### 4.1 Gate cost order (measured)
 
 After the row 0 context bound, the decision table's policy gates remain ordered **semantically
-first** (admin freeze → dead-man → pause → active window → classification), not cost-optimized.
-Benchmarks on the Soroban test environment (see `benches/denial_path_gas.rs`) show the following
-CPU instruction costs for a blocked authorization at each gate:
+first** (policy snapshot → admin freeze / self-lock → dead-man → pause → active window →
+classification), not cost-optimized. Benchmarks on the Soroban test environment (see
+`benches/denial_path_gas.rs`) show the following CPU instruction costs for a blocked
+authorization at each gate:
 
 The fixed context-count check is a constant-time length comparison before the listed gates. On an
 oversized batch it returns one aggregate block, so result allocation and event emission do not
@@ -643,9 +646,9 @@ scale with the oversized context count.
 
 | Gate | Condition | Approx. Instructions |
 |------|-----------|---------------------|
-| 1 | `AdminFrozen` | ~8,750 |
-| 2 | `HeartbeatExpired` | ~8,750 |
-| 3 | `NoPolicy` | ~8,750 |
+| 1 | `NoPolicy` | ~8,750 |
+| 2 | `AdminFrozen` | ~8,750 |
+| 3 | `HeartbeatExpired` | ~8,750 |
 | 4 | `Paused` | ~8,750 |
 | 5 | `OutsideActiveWindow` | ~8,750 |
 | 6 | `SelfFunctionNotAllowed` | ~10,600 |
@@ -659,7 +662,7 @@ scale with the oversized context count.
 
 For comparison, an **allowed** transfer with window pruning costs ~14,800 instructions, while an allowed transfer without window costs ~17,800 instructions.
 
-**Observation:** The early gates (#1–#5) are consistently the cheapest (~8.7k instructions) because they only check simple boolean/int flags on the account state. The classification gates (#7a–#7g) are more expensive because they require parsing the auth context, looking up allowlists, and evaluating caps. The semantic ordering therefore *accidentally* aligns with cost ordering: the cheapest gates run first. Reordering for cost would not yield meaningful savings and would weaken the semantic clarity of the freeze/reversal boundary (admin freeze must remain first). The delta between semantic and cost-optimal ordering is immaterial (<2x on the fast path).
+**Observation:** The early gates (#1–#5) are consistently the cheapest (~8.7k instructions) because they only check simple boolean/int flags (row 1 short-circuits on the missing policy snapshot before any gate flag is read). The classification gates (#7a–#7g) are more expensive because they require parsing the auth context, looking up allowlists, and evaluating caps. The semantic ordering therefore *accidentally* aligns with cost ordering: the cheapest gates run first. Reordering for cost would not yield meaningful savings and would weaken the semantic clarity of the snapshot/freeze/reversal boundaries (the policy snapshot must remain first because every later gate is defined in terms of it). The delta between semantic and cost-optimal ordering is immaterial (<2x on the fast path).
 
 ### 4.2 Admin freeze and policy pause
 
@@ -700,17 +703,27 @@ gate can continue to deny authorization.
   between a fresh and a redundant heartbeat).
 - **Grace:** `dms_grace_secs` in the policy (0 disables). Recommended default on testnet proofs:
   small (e.g. 60s) so the freeze is observable; production guidance ≥ several days.
-- **Freeze mechanism:** automatic and *lazy*. There is no stored "auto-frozen" flag for the enforcement itself — rule #2
+- **Freeze mechanism:** automatic and *lazy*. There is no stored "auto-frozen" flag for the enforcement itself — rule #3 (§4)
   derives it from `LastHeartbeat` and ledger time on every authorization, so the account is
   frozen the moment the grace elapses, with zero transactions and zero background writes
   required, and can never be "unfrozen by time passing."
-- **Freeze visibility / Telemetry:** `refresh_deadman()` (permissionless). Because the freeze is lazy, it natively produces no on-chain event. This helper explicitly records `AutoFrozenAt` and emits a `dms_auto_frozen` event if the grace has elapsed. It does not weaken the freeze semantics: the authorization path still derives the decision lazily regardless of this flag (rule #2). It is permissionless because it only records an already-true fact (the account is already frozen).
+- **Freeze visibility / Telemetry:** `refresh_deadman()` (permissionless). Because the freeze is lazy, it natively produces no on-chain event. This helper explicitly records `AutoFrozenAt` and emits a `dms_auto_frozen` event if the grace has elapsed. It does not weaken the freeze semantics: the authorization path still derives the decision lazily regardless of this flag (rule #3). It is permissionless because it only records an already-true fact (the account is already frozen).
 - **Manual freeze:** `freeze()` (admin) sets `AdminFrozen = true` — immediate, and blocks even a
   live, heartbeating agent.
+- **Agent-initiated self-lock (issue #306):** `self_lock()` is a fixed §6.1 self-call that sets
+  the same `AdminFrozen` flag through the account's own authorization path. It exists for the
+  case `freeze()` cannot cover — the admin key is on another machine, in another org, or lost —
+  and lets a runaway agent stop its own spending. It is deliberately a **capability reduction**:
+  the agent can only *add* the lock (no funds move, no policy change, no key change), it cannot
+  clear it, and revival is the admin's `unfreeze`. A compromised agent that calls `self_lock`
+  locks itself out; that is an availability outcome, not a fund-safety one. Like any
+  authorization, it is subject to rows 1–5 of §4: it cannot lock an account whose grace already
+  expired or whose active window has passed, but in those states the account is already blocked
+  for every call, so no spend can slip through. Emits a dedicated `self_locked` event (§9).
 - **Reversal path (explicit):** `unfreeze()` (admin only) clears `AdminFrozen` **and** sets
   `LastHeartbeat = now`. The admin's signature is the liveness attestation that revives the
   account; a subsequently-heartbeating agent keeps it alive from there. Admin freeze and
-  heartbeat-expiry are separate conditions; `unfreeze` clears the former, rule #2 keeps
+  heartbeat-expiry are separate conditions; `unfreeze` clears the former, rule #3 keeps
   evaluating the latter.
 - **Recorded decision (dual semantics kept, event enriched).** `unfreeze` performs two distinct
   jobs in one call — the admin brake release and the liveness attestation — and this is
@@ -736,12 +749,12 @@ gate can continue to deny authorization.
   - **No API change:** `unfreeze`'s signature, storage writes, and authorization are unchanged;
     this is purely additive event data (see §9).
 - **Executable specification.** `dms_timeline_edge_matrix` (`src/integration_tests.rs`) is the
-  table-driven walk of rule #2 andis normative for its edges: the first install arms the clock at `LastHeartbeat = now` (a later policy edit leaves the window and the clock untouched — issues #289/#290; `reset_window`/`unfreeze` are the explicit levers), the 80% warn band is reached while spend is still admissible (`> grace`,
+  table-driven walk of rule #3 and is normative for its edges: the first install arms the clock at `LastHeartbeat = now` (a later policy edit leaves the window and the clock untouched — issues #289/#290; `reset_window`/`unfreeze` are the explicit levers), the 80% warn band is reached while spend is still admissible (`> grace`,
   not `>= grace`), expiry blocks the transfer *and* the heartbeat, a blocked heartbeat leaves the
   clock untouched, and `unfreeze` re-arms it so the new window expires on its own terms. It also
   pins the two degenerate encodings: `dms_grace_secs == 0` (switch disabled — no amount of silence
   expires the account, `dms_health` returns `Ok` without consulting the clock) and
-  `LastHeartbeat == 0` (never armed — rule #2's `!= 0` clause means the gate can never fire on the
+  `LastHeartbeat == 0` (never armed — rule #3's `!= 0` clause means the gate can never fire on the
   sentinel, while `dms_health` reports `Expired`; a first heartbeat replaces the sentinel and the
   grace binds from then on). Read that asymmetry as intended: the gate defaults to *not* freezing an
   account it holds no attestation for, and the advisory view is where the missing attestation is
@@ -753,9 +766,9 @@ The guard enforces several account-level and per-context gates (§4). When an ac
 
 | Gate / Reason | Cleared by `unfreeze`? | Cleared by `set_policy`? | Cleared by time / neither? |
 |---|---|---|---|
-| **Admin freeze** (`AdminFrozen`, rule #1) | **Yes** (`AdminFrozen = false`) | **No** (leaves `AdminFrozen` unchanged) | No |
-| **Dead-man switch** (`HeartbeatExpired`, rule #2) | **Yes** (stamps `LastHeartbeat = now`) | **Only on first install** (`set_policy` stamps `LastHeartbeat = now` and starts fresh grace when no policy is stored — including after `revoke_policy`; a policy *edit* leaves the clock untouched, issue #289) | No (time progression can never unfreeze silence) |
-| **No policy** (`NoPolicy`, rule #3) | **No** | **Yes** (installs a valid policy) | No |
+| **No policy** (`NoPolicy`, rule #1) | **No** | **Yes** (installs a valid policy) | No |
+| **Admin freeze / agent self-lock** (`AdminFrozen`, rule #2) | **Yes** (`AdminFrozen = false`) | **No** (leaves `AdminFrozen` unchanged) | No |
+| **Dead-man switch** (`HeartbeatExpired`, rule #3) | **Yes** (stamps `LastHeartbeat = now`) | **Only on first install** (`set_policy` stamps `LastHeartbeat = now` and starts fresh grace when no policy is stored — including after `revoke_policy`; a policy *edit* leaves the clock untouched, issue #289) | No (time progression can never unfreeze silence) |
 | **Paused** (`Paused`, rule #4) | **No** | **Yes** (installs a policy with `paused: false`; or call `resume()` (§7), which flips the flag in place without touching the window) | No |
 | **Outside active window** (`OutsideActiveWindow`, rule #5) | **No** | **Yes** (installs a policy with renewed `active_until` or `0`) | Before `active_from`: cleared naturally when ledger time advances into `[active_from, active_until]`. After `active_until`: **neither** time nor `unfreeze` can clear it; only `set_policy` revives the account. |
 | **Window cap exceeded** (`WindowCapExceeded`, rule #7d) | **No** | **Only explicitly** — `set_policy` preserves the window across edits (issue #289); the admin-attested zeroing is `reset_window()` (§7) | **Yes** (rolling window entries expire naturally as time advances past `window_secs`) |
@@ -1009,8 +1022,10 @@ reported reason is decided by §5.2, not by this section.
 
 ### 6.1 Self-calls
 
-Context whose `contract == env.current_contract_address()`. Allowed function set for v1:
-`heartbeat`. (Any other self-function is blocked by default.) No spend rules apply.
+Context whose `contract == env.current_contract_address()`. Allowed function set:
+`heartbeat` and `self_lock` (§5). Any other self-function is blocked
+(`SelfFunctionNotAllowed`). No spend rules apply; `self_lock` only sets `AdminFrozen` and moves
+no funds, which is why it is safe to admit inside the policy engine at all.
 
 ### 6.2 Asset (SAC) calls — fully enforced
 
@@ -1020,8 +1035,13 @@ calls whose semantics and arguments are known:
 - `transfer` args: `(from, to, amount)` — the account is `from`; recipient = args[1], amount = args[2].
 - `transfer_from` args: `(from, spender, to, amount)` — the account is `from`; recipient = args[2], amount = args[3].
 
-Note on multi-asset batches: the window total is a unit-less sum across assets until per-asset caps
-land; operators should use single-asset policies for meaningful windows.
+**Asset identity is load-bearing for the per-tx cap.** The classified asset is what resolves the
+effective per-tx cap in rule 3 below (a matching `asset_caps` entry, otherwise the global
+`per_tx_cap`), so two listed assets with different overrides decide the same amount differently.
+The rolling window (rule 4) remains a unit-less sum across every asset in `assets`: per-asset caps
+are a per-transaction limit only, and operators who need per-asset *window* isolation should use
+separate policies. (Removing `ParsedCall::AssetTransfer.asset` would therefore change behaviour;
+issue #294 kept it and pinned that with `asset_identity_selects_the_per_asset_cap`.)
 
 **Exact arity required; extra args deny -- we do not partially parse.** A call whose argument list does not match the SAC schema exactly (`transfer` = 3, `transfer_from` = 4) is rejected with `UnknownContract` and never reaches the cap/allowlist evaluation. We only enforce what we fully understand; a context carrying extra trailing values is treated as a call we cannot reason about (conservative default-deny).
 
@@ -1082,7 +1102,9 @@ tracked in [issue #113](https://github.com/Stellar-Agent-Guard/stellar-agent-gua
 
 ### 6.3 Protocol calls — allowlist only (window/pause state still enforced)
 
-`contract ∈ policy.protocols` (each with optional per-function allowlist). Allowed calls are
+`contract ∈ policy.protocols` (each with optional per-function allowlist). `parse_call` checks
+`assets` before `protocols`, and §8 rejects a contract listed in **both**, so an asset can never
+silently shadow a `ProtocolRule` (including its `fns` allowlist) — issue #296. Allowed calls are
 authorized; per-call amount/recipient limits do **not** apply to individual call values because
 the arguments of an arbitrary protocol are not interpretable (§2). However, the **count of
 protocol calls is fully observable** — the engine loops over contexts and can meter them — so
@@ -1103,8 +1125,9 @@ a protocol is an explicit policy act, and contract creation by the agent is disa
 classification rule and the rejected allow-by-default alternatives are recorded in
 [ADR-0004](docs/adr/0004-deny-by-default-classification.md).
 
-**Boundary stated exactly:** pause (#4), active-window (#5), and dead-man/admin freeze (#1–#2)
-are *transaction-level* gates applied before classification, so they bind every call the
+**Boundary stated exactly:** no-policy (#1), admin freeze / agent self-lock (#2),
+dead-man (#3), pause (#4), and active-window (#5) are *transaction-level* gates applied before
+classification, so they bind every call the
 account makes, SAC or protocol. Spend caps and rolling-window accounting bind SAC asset
 transfers only. Recipient allowlists bind SAC asset transfers only. Contract creation is
 denied unconditionally.
@@ -1268,6 +1291,12 @@ pub fn refresh_deadman(env: Env)
     // the grace has elapsed, for telemetry visibility. No effect on enforcement.
 pub fn freeze(env: Env)      // require_auth(Admin); sets AdminFrozen = true
 pub fn unfreeze(env: Env)    // require_auth(Admin); clears AdminFrozen, LastHeartbeat = now
+pub fn self_lock(env: Env)
+    // require_auth(current_contract_address()) — routes through __check_auth,
+    // which verifies the registered agent key and admits `self_lock` as a fixed
+    // §6.1 self-call. Sets AdminFrozen = true (capability reduction only; no
+    // funds move) and emits `self_locked`. Only admin `unfreeze` reverses it.
+    // Blocked by the §4 account gates like any other authorization.
 
 // ── Read / advisory (no auth; non-confidential state; TTL effects in §9.5) ──
 pub fn policy(env: Env) -> Option<PolicyConfig>       // current policy
@@ -1290,6 +1319,15 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // pure pre-flight replica of the §6.2 decision path: it does not change
     // spend accounting, but a submitted call may refresh TTLs under §9.5.
     // Simulation before signing does not persist those rent bumps.
+    //
+    // INVARIANT — `check` writes no ledger data. Its in-memory prune and its
+    // staged admission are local copies that are discarded before returning:
+    // the persisted `Window`, `LastHeartbeat`, and `AdminFrozen` values are
+    // byte-identical before and after, and the `status()` snapshot is
+    // unchanged apart from ledger time. Agents and SDKs call `check` freely
+    // before deciding whether to sign, so persisting a read call's accounting
+    // would be a silent side effect on a fund-holding account. Enforced by
+    // `check_is_pure_and_writes_nothing_to_storage` (src/integration_tests.rs).
     //
     // Exact synthetic context it constructs and hands to `decide` (one per
     // call; `check_batch` builds one per transfer, in order):
@@ -1411,7 +1449,8 @@ pub enum PolicyRuleId { AmountSign, WindowRequiresWidth, ActiveWindowOrder,
                         ProtocolContractDuplicate, ProtocolFnListInvalid,
                         DurationExceedsBound, AssetListTooLong,
                         ProtocolListTooLong, PerTxCapExceedsWindowCap,
-                        AssetCapListTooLong, AssetCapUnknownAsset, DuplicateAssetCap }
+                        AssetCapListTooLong, AssetCapUnknownAsset, DuplicateAssetCap,
+                        AssetProtocolOverlap }
 
 #[contracttype]
 pub enum ValidationOutcome { Valid, Invalid(PolicyRuleId) }
@@ -1473,6 +1512,16 @@ per-recipient override when one is configured, otherwise the global `window_cap`
 entrypoint: a pure pre-flight replica of the §6.2 SAC-transfer decision path
 for agents and SDKs to call before signing. Search for "preflight",
 "simulate", or `simulate_transfer` to find it.
+
+**Purity invariant.** `check` never writes spend accounting. It loads the
+rolling-window ledger, prunes and stages admissions on an in-memory copy, and
+discards that copy before returning — so an account that would prune on a real
+transfer still reports the same stored `Window`, `LastHeartbeat`, and
+`AdminFrozen` after a `check`, and callers may simulate as often as they like
+without consuming budget. TTL refreshes from the read are host-level (§9.5),
+not data writes. `check_detailed` and `check_batch` share the same guarantee.
+`check_is_pure_and_writes_nothing_to_storage` (`src/integration_tests.rs`)
+pins it.
 
 These are documentation aliases only: the on-chain ABI is frozen as `check`
 (and `check_detailed`); there is no `simulate_transfer` function to invoke,
@@ -1670,8 +1719,9 @@ entire validation surface at a glance (issue #353).
 | Non-empty intersection between `recipients` and `blocked_recipients` | **Rejected** — `InvalidConfig` / `RecipientAllowAndBlocked` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_recipient_allow_and_blocked`, `blocked_recipients_contradiction_rejected_at_set_policy` (`src/integration_tests.rs`) |
 | Duplicate `protocols[i].contract` | **Rejected** — `InvalidConfig` / `ProtocolContractDuplicate` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_protocol_contract_duplicate` (`src/integration_tests.rs`) |
 | `protocols[i].fns == Some(list)` where `list.is_empty()` or `list` has duplicate `Symbol`s | **Rejected** — `InvalidConfig` / `ProtocolFnListInvalid` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_protocol_fn_list_invalid` (`src/integration_tests.rs`) |
+| Non-empty intersection between `assets` and `protocols[i].contract` (issue #296) | **Rejected** — `InvalidConfig` / `AssetProtocolOverlap`; asset-first classification must never silently shadow a `ProtocolRule` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_asset_protocol_overlap` (`src/integration_tests.rs`) |
 | `window_secs > MAX_WINDOW_SECS` or `dms_grace_secs > MAX_DMS_GRACE_SECS` (`315_360_000` s ≈ 10 years; issue #34) | **Rejected** — `InvalidConfig` / `DurationExceedsBound`; `0` (disabled) and `MAX_*` boundary are **Accepted** | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_duration_exceeds_bound`, `window_and_dms_upper_bounds_rejected`, `window_and_dms_upper_bounds_accept_boundary` (`src/integration_tests.rs`) |
-| Empty `assets` (`assets.is_empty()`) | **Accepted (inert for SAC transfers)** — no SAC token is allowlisted, so every SAC `transfer`/`transfer_from` classifies as `UnknownContract` and is never allowed (useful for watch-only / heartbeat-only accounts) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`parse_call_inner`) | `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset), `audit_event_payloads_and_topics` (`src/event_audit_tests.rs`); dedicated transfer-denial test tracked in [issue #363](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/363) |
+| Empty `assets` (`assets.is_empty()`) | **Accepted (inert for SAC transfers)** — no SAC token is allowlisted, so every SAC `transfer`/`transfer_from` classifies as `UnknownContract` and is never allowed (useful for watch-only / heartbeat-only accounts) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`parse_call_inner`) | `empty_assets_policy_blocks_sac_transfers_but_allows_protocol_calls`, `empty_assets_policy_is_recoverable_by_adding_an_asset` (`src/integration_tests.rs`); `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset); `audit_event_payloads_and_topics` (`src/event_audit_tests.rs`) |
 | Empty `recipients` with `allow_any_recipient == false` | **Accepted (inert for SAC transfers)** — no destination is allowlisted and the escape hatch is off, so every SAC transfer is blocked with `RecipientNotAllowed`. Accepted in v1 unless changed by companion [issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`decide`) | `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset); companion policy-rejection decision tracked in [issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) |
 | Empty `recipients` with `allow_any_recipient == true` | **Accepted** — recipient allowlist is skipped by the escape hatch; `blocked_recipients`, `per_tx_cap`, and `window_cap` still apply | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`decide`) | `allow_any_recipient_with_empty_list_still_enforces_both_caps` (`src/integration_tests.rs`) |
 | Empty `protocols` (`protocols.is_empty()`) | **Accepted (inert for protocol calls)** — no non-asset external protocol is allowlisted; every non-asset, non-self call is blocked with `UnknownContract` | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`parse_call_inner`) | `validate_policy_accepts_valid_config_and_ignores_installed_policy` (`src/integration_tests.rs`), `unlisted_asset_is_unknown_contract` (`src/engine.rs`) |
@@ -1724,6 +1774,7 @@ order:
 | `RecipientAllowAndBlocked` | a recipient in both `recipients` and `blocked_recipients` |
 | `ProtocolContractDuplicate` | the same contract in two protocol rules |
 | `ProtocolFnListInvalid` | a protocol rule's fn list empty or containing duplicates |
+| `AssetProtocolOverlap` | the same contract appears in both `assets` and `protocols` (evaluated after the per-protocol rules, before the duration bounds; issue #296) |
 | `DurationExceedsBound` | `window_secs` or `dms_grace_secs` over `MAX_WINDOW_SECS` (`315_360_000` s ≈ 10 years; evaluated last so the other variant ordinals stay wire-stable) |
 
 `validate_policy` is a read: no auth, no events, no state writes (read-path
@@ -1783,6 +1834,7 @@ read them by key regardless.
 | `dms_auto_frozen` | (none) | `at: u64` — ledger time at which the elapsed dead-man grace was explicitly recorded | permissionless `refresh_deadman()` records an **already-true** expiry for the first time (`AutoFrozenAt` was unset); a no-op when not expired or already recorded (§5) |
 | `initialized` | (none) | `by: Address` | contract initialization |
 | `frozen` | (none) | `by: Address` | admin freeze |
+| `self_locked` | (none) | `at: u64`, `revision: u64` — lock timestamp and the `PolicyRevision` in force | agent `self_lock` |
 | `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
 | `policy_set` / `policy_revoked` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced | admin policy changes |
 | `paused` / `resumed` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced; the counter advances only when the call actually flips `paused`, so a redundant double-pause emits the event with an unchanged revision | admin `pause()` / `resume()` (issues #289/#290) |
@@ -1923,11 +1975,17 @@ moves):
 - per-recipient overspend (per-recipient rolling window caps)
 - calls to unauthorized protocols/functions (protocol allowlist + default-deny)
 - agent disappearance (dead-man switch) and operator-initiated halt (freeze/pause)
+- a runaway agent stopping itself via `self_lock` even when the admin key is unavailable
+  (issue #306) — a halt path that gives the agent no fund-moving power
 
 Not guarded by v1 (documented, not hidden):
 - fine-grained amount/recipient limits on non-SAC protocol calls (§2, v2 item)
-- a live attacker who keeps the agent key heartbeating (caps still bind them; the switch only
-  fires on silence)
+- a live attacker who keeps the agent key heartbeating and never calls `self_lock` (caps still
+  bind them; the switch only fires on silence). `self_lock` closes the *honest runaway* half of
+  this gap, not the compromised-key half: an attacker holding the key simply does not call it.
+- `self_lock` as a fund-safety control: an agent (or a compromised agent) can lock itself — and
+  therefore the account — out. That is an availability outcome, not a loss-of-funds outcome; the
+  call cannot move funds, change policy, or rotate keys, and only admin `unfreeze` reverses it.
 - admin compromise (admin can freeze and rewrite policy/keys — that is its function; it still
   cannot move funds)
 - **admin-key loss while the dead-man switch is armed** — arming `dms_grace_secs > 0` makes
