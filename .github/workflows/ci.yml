@@ -259,3 +259,63 @@ jobs:
       # own target directory (see scripts/check-wasm-reproducible.sh).
       - name: Build twice in clean target dirs, compare SHA-256
         run: ./scripts/check-wasm-reproducible.sh
+
+  # Issue #633: non-blocking, scheduled dependency risk report. Publishes advisories
+  # and affected packages without failing the run and without touching Cargo.lock or
+  # any release artifact.
+  dependency-risk-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    schedule:
+      # Weekly: fresh visibility into new advisories without blocking merges.
+      - cron: "0 2 * * 1"
+    workflow_dispatch: {}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^channel = "(.*)"$/\1/p' rust-toolchain.toml)"
+          if [[ -z "$channel" ]]; then
+            echo "rust-toolchain.toml declares no [toolchain] channel" >&2
+            exit 1
+          fi
+          echo "Pinned channel: $channel"
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-deny-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deny-
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+
+      - name: Run dependency risk report (non-blocking)
+        run: |
+          set +e
+          cargo deny check > "$RUNNER_TEMP/deny-report.txt" 2>&1 || true
+
+      - name: Publish dependency risk report to job summary
+        run: |
+          {
+            echo "## Dependency risk report (non-blocking)"
+            echo ""
+            echo "Scheduled report of outdated or advisory-affected dependencies. Advisory IDs "
+            "(RUSTSEC-...) link to https://rustsec.org/advisories/<ID>. This report "
+            "does not alter Cargo.lock or any release artifact."
+            echo ""
+            echo "### cargo-deny output"
+            echo ""
+            echo "\`\`\`"
+            cat "$RUNNER_TEMP/deny-report.txt"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
