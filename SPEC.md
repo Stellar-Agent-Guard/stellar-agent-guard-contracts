@@ -1320,6 +1320,15 @@ pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // spend accounting, but a submitted call may refresh TTLs under §9.5.
     // Simulation before signing does not persist those rent bumps.
     //
+    // INVARIANT — `check` writes no ledger data. Its in-memory prune and its
+    // staged admission are local copies that are discarded before returning:
+    // the persisted `Window`, `LastHeartbeat`, and `AdminFrozen` values are
+    // byte-identical before and after, and the `status()` snapshot is
+    // unchanged apart from ledger time. Agents and SDKs call `check` freely
+    // before deciding whether to sign, so persisting a read call's accounting
+    // would be a silent side effect on a fund-holding account. Enforced by
+    // `check_is_pure_and_writes_nothing_to_storage` (src/integration_tests.rs).
+    //
     // Exact synthetic context it constructs and hands to `decide` (one per
     // call; `check_batch` builds one per transfer, in order):
     //   Context::Contract(ContractContext {
@@ -1503,6 +1512,16 @@ per-recipient override when one is configured, otherwise the global `window_cap`
 entrypoint: a pure pre-flight replica of the §6.2 SAC-transfer decision path
 for agents and SDKs to call before signing. Search for "preflight",
 "simulate", or `simulate_transfer` to find it.
+
+**Purity invariant.** `check` never writes spend accounting. It loads the
+rolling-window ledger, prunes and stages admissions on an in-memory copy, and
+discards that copy before returning — so an account that would prune on a real
+transfer still reports the same stored `Window`, `LastHeartbeat`, and
+`AdminFrozen` after a `check`, and callers may simulate as often as they like
+without consuming budget. TTL refreshes from the read are host-level (§9.5),
+not data writes. `check_detailed` and `check_batch` share the same guarantee.
+`check_is_pure_and_writes_nothing_to_storage` (`src/integration_tests.rs`)
+pins it.
 
 These are documentation aliases only: the on-chain ABI is frozen as `check`
 (and `check_detailed`); there is no `simulate_transfer` function to invoke,
@@ -1702,7 +1721,7 @@ entire validation surface at a glance (issue #353).
 | `protocols[i].fns == Some(list)` where `list.is_empty()` or `list` has duplicate `Symbol`s | **Rejected** — `InvalidConfig` / `ProtocolFnListInvalid` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_protocol_fn_list_invalid` (`src/integration_tests.rs`) |
 | Non-empty intersection between `assets` and `protocols[i].contract` (issue #296) | **Rejected** — `InvalidConfig` / `AssetProtocolOverlap`; asset-first classification must never silently shadow a `ProtocolRule` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_asset_protocol_overlap` (`src/integration_tests.rs`) |
 | `window_secs > MAX_WINDOW_SECS` or `dms_grace_secs > MAX_DMS_GRACE_SECS` (`315_360_000` s ≈ 10 years; issue #34) | **Rejected** — `InvalidConfig` / `DurationExceedsBound`; `0` (disabled) and `MAX_*` boundary are **Accepted** | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_duration_exceeds_bound`, `window_and_dms_upper_bounds_rejected`, `window_and_dms_upper_bounds_accept_boundary` (`src/integration_tests.rs`) |
-| Empty `assets` (`assets.is_empty()`) | **Accepted (inert for SAC transfers)** — no SAC token is allowlisted, so every SAC `transfer`/`transfer_from` classifies as `UnknownContract` and is never allowed (useful for watch-only / heartbeat-only accounts) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`parse_call_inner`) | `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset), `audit_event_payloads_and_topics` (`src/event_audit_tests.rs`); dedicated transfer-denial test tracked in [issue #363](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/363) |
+| Empty `assets` (`assets.is_empty()`) | **Accepted (inert for SAC transfers)** — no SAC token is allowlisted, so every SAC `transfer`/`transfer_from` classifies as `UnknownContract` and is never allowed (useful for watch-only / heartbeat-only accounts) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`parse_call_inner`) | `empty_assets_policy_blocks_sac_transfers_but_allows_protocol_calls`, `empty_assets_policy_is_recoverable_by_adding_an_asset` (`src/integration_tests.rs`); `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset); `audit_event_payloads_and_topics` (`src/event_audit_tests.rs`) |
 | Empty `recipients` with `allow_any_recipient == false` | **Accepted (inert for SAC transfers)** — no destination is allowlisted and the escape hatch is off, so every SAC transfer is blocked with `RecipientNotAllowed`. Accepted in v1 unless changed by companion [issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`decide`) | `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset); companion policy-rejection decision tracked in [issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) |
 | Empty `recipients` with `allow_any_recipient == true` | **Accepted** — recipient allowlist is skipped by the escape hatch; `blocked_recipients`, `per_tx_cap`, and `window_cap` still apply | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`decide`) | `allow_any_recipient_with_empty_list_still_enforces_both_caps` (`src/integration_tests.rs`) |
 | Empty `protocols` (`protocols.is_empty()`) | **Accepted (inert for protocol calls)** — no non-asset external protocol is allowlisted; every non-asset, non-self call is blocked with `UnknownContract` | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`parse_call_inner`) | `validate_policy_accepts_valid_config_and_ignores_installed_policy` (`src/integration_tests.rs`), `unlisted_asset_is_unknown_contract` (`src/engine.rs`) |
