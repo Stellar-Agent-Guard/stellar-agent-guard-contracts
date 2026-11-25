@@ -1045,19 +1045,25 @@ issue #294 kept it and pinned that with `asset_identity_selects_the_per_asset_ca
 
 **Exact arity required; extra args deny -- we do not partially parse.** A call whose argument list does not match the SAC schema exactly (`transfer` = 3, `transfer_from` = 4) is rejected with `UnknownContract` and never reaches the cap/allowlist evaluation. We only enforce what we fully understand; a context carrying extra trailing values is treated as a call we cannot reason about (conservative default-deny).
 
-Rules applied (in order; the denylist is checked before the allowlist/escape hatch):
+**Denial precedence is explicit and stable.** The engine consumes the ordered
+`ASSET_TRANSFER_DENIAL_PRECEDENCE` table in `src/engine.rs`; its synchronized copy is
+`asset_transfer_denial_precedence` in [`decision-table.json`](decision-table.json). When one
+transfer violates multiple rules, the first matching gate supplies its reason:
 
-1. **Recipient denylist:** if `recipient ∈ policy.blocked_recipients`, block
+1. **Asset pause:** if the matching `asset_caps` entry has `paused == true`, block
+   `AssetNotAllowed`.
+2. **Amount validity:** require `amount > 0`, otherwise block `InvalidAmount`.
+3. **Recipient denylist:** if `recipient ∈ policy.blocked_recipients`, block
    `RecipientBlocked`. The denylist wins over both the allowlist and
    `allow_any_recipient`.
-2. **Recipient allowlist:** if `allow_any_recipient == false`, `recipient ∈ policy.recipients`
-   or block `RecipientNotAllowed`.
-3. **Per-tx cap:** resolve the effective per-tx cap for the transfer's asset — the matching
+4. **Recipient allowlist:** if `allow_any_recipient == false`, require
+   `recipient ∈ policy.recipients`, otherwise block `RecipientNotAllowed`.
+5. **Per-tx cap:** resolve the effective per-tx cap for the transfer's asset — the matching
    `asset_caps` entry's `per_tx_cap` when non-zero, otherwise the global `per_tx_cap`. If the
    effective cap is non-zero, `amount <= effective_per_tx_cap` or block `PerTxCapExceeded`.
    The comparison is exclusive-of-blocking (i.e. the cap value itself is permitted:
    `amount == effective_per_tx_cap` is admitted; only `amount > effective_per_tx_cap` is blocked).
-4. **Rolling window (§3.1):**
+6. **Rolling window (§3.1):**
    - Global window: if `window_cap != 0`, prune expired entries, then
      `total + amount <= window_cap` or block `WindowCapExceeded`.
    - Per-recipient window: if `recipient` has an entry in `policy.recipient_window_caps` with
@@ -1065,7 +1071,9 @@ Rules applied (in order; the denylist is checked before the allowlist/escape hat
      the global window cap. If the effective cap is exceeded, block `WindowCapExceeded`.
    - On admission, update the global ledger and, when a per-recipient cap applies, the
      recipient's ledger.
-5. Amount validity: `amount > 0` or block `InvalidAmount`.
+
+The window projection is read-only until these gates pass; admissions are staged only after the
+window check and commit only if every context in the authorization is allowed (§4).
 
 An asset contract listed in `assets` invoked with any other function — in particular the
 administrative and custody-altering functions `mint`, `burn`, `clawback`, `set_admin`, `pause`,
@@ -1114,6 +1122,10 @@ cap, the call is blocked with `ProtocolCallRateExceeded`. This count-based throt
 defensible v1 enforcement that does not overclaim — it directly addresses runaway loops
 (the threat case this project exists to stop) within what the host actually exposes. Functions
 not in a rule's `fns` allowlist (when present) are blocked `FunctionNotAllowed`.
+
+Function matching is centralized in `protocol_function_allowed`: `fns == None` is the
+wildcard, a listed `Symbol` must match exactly, and `Some([])` matches nothing (although policy
+validation rejects an explicit empty list as `ProtocolFnListInvalid`).
 
 ### 6.4 Anything else — blocked
 
@@ -1717,7 +1729,7 @@ entire validation surface at a glance (issue #353).
 | `asset_caps[i].asset` absent from `assets` | **Rejected** — `InvalidConfig` / `AssetCapUnknownAsset` (never silently ignored) | `src/lib.rs` (`first_failing_asset_cap_rule`) | `invalid_unknown_asset_override_rejected` (`src/integration_tests.rs`) |
 | Duplicate `asset` within `asset_caps` | **Rejected** — `InvalidConfig` / `DuplicateAssetCap` | `src/lib.rs` (`first_failing_asset_cap_rule`) | `invalid_duplicate_per_asset_cap_rejected` (`src/integration_tests.rs`) |
 | Non-empty intersection between `recipients` and `blocked_recipients` | **Rejected** — `InvalidConfig` / `RecipientAllowAndBlocked` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_recipient_allow_and_blocked`, `blocked_recipients_contradiction_rejected_at_set_policy` (`src/integration_tests.rs`) |
-| Duplicate `protocols[i].contract` | **Rejected** — `InvalidConfig` / `ProtocolContractDuplicate` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_protocol_contract_duplicate` (`src/integration_tests.rs`) |
+| Duplicate `protocols[i].contract` (even when the two rules have different `fns`) | **Rejected** — `InvalidConfig` / `ProtocolContractDuplicate` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_protocol_contract_duplicate` (`src/integration_tests.rs`) |
 | `protocols[i].fns == Some(list)` where `list.is_empty()` or `list` has duplicate `Symbol`s | **Rejected** — `InvalidConfig` / `ProtocolFnListInvalid` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_protocol_fn_list_invalid` (`src/integration_tests.rs`) |
 | Non-empty intersection between `assets` and `protocols[i].contract` (issue #296) | **Rejected** — `InvalidConfig` / `AssetProtocolOverlap`; asset-first classification must never silently shadow a `ProtocolRule` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_asset_protocol_overlap` (`src/integration_tests.rs`) |
 | `window_secs > MAX_WINDOW_SECS` or `dms_grace_secs > MAX_DMS_GRACE_SECS` (`315_360_000` s ≈ 10 years; issue #34) | **Rejected** — `InvalidConfig` / `DurationExceedsBound`; `0` (disabled) and `MAX_*` boundary are **Accepted** | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_duration_exceeds_bound`, `window_and_dms_upper_bounds_rejected`, `window_and_dms_upper_bounds_accept_boundary` (`src/integration_tests.rs`) |
@@ -1731,6 +1743,7 @@ entire validation surface at a glance (issue #353).
 | Empty `asset_caps` | **Accepted** — no per-asset overrides; all allowlisted assets use global `per_tx_cap` | `src/lib.rs` (`first_failing_asset_cap_rule`); `src/engine.rs` (`effective_per_tx_cap`) | `per_asset_cap_falls_back_to_global_when_absent` (`src/integration_tests.rs`) |
 
 **Key design rationales:**
+- **Duplicate list entries are rejected, never normalized.** Identity is the address in `assets`, `recipients`, and `blocked_recipients`; the contract key in `protocols`; the recipient in `recipient_window_caps`; the asset in `asset_caps`; and the symbol in each protocol `fns` list. `policy.schema.json` rejects identical array values/records and documents key-based checks; the contract validator is authoritative when two records share a key but differ in their other fields, which standard JSON Schema `uniqueItems` cannot express.
 - **Cap ordering (`per_tx_cap <= window_cap`, issue #33):** if `per_tx_cap > window_cap` when both are nonzero, every transfer above `window_cap` is double-rejected and transfers between the two values pass per-tx only to fail on window — an operator error caught at install time. Disabled caps (`0`) skip this check; equal caps are allowed.
 - **Duration upper bounds (issue #34):** `window_secs` and `dms_grace_secs` are `u64`, so a seconds/milliseconds mix-up (e.g. a 90-day window passed as `7_776_000_000` ms) or `u64::MAX` would silently disable pruning (unbounded storage growth) or disable the dead-man switch (§5). Capping both at `315_360_000` s (86_400 × 3_650 ≈ 10 years) catches accidental units while affecting no realistic policy; `0` remains legal (feature disabled).
 - **Self-address rejection:** `env.current_contract_address()` is known at deployment (pre-`initialize`), and `set_policy` only runs post-initialize. Self-calls are governed by the fixed §6.1 rule rather than `assets`/`protocols`, a self-recipient is a no-op loop signaling a mis-pasted address, and self-entries in `recipient_window_caps`/`asset_caps` cannot be meaningful overrides.

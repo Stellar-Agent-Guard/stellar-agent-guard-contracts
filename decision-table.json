@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "spec_section": "§4",
-  "purpose": "Single machine-readable source of truth for the policy decision table. `condition` and `result` are rendered verbatim into the SPEC §4 table; `reasons` is what the engine actually returns for that row. tests/decision_table.rs fails `cargo test` if any of these drift apart.",
+  "purpose": "Machine-readable source of truth for the policy decision table and the asset-transfer denial precedence. `condition` and `result` are rendered verbatim into the SPEC §4 table; `reasons` is what the engine actually returns for that row. The transfer precedence is consumed by src/engine.rs and parity-tested. tests/decision_table.rs fails `cargo test` if the table artifacts drift apart.",
   "notes": [
     "SPEC §4 is the prose table; this file is the data behind it. Edit `condition`/`result` here and paste the rendered row back into SPEC.md — never edit the SPEC row alone, the drift test will reject it.",
     "`result` reproduces SPEC §4's cell verbatim, including reasons SPEC lists there that the v1 engine cannot emit. `reasons` below is engine truth. Where the two disagree, the per-row `note` says so and points at the audit that records it; see docs/scenario-matrix.md findings F-2, F-3 and F-4.",
@@ -14,6 +14,14 @@
     "dead-man switch",
     "pause",
     "active window"
+  ],
+  "asset_transfer_denial_precedence": [
+    "asset_paused",
+    "positive_amount",
+    "recipient_not_blocked",
+    "recipient_allowed",
+    "per_tx_cap",
+    "window_cap"
   ],
   "rows": [
     {
