@@ -187,7 +187,39 @@ and `heartbeat_expires_at` is `null` (or absent) regardless of silence.
 | `heartbeat_expired: true` right after install | More than `dms_grace_secs` has elapsed since install with no agent heartbeat. Start the agent loop, then `unfreeze` (admin) — a heartbeat cannot revive an expired account. |
 | `outside_active_window: true` | The policy's `active_from`/`active_until` does not cover the current ledger time. Only a `set_policy` with a renewed window revives the account. |
 
-### 6.1 Confirm the live configuration with `agent-tx verify`
+### 6.1 Run the deployment preflight
+
+Before handing the guard over to the agent loop, run the automated preflight
+script. It calls `agent-tx verify` internally (read-only, no secrets) and
+checks network reachability, the contract address, the installed policy hash,
+and the registered admin signer in one pass:
+
+```bash
+./scripts/preflight-deploy.sh \
+    --guard      <GUARD_ID>          \
+    --network    testnet             \
+    --admin      <ADMIN_G>           \
+    --policy-hash <64-hex policy digest from step 6>  \
+    --agent-pubkey <64-hex agent pubkey from step 4>
+# → ✅  All checks passed. Safe to proceed.
+# Exit 0 = every check passed. Exit 1 = one or more checks failed (see output).
+```
+
+The script validates address formats, connects to the RPC endpoint, reads live
+contract state, and prints a PASS / FAIL line for each check. No secret is ever
+read or printed; the check is safe to run in CI or in a monitoring job. Resolve
+any failure before proceeding.
+
+```
+EXIT 0  All checks passed. Safe to proceed.
+EXIT 1  One or more checks failed.
+EXIT 3  RPC transport failure — retry or check the endpoint.
+```
+
+The full option reference is in the script's `--help` output and in
+[`scripts/preflight-deploy.sh`](../../scripts/preflight-deploy.sh).
+
+### 6.2 Confirm the live configuration with `agent-tx verify`
 
 The `status`/`policy`/`policy_hash` invocations above answer each question
 separately. [`agent-tx verify`](../../tools/agent-tx/README.md#verify) collects
