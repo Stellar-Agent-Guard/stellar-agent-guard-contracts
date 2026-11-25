@@ -9,7 +9,7 @@ flowchart TD
     A["Transaction requires\nthe account's auth"] --> B["__check_auth\n(host-invoked)"]
     B --> C["Verify agent Ed25519\nsignature over auth payload\n(bad sig → host trap)"]
     C --> D["Load instance + persistent state\n(agent key, policy, window,\nheartbeat, freeze flag)"]
-    D --> E["Account-level gates\n(order: admin frozen\n→ DMS → paused\n→ active window)"]
+    D --> E["Account-level gates\n(order: no policy → admin frozen\n(or agent self-lock) → DMS\n→ paused → active window)"]
     E --> F{"All gates pass?"}
     F -- No --> G["Err(reason)\nTransaction rejected\npre-broadcast"]
     F -- Yes --> H["Per-context decision loop\n(every context must pass)"]
@@ -36,9 +36,9 @@ Evaluated in this order (first match wins):
 
 | # | Condition | Result |
 |---|---|---|
-| 1 | `AdminFrozen` is set | Block (`AdminFrozen`) |
-| 2 | DMS enabled AND `last_heartbeat != 0` AND `now - last_heartbeat > dms_grace_secs` | Block (`HeartbeatExpired`) |
-| 3 | No `Policy` stored | Block (`NoPolicy`) |
+| 1 | No `Policy` stored | Block (`NoPolicy`) |
+| 2 | `AdminFrozen` is set (admin `freeze` or agent `self_lock`) | Block (`AdminFrozen`) |
+| 3 | DMS enabled AND `last_heartbeat != 0` AND `now - last_heartbeat > dms_grace_secs` | Block (`HeartbeatExpired`) |
 | 4 | `paused` | Block (`Paused`) |
 | 5 | Outside `active_from`/`active_until` | Block (`OutsideActiveWindow`) |
 
@@ -50,7 +50,7 @@ Each `Context` in `auth_contexts` is classified independently by `parse_call`:
 
 | ParsedCall | Classification |
 |---|---|
-| `SelfCall { heartbeat }` | Allowed (only permitted self-call) |
+| `SelfCall { heartbeat, self_lock }` | Allowed (only permitted self-calls) |
 | `SelfCall { other }` | Blocked (`SelfFunctionNotAllowed`) |
 | `CreateContract` | Blocked (`CreateContractNotAllowed`) |
 | `AssetTransfer` | Fully enforceable (recipient + amount parsed from args) |
@@ -83,12 +83,12 @@ The full decision table from SPEC §4, evaluated against ledger time (which Soro
 
 | Priority | Condition | Action | Error |
 |---|---|---|---|
-| 1 | `AdminFrozen` | Block | `AdminFrozen` |
-| 2 | DMS grace elapsed | Block | `HeartbeatExpired` |
-| 3 | No policy | Block | `NoPolicy` |
+| 1 | No policy | Block | `NoPolicy` |
+| 2 | `AdminFrozen` (admin `freeze` or agent `self_lock`) | Block | `AdminFrozen` |
+| 3 | DMS grace elapsed | Block | `HeartbeatExpired` |
 | 4 | `paused` | Block | `Paused` |
 | 5 | Outside active window | Block | `OutsideActiveWindow` |
-| 6 | Self-call to `heartbeat` | Allow | — |
+| 6 | Self-call to `heartbeat` / `self_lock` | Allow | — |
 | 7 | Per-context classification (§6) | Allow or Block | Various |
 
 ## Storage model

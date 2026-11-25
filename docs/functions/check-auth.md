@@ -32,7 +32,8 @@ fn __check_auth(
 4. **Run the decision table** (`decide` function):
    - Context-count bound first: more than `MAX_AUTH_CONTEXTS` (64) contexts returns one aggregate
      `TooManyAuthContexts` verdict (§4 row 0) before any context is parsed.
-   - Account-level gates next: admin freeze → dead-man switch → pause → active window.
+   - Account-level gates next: no policy → admin freeze (admin `freeze` or agent `self_lock`) →
+     dead-man switch → pause → active window.
    - Per-context classification: each `Context` is parsed into a typed call (`SelfCall`, `AssetTransfer`, `AssetOther`, `Protocol`, `Unknown`, `CreateContract`).
    - Per-kind enforcement: asset transfers get recipient allowlist + per-tx cap + rolling window. Protocol calls get contract + function allowlist. Everything else is denied.
    - **All-or-nothing commit:** Window admissions are staged and only committed to storage if *every* context passes.
@@ -83,6 +84,11 @@ For other calls, the arguments are not interpretable — see [Enforcement Scope]
 | `ProtocolCallRateExceeded` | 30 | Protocol call rate limit exceeded |
 | `DecisionInvariantViolation` | 31 | Internal enforcement verdict invariant failed |
 | `TooManyAuthContexts` | 33 | Batch exceeds `MAX_AUTH_CONTEXTS` (64) contexts (§4 row 0) |
+
+The table above lists the enforcement-path codes; [SPEC §7.1](../../SPEC.md#71-error-code--checkresult-variant--reason-symbol-mapping)
+is the exhaustive ABI vocabulary, including lifecycle variants that never reach this path.
+The permissionless `check` pre-flight returns the same reasons as `CheckResult::Blocked(Symbol)` —
+a `Symbol` drawn from `Error::reason()`, not a dedicated `BlockReason` type.
 
 ## What an operator sees when this rejects (issue #425)
 

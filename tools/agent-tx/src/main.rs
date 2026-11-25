@@ -4364,7 +4364,7 @@ fn valid_flags_for_subcommand(cmd: &str) -> &'static [&'static str] {
             "-h",
             "--help",
         ],
-        "status" | "policy" => &[
+        "status" | "policy" | "verify" => &[
             "--guard",
             "--network",
             "--rpc-url",
@@ -4758,6 +4758,7 @@ fn tool_help() -> String {
          \x20 agent-tx transfer-from --guard <C...> --token <C...> --from <G|C...> --to <G|C...> --amount <N> --agent-secret <S...>\n\
          \x20 agent-tx heartbeat --guard <C...> --agent-secret <S...>\n\
          \x20 agent-tx status --guard <C...> [--network testnet|futurenet|mainnet]\n\
+         \x20 agent-tx verify --guard <C...> [--network testnet|futurenet|mainnet]\n\
          \x20 agent-tx policy --guard <C...> [--network testnet|futurenet|mainnet]\n\
          \x20 agent-tx check --guard <C...> --asset <C...> --to <G...> --amount <N> [--network testnet|futurenet|mainnet]\n\
          \x20 agent-tx guards <add|list|remove|set-default> ...\n\
@@ -4904,6 +4905,24 @@ fn subcommand_help(cmd: &str) -> String {
             "Usage: agent-tx status --guard <C...> [options]\n\
              \n\
              Inspect the guard's on-chain status (frozen state, heartbeat expiration, policy revision).\n\
+             \n\
+             Required arguments:\n\
+             \x20 --guard <C...>              Guard contract address (C...) or registered alias\n\
+             \n\
+             Options:\n\
+             \x20 --network <preset>          Network preset: testnet | futurenet | mainnet (default: testnet)\n\
+             \x20 --rpc-url <url>             Custom RPC endpoint URL\n\
+             \x20 --network-passphrase <pass> Custom network passphrase\n\
+             \x20 --rpc-timeout <secs>        Per-request RPC timeout in seconds (default 30)\n\
+             \x20 -h, --help                  Print this help message\n".to_string()
+        }
+        "verify" => {
+            "Usage: agent-tx verify --guard <C...> [options]\n\
+             \n\
+             Confirm the guard's live configuration without signing or submitting anything:\n\
+             policy hash, pause/freeze state, and the registered admin and agent key.\n\
+             Read-only and safe to repeat (simulation and ledger reads only).\n\
+             Exit codes: 0 = configuration read, 3/4 = RPC failure (nothing was written).\n\
              \n\
              Required arguments:\n\
              \x20 --guard <C...>              Guard contract address (C...) or registered alias\n\
@@ -5190,6 +5209,159 @@ fn print_policy(reporter: &Reporter, rendered: Option<&str>) {
     }
 }
 
+/// A `ScVal` as JSON, so a contract-struct return value keeps its field names
+/// and native types instead of being flattened to prose.
+fn scval_json(value: &ScVal) -> serde_json::Value {
+    match value {
+        ScVal::Bool(flag) => serde_json::Value::Bool(*flag),
+        ScVal::Void => serde_json::Value::Null,
+        ScVal::U32(n) => serde_json::json!(n),
+        ScVal::I32(n) => serde_json::json!(n),
+        ScVal::U64(n) => serde_json::json!(n),
+        ScVal::I64(n) => serde_json::json!(n),
+        ScVal::U128(parts) => {
+            serde_json::json!((u128::from(parts.hi) << 64) | u128::from(parts.lo))
+        }
+        ScVal::I128(parts) => {
+            serde_json::json!((i128::from(parts.hi) << 64) | i128::from(parts.lo))
+        }
+        ScVal::Address(_) | ScVal::Bytes(_) => serde_json::Value::String(scval_str(value)),
+        ScVal::Symbol(symbol) => serde_json::Value::String(symbol.to_string()),
+        ScVal::String(string) => serde_json::Value::String(string.to_string()),
+        ScVal::Vec(Some(items)) => serde_json::Value::Array(items.iter().map(scval_json).collect()),
+        ScVal::Vec(None) => serde_json::Value::Array(Vec::new()),
+        ScVal::Map(Some(entries)) => serde_json::Value::Object(
+            entries
+                .iter()
+                .map(|entry| (scval_str(&entry.key), scval_json(&entry.val)))
+                .collect(),
+        ),
+        ScVal::Map(None) => serde_json::Value::Object(serde_json::Map::new()),
+        other => serde_json::Value::String(scval_str(other)),
+    }
+}
+
+/// The `DataKey` variant name a contract-instance storage key encodes; the
+/// encoding is a one-element vector holding the variant's name.
+fn instance_key_name(key: &ScVal) -> Option<String> {
+    let ScVal::Vec(Some(items)) = key else {
+        return None;
+    };
+    match items.0.as_slice() {
+        [ScVal::Symbol(symbol)] => Some(symbol.to_string()),
+        _ => None,
+    }
+}
+
+/// Run one permissionless read entrypoint in simulation and return its value.
+/// Nothing is signed, submitted, or persisted.
+fn simulate_read(rpc: &Rpc, guard: &ScAddress, function: &str) -> Result<ScVal, String> {
+    let invocation = InvokeContractArgs {
+        contract_address: guard.clone(),
+        function_name: ScSymbol(function.try_into().expect("function name fits a symbol")),
+        args: VecM::default(),
+    };
+    let op = invoke_op(&invocation, VecM::default());
+    let envelope = build_initial_envelope(
+        &MuxedAccount::Ed25519(Uint256([0u8; 32])),
+        0,
+        op,
+        guard,
+        CallKind::ReadOnly,
+    );
+    let sim = rpc.simulate(&b64_encode_xdr(&envelope));
+    if let Some(message) = simulation_error_message(&sim) {
+        return Err(format!("`{function}` simulation failed: {message}"));
+    }
+    let encoded = sim["results"]
+        .get(0)
+        .and_then(|result| result["xdr"].as_str())
+        .ok_or_else(|| format!("`{function}` simulation returned no result value"))?;
+    Ok(xdr(encoded))
+}
+
+/// Post-deployment verification: confirm in one read-only pass what the guard
+/// actually has live — the policy hash (drift anchor, SPEC §7.3), the pause and
+/// freeze state, and the registered admin and agent key. It simulates the
+/// contract's own `status()` and `policy_hash()` reads and fetches the instance
+/// entry, so it signs nothing, submits nothing, and can be repeated freely.
+fn cmd_verify(rpc: &Rpc, guard: &ScAddress, reporter: &Reporter) -> Result<(), String> {
+    let ScAddress::Contract(ContractId(Hash(guard_id))) = guard else {
+        return Err(format!("`verify` needs a contract address, got {guard:?}"));
+    };
+
+    let status = scval_json(&simulate_read(rpc, guard, "status")?);
+    let policy_hash = match simulate_read(rpc, guard, "policy_hash")? {
+        ScVal::Bytes(bytes) => hex::encode(bytes.0.as_slice()),
+        other => scval_str(&other),
+    };
+
+    let res = rpc_or_exit(rpc.post(
+        "getLedgerEntries",
+        serde_json::json!({ "keys": [b64_encode_xdr(&guard_instance_key(guard))] }),
+    ));
+    let mut initialized = false;
+    let mut admin: Option<String> = None;
+    let mut agent_pubkey: Option<String> = None;
+    let mut policy_version: Option<u32> = None;
+    if let Some(encoded) = res["entries"]
+        .get(0)
+        .and_then(|entry| entry["xdr"].as_str())
+    {
+        let entry: LedgerEntryData = xdr(encoded);
+        if let LedgerEntryData::ContractData(entry) = &entry {
+            if let ScVal::ContractInstance(instance) = &entry.val {
+                let storage = instance.storage.clone().unwrap_or_default();
+                for item in storage.iter() {
+                    match instance_key_name(&item.key).as_deref() {
+                        Some("Initialized") => initialized = matches!(&item.val, ScVal::Bool(true)),
+                        Some("Admin") => admin = Some(scval_str(&item.val)),
+                        Some("AgentPubkey") => {
+                            if let ScVal::Bytes(bytes) = &item.val {
+                                agent_pubkey = Some(hex::encode(bytes.0.as_slice()));
+                            }
+                        }
+                        Some("PolicyVersion") => {
+                            if let ScVal::U32(version) = &item.val {
+                                policy_version = Some(*version);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "guard".into(),
+        serde_json::Value::String(contract_strkey(guard_id)),
+    );
+    if let Some(network) = reporter.network {
+        out.insert(
+            "network".into(),
+            serde_json::Value::String(network.name().to_string()),
+        );
+    }
+    out.insert("ledger".into(), serde_json::json!(rpc.latest_ledger()));
+    out.insert("initialized".into(), serde_json::Value::Bool(initialized));
+    out.insert(
+        "admin".into(),
+        admin.map_or(serde_json::Value::Null, serde_json::Value::String),
+    );
+    out.insert(
+        "agent_pubkey".into(),
+        agent_pubkey.map_or(serde_json::Value::Null, serde_json::Value::String),
+    );
+    out.insert("policy_version".into(), serde_json::json!(policy_version));
+    out.insert("policy_hash".into(), serde_json::Value::String(policy_hash));
+    out.insert("status".into(), status);
+    println!("{}", serde_json::Value::Object(out));
+
+    Ok(())
+}
+
 /// Simulate a prospective transfer and display the decision (allowed/blocked with reason)
 fn cmd_check(
     rpc: &Rpc,
@@ -5367,7 +5539,14 @@ fn main() {
     }
     if !matches!(
         cmd.as_str(),
-        "preflight" | "transfer" | "transfer-from" | "heartbeat" | "status" | "policy" | "check"
+        "preflight"
+            | "transfer"
+            | "transfer-from"
+            | "heartbeat"
+            | "status"
+            | "policy"
+            | "check"
+            | "verify"
     ) {
         exit_with(format!(
             "unknown subcommand '{cmd}' (see `agent-tx --help`)"
@@ -5419,6 +5598,11 @@ fn main() {
                 &passphrase,
                 reporter,
             ) {
+                exit_with(e);
+            }
+        }
+        "verify" => {
+            if let Err(e) = cmd_verify(&rpc, &request.guard, &reporter) {
                 exit_with(e);
             }
         }

@@ -67,19 +67,17 @@ runs once rules 1–6 have passed. The one class of `n/a` that *is* a gap is an 
    not merely fail to apply — it is *not reached* for the classification logic. A call
    blocked at rule 1 is never parsed, never matched against an allowlist, and never touches
    the rolling window.
-3. **Rule 1 (`AdminFrozen`) is evaluated before rule 3 (`NoPolicy`) in code, which matches
-   SPEC §4's numbering.** `decide()` reads `state.admin_frozen` and returns for every context
-   before it destructures the `Option<&PolicyConfig>` (`src/engine.rs`, after the §4 row 0
-   `MAX_AUTH_CONTEXTS` bound and before every policy gate), so an account that is both frozen and
-   policy-less reports `admin_frozen`.
-   What is *not* pinned is that combination: no test in this map's index freezes an account and
-   then revokes or withholds the policy, so the ordering is engine behavior with no assertion
-   behind it. See [finding F-1](#f-1-rule-order-adminfrozen-precedes-no_policy-and-is-unpinned).
-4. **Rule 6 admits `heartbeat` only, not `check`.** SPEC §4 rule 6 lists "(heartbeat, check)";
-   `decide()` permits only `heartbeat`, everything else on the account's own address
-   returns `SelfFunctionNotAllowed`. `check`/`check_detailed` are views that do not
-   `require_auth`, so they never appear in `auth_contexts` in practice — the discrepancy
-   is in the spec text, not observable in behavior. See [finding F-4](#f-4-rule-6-names-check-which-the-engine-does-not-admit).
+3. **`NoPolicy` (rule 1) is evaluated before `AdminFrozen` (rule 2).** The policy snapshot is
+   resolved before any account-gate flag is read, and SPEC §4 numbers the rows in that
+   same order (issue #299), so the *no-policy + frozen* combination reports `no_policy` in
+   both the spec and the code. Pinned by
+   `frozen_and_no_policy_reports_no_policy_on_chain` (`src/integration_tests.rs`).
+4. **Rule 6 admits `heartbeat` and `self_lock`, not `check`.** SPEC §4 rule 6 used to list
+   "(heartbeat, check)"; `decide()` permits `heartbeat` and (since issue #306) `self_lock`,
+   and everything else on the account's own address returns `SelfFunctionNotAllowed`.
+   `check`/`check_detailed` are views that do not `require_auth`, so they never appear in
+   `auth_contexts` in practice. The SPEC cell now names the real allowed set. See
+   [finding F-4](#f-4-rule-6-names-check-which-the-engine-does-not-admit).
 5. **The window is pruned once, up front, and committed only if every context passes.**
    A `Blocked` decision leaves the ledger untouched (`src/window.rs`), so a denied call can
    never spend the window. This is what makes the K2 column's "no partial commit" claim
@@ -95,12 +93,12 @@ issue asks for: 7 × 6 = **42 cells, all filled**.
 
 | SPEC §4 rule | K1 self | K2 asset transfer | K3 asset other-fn | K4 protocol | K5 create-contract | K6 unknown |
 |---|---|---|---|---|---|---|
-| **1.** `AdminFrozen` set | `admin_frozen` ᴬ | `admin_frozen` ᴬ | `admin_frozen` ᴬ | `admin_frozen` ᴬ | `admin_frozen` ᴬ | `admin_frozen` ᴬ |
-| **2.** dead-man grace elapsed | `heartbeat_expired` ᴬ | `heartbeat_expired` ᴬ | `heartbeat_expired` ᴬ | `heartbeat_expired` ᴬ | `heartbeat_expired` ᴬ | `heartbeat_expired` ᴬ |
-| **3.** no `Policy` stored | `no_policy` ᴬ | `no_policy` ᴬ | `no_policy` ᴬ | `no_policy` ᴬ | `no_policy` ᴬ | `no_policy` ᴬ |
+| **1.** no `Policy` stored | `no_policy` ᴬ | `no_policy` ᴬ | `no_policy` ᴬ | `no_policy` ᴬ | `no_policy` ᴬ | `no_policy` ᴬ |
+| **2.** `AdminFrozen` set | `admin_frozen` ᴬ | `admin_frozen` ᴬ | `admin_frozen` ᴬ | `admin_frozen` ᴬ | `admin_frozen` ᴬ | `admin_frozen` ᴬ |
+| **3.** dead-man grace elapsed | `heartbeat_expired` ᴬ | `heartbeat_expired` ᴬ | `heartbeat_expired` ᴬ | `heartbeat_expired` ᴬ | `heartbeat_expired` ᴬ | `heartbeat_expired` ᴬ |
 | **4.** `paused` | `paused` ᴬ | `paused` ᴬ | `paused` ᴬ | `paused` ᴬ | `paused` ᴬ | `paused` ᴬ |
 | **5.** outside active window | `outside_active_window` ᴬ | `outside_active_window` ᴬ | `outside_active_window` ᴬ | `outside_active_window` ᴬ | `outside_active_window` ᴬ | `outside_active_window` ᴬ |
-| **6.** self-call admission | **pass** (`heartbeat`) / `self_function_not_allowed` (any other fname) | `n/a` | `n/a` | `n/a` | `n/a` | `n/a` |
+| **6.** self-call admission | **pass** (`heartbeat`, `self_lock`) / `self_function_not_allowed` (any other fname) | `n/a` | `n/a` | `n/a` | `n/a` | `n/a` |
 | **7.** per-context classification | `self_function_not_allowed` | `invalid_amount` → `recipient_not_allowed` → `per_tx_cap_exceeded` → `window_cap_exceeded` → **pass** ᴮ | `function_not_allowed` | `function_not_allowed` / **pass** | `create_contract_not_allowed` | `unknown_contract` |
 
 ᴬ = **kind-independent by construction.** The rule's condition is evaluated on account
@@ -135,9 +133,9 @@ with a pointer into the [gap list](#4-known-coverage-gaps). Keys resolve in
 
 | SPEC §4 rule | K1 self | K2 asset transfer | K3 asset other-fn | K4 protocol | K5 create-contract | K6 unknown |
 |---|---|---|---|---|---|---|
-| **1.** `AdminFrozen` | — gap **G5** | `E-9` `I-13` | — gap **G3** | — gap **G3** | — gap **G3** | — gap **G3** |
-| **2.** `HeartbeatExpired` | `E-10` `E-12` `I-12` | `E-9` `E-12` `I-12` | — gap **G4** | — gap **G4** | — gap **G4** | — gap **G4** |
-| **3.** `NoPolicy` | — gap **G6** | `E-1` `I-7` `I-18` | — gap **G6** | — gap **G6** | — gap **G6** | — gap **G6** |
+| **1.** `NoPolicy` | — gap **G6** | `E-1` `I-7` `I-18` | — gap **G6** | — gap **G6** | — gap **G6** | — gap **G6** |
+| **2.** `AdminFrozen` | — gap **G5** | `E-9` `I-13` | — gap **G3** | — gap **G3** | — gap **G3** | — gap **G3** |
+| **3.** `HeartbeatExpired` | `E-10` `E-12` `I-12` | `E-9` `E-12` `I-12` | — gap **G4** | — gap **G4** | — gap **G4** | — gap **G4** |
 | **4.** `Paused` | — gap **G7** | `E-9` | — gap **G7** | — gap **G7** | — gap **G7** | — gap **G7** |
 | **5.** `OutsideActiveWindow` | `E-12` `I-21` | `E-12` `I-21` | — gap **G1** | — gap **G1** | — gap **G1** | — gap **G1** |
 | **6.** self-call admission | `E-10` `E-11` | `n/a` | `n/a` | `n/a` | `n/a` | `n/a` |
@@ -215,7 +213,7 @@ integration test** for `paused` on any kind, so the on-chain path (host auth flo
 > asserts a transfer and a heartbeat are both blocked, then `paused = false` and both
 > pass.
 
-### G3 — rule 1 `AdminFrozen` × {K3, K4, K5, K6}
+### G3 — rule 2 `AdminFrozen` × {K3, K4, K5, K6}
 
 `I-13` proves freeze blocks a **K2** transfer. Nothing proves it binds the other kinds.
 Given SPEC §6's "boundary stated exactly" claim — that freeze applies to *every* call the
@@ -226,7 +224,7 @@ be silently broken by a future refactor of `parse_call` or of the pre-gate order
 > `decide()` with `admin_frozen = true` over a self, protocol, create-contract, and
 > unknown context and asserts `AdminFrozen` for all four).
 
-### G4 — rule 2 `HeartbeatExpired` × {K3, K4, K5, K6}
+### G4 — rule 3 `HeartbeatExpired` × {K3, K4, K5, K6}
 
 Same shape as G3, for the dead-man switch. `E-10` pins heartbeat (K1) and `E-9`/`I-12` pin
 transfer (K2); the other four kinds are unpinned.
@@ -234,7 +232,7 @@ transfer (K2); the other four kinds are unpinned.
 > **Suggested test:** same iteration as G3 with a stale `last_heartbeat`. Worth pairing
 > with G3 in one "transaction-level gates bind every kind" test module.
 
-### G5 — rule 1 `AdminFrozen` × K1 (self)
+### G5 — rule 2 `AdminFrozen` × K1 (self)
 
 `I-13` blocks transfers under freeze but not heartbeats. The SPEC §5 / reason-glossary
 claim that a frozen account's heartbeat is blocked too is currently unpinned.
@@ -242,7 +240,7 @@ claim that a frozen account's heartbeat is blocked too is currently unpinned.
 > **Suggested test:** assert `heartbeat_expect_blocked()` while frozen, before the
 > `unfreeze` half of `I-13`.
 
-### G6 — rule 3 `NoPolicy` × {K1, K3, K4, K5, K6}
+### G6 — rule 1 `NoPolicy` × {K1, K3, K4, K5, K6}
 
 `no_policy` is pinned for K2 by `E-1`, `I-7`, and `I-18` — including the revoke path in
 `I-18`, which is the more interesting half. The other five kinds are unpinned, including
@@ -366,29 +364,24 @@ move the item out of the [gap list](#4-known-coverage-gaps) rather than leaving 
 ## 6. Findings for maintainers
 
 Writing the matrix surfaced four places where **SPEC text, `src/engine.rs`, and the test suite
-do not all line up**. None are fixed here — this map is documentation and each needs a
-maintainer decision on which side is correct. They are listed in the order a reviewer should
+do not all line up**. F-1 (rule order) and F-4 (the rule-6 self-call set) are now resolved by
+issues #299 and #306, with the spec reordered and both behaviours pinned. The remaining two need
+a maintainer decision on which side is correct; they are listed in the order a reviewer should
 look at them.
 
 <a id="f-1-rule-order-adminfrozen-precedes-no_policy-and-is-unpinned"></a>
-### F-1 — rule order: `AdminFrozen` precedes `NoPolicy`, and nothing pins it
+### F-1 — rule order: `NoPolicy` precedes `AdminFrozen` — **resolved**
 
-SPEC §4 numbers `AdminFrozen` as rule 1 and `NoPolicy` as rule 3 and says "first match wins".
-`decide()` agrees with that numbering: it reads `state.admin_frozen` and returns for every
-context before it destructures the `Option<&PolicyConfig>`, so a frozen *and* policy-less
-account reports `admin_frozen`. (This map's [§1.3 note 3](#13-precedence-notes-read-before-trusting-any-single-cell) recorded
-the opposite order; it is corrected here against the current `src/engine.rs`, and SPEC §5.2 now
-states the precedence as fact rather than as a disagreement.)
+The authorization path resolves the policy snapshot (`AuthSnapshot::load`) before it reads any
+account-gate flag, so a frozen *and* policy-less account reports `no_policy` through
+`__check_auth`. SPEC §4 previously numbered `AdminFrozen` first; issue #299 reordered the table
+to `1 NoPolicy`, `2 AdminFrozen`, `3 HeartbeatExpired`, matching what the host path actually
+returns. (Inside `decide`, which only runs once a policy exists, the `admin_frozen` check comes
+first — the snapshot has already short-circuited the policy-less case.)
 
-What remains is that no test distinguishes the combination: `E-9`'s frozen case always installs a
-policy first, and the on-chain freeze test (`I-13`) never revokes it. So the interaction of rule 1
-and rule 3 — which reason an operator sees when both a freeze and a revoked policy are in force —
-is engine behavior with no assertion behind it, and a refactor that swapped the two blocks would
-pass the whole suite while changing the reported reason.
-
-> **Suggested test:** `decide()` with `admin_frozen = true` and `policy = None`, asserting
-> `AdminFrozen` for every context. One assertion, and it converts this finding into a pinned
-> precedence that SPEC §5.2 can cite.
+The combination is now pinned end-to-end by
+`frozen_and_no_policy_reports_no_policy_on_chain` (`src/integration_tests.rs`), which freezes a
+policy-less account and asserts the block reason is `no_policy`.
 
 <a id="f-2-asset_not_allowed-and-protocol_not_allowed-are-unreachable-in-decide"></a>
 ### F-2 — `asset_not_allowed` and `protocol_not_allowed` are unreachable in `decide()` (RESOLVED in #291)
@@ -422,14 +415,13 @@ cost table does list as gate 6). The matrix includes both; §4 rule 7's inline l
 This is the same omission issue #132 tracks for the SPEC §7 enum, one section earlier.
 
 <a id="f-4-rule-6-names-check-which-the-engine-does-not-admit"></a>
-### F-4 — rule 6 names `check`, which the engine does not admit
+### F-4 — rule 6 named `check`, which the engine does not admit — **resolved**
 
-SPEC §4 rule 6 reads "(`heartbeat`, `check`)". `decide()` permits only `heartbeat`; any
-other self-function returns `SelfFunctionNotAllowed` (pinned by `E-11`, which uses
-`set_policy` as its example). This is almost certainly harmless — `check` and
-`check_detailed` are views that never `require_auth`, so they never appear in
-`auth_contexts` — but the spec text overstates the allowed set. Worth a one-word fix so
-the allowed set is exactly the enforced set.
+SPEC §4 rule 6 used to read "(`heartbeat`, `check`)". `decide()` permits `heartbeat` and
+`self_lock`; any other self-function returns `SelfFunctionNotAllowed` (pinned by `E-11`,
+which uses `set_policy` as its example). The cell now names the real allowed set, so the
+SPEC and the engine agree. (`check`/`check_detailed` are views that never `require_auth`,
+so they never appear in `auth_contexts` anyway.)
 
 ---
 
