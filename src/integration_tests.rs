@@ -944,13 +944,21 @@ impl Harness {
     /// Validates the resulting full config before writing; a duplicate or
     /// self-addressed recipient is rejected fail-closed (state unchanged).
     fn add_recipient_invocation(&self, recipient: &Address) -> SorobanAuthorizedInvocation {
-        self.invocation(&self.guard, "add_recipient", std::vec![recipient.clone().into_val(&self.env)])
+        self.invocation(
+            &self.guard,
+            "add_recipient",
+            std::vec![recipient.clone().into_val(&self.env)],
+        )
     }
 
     /// Removes `recipient` from the policy allowlist via targeted patch.
     /// A no-op (recipient not present) leaves storage, revision, and events untouched.
     fn remove_recipient_invocation(&self, recipient: &Address) -> SorobanAuthorizedInvocation {
-        self.invocation(&self.guard, "remove_recipient", std::vec![recipient.clone().into_val(&self.env)])
+        self.invocation(
+            &self.guard,
+            "remove_recipient",
+            std::vec![recipient.clone().into_val(&self.env)],
+        )
     }
 
     fn rotate_agent_key_invocation(&self, new_pubkey: &BytesN<32>) -> SorobanAuthorizedInvocation {
@@ -7729,82 +7737,86 @@ fn empty_auth_contexts_approves_without_emitting_auth_checked() {
     assert_eq!(h.stored_window().unwrap().total, 40);
 }
 
-
 // --- Targeted policy patch entrypoints (issue #303) ---
 
 #[test]
 fn add_recipient_duplicate_is_rejected() {
     let mut h = Harness::new();
-    let guard = h.guard.clone();
     let recv = h.recv.clone();
     let mut policy = h.base_policy();
     policy.window_cap = 100;
-    policy.recipients.push_back(recv.clone());
     h.set_time(1_000);
     h.install_policy(&policy);
 
-    # Add the same recipient twice -> rejected fail-closed
+    // Adding an already-listed recipient is rejected without changing state.
     let root = h.add_recipient_invocation(&recv);
-    let entry = h.guard_entry(&root);
+    let entry = h.admin_entry(&root);
     h.enforce(entry);
-    assert_eq!(h.policy().unwrap().recipients.len(), 1);
-    assert_eq!(h.policy_revision(), 1);
-    let ev = h.latest_event("event_policy_set");
-    assert_eq!(ev["revision"].as_u64().unwrap(), 1);
-
-    # Second add of the same recipient should be a no-op (already present)
-    let root2 = h.add_recipient_invocation(&recv);
-    let entry2 = h.guard_entry(&root2);
-    h.enforce(entry2);
-    # State must remain unchanged: still 1 recipient, revision still 1
-    assert_eq!(h.policy().unwrap().recipients.len(), 1);
-    assert_eq!(h.policy_revision(), 1);
-    let ev2 = h.latest_event("event_policy_set");
-    # A redundant add still emits the event so the audit trail records the action
-    assert!(ev2.is_some());
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.add_recipient(&recv);
+    }));
+    assert!(
+        result.is_err(),
+        "adding a duplicate recipient must fail closed"
+    );
+    assert_eq!(event_count(&h.env, "event_policy_set"), 0);
+    assert_eq!(client.policy().unwrap().recipients.len(), 1);
+    assert_eq!(h.status().policy_revision, 1);
 }
 
 #[test]
 fn remove_recipient_absent_is_noop() {
     let mut h = Harness::new();
-    let guard = h.guard.clone();
     let other = h.other.clone();
     let mut policy = h.base_policy();
     policy.window_cap = 100;
-    policy.recipients.push_back(other.clone());
     h.set_time(1_000);
     h.install_policy(&policy);
 
-    # Remove a recipient that is not in the list -> true no-op
+    // Remove a recipient that is not in the list -> true no-op
     let root = h.remove_recipient_invocation(&other);
-    let entry = h.guard_entry(&root);
+    let entry = h.admin_entry(&root);
     h.enforce(entry);
-    # Storage, revision, and events must be unchanged
-    assert_eq!(h.policy().unwrap().recipients.len(), 1);
-    assert_eq!(h.policy_revision(), 1);
-    let ev = h.latest_event("event_policy_set");
-    assert!(ev.is_none());
+    PolicyEngineClient::new(&h.env, &h.guard).remove_recipient(&other);
+    // Storage, revision, and events must be unchanged
+    assert_eq!(event_count(&h.env, "event_policy_set"), 0);
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard)
+            .policy()
+            .unwrap()
+            .recipients
+            .len(),
+        1
+    );
+    assert_eq!(h.status().policy_revision, 1);
 }
 
 #[test]
 fn remove_recipient_present_removes() {
     let mut h = Harness::new();
-    let guard = h.guard.clone();
     let recv = h.recv.clone();
-    let other = h.other.clone();
     let mut policy = h.base_policy();
     policy.window_cap = 100;
-    policy.recipients.push_back(recv.clone());
     h.set_time(1_000);
     h.install_policy(&policy);
 
-    # Remove the present recipient
+    // Remove the present recipient
     let root = h.remove_recipient_invocation(&recv);
-    let entry = h.guard_entry(&root);
+    let entry = h.admin_entry(&root);
     h.enforce(entry);
-    # Recipient removed, revision bumped, event emitted
-    assert_eq!(h.policy().unwrap().recipients.len(), 0);
-    assert_eq!(h.policy_revision(), 2);
-    let ev = h.latest_event("event_policy_set");
-    assert!(ev.is_some());
+    PolicyEngineClient::new(&h.env, &h.guard).remove_recipient(&recv);
+    // Recipient removed, revision bumped, event emitted
+    assert_eq!(event_count(&h.env, "event_policy_set"), 1);
+    let event_revision = last_event_revision(&h.env, "event_policy_set");
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard)
+            .policy()
+            .unwrap()
+            .recipients
+            .len(),
+        0
+    );
+    assert_eq!(h.status().policy_revision, 2);
+    assert_eq!(event_revision, 2);
 }
