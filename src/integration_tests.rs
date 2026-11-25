@@ -3634,7 +3634,17 @@ fn revoke_policy_is_instant_default_deny() {
 
 // ── revoke_policy mid-flight (issue #95) ────────────────────────────────
 //
-// SPEC §7 documents `revoke_policy` as "Removes Policy and Window ->\n// default-deny immediately", and SPEC §3's storage table makes `Window` the\n// account's only rolling spend ledger. The behaviour those two statements\n// jointly promise is *not* pinned by any test, and the interesting part is\n// precisely the interaction an admin could exploit: because the window is\n// **cleared** (not merely paused), an admin cycling revoke -> set_policy starts\n// the account on a fresh window, so spend history does not survive the cycle.\n// That is admin-attested by design (SPEC §7: "fresh window on every policy\n// change"), so the tests below pin it as intentional rather than let it read\n// as an accident.
+// SPEC §7 documents `revoke_policy` as "Removes Policy and Window ->
+// default-deny immediately", and SPEC §3's storage table makes `Window` the
+// account's only rolling spend ledger. The behaviour those two statements
+// jointly promise is *not* pinned by any test, and the interesting part is
+// precisely the interaction an admin could exploit: because the window is
+// **cleared** (not merely paused), an admin cycling revoke -> set_policy starts
+// the account on a fresh window, so spend history does not survive the cycle.
+// That is admin-attested by design: `set_policy` preserves the window only on
+// an *edit* of an installed policy (issue #289), so with no `Policy` stored
+// the next call is a first install and seeds an empty window (SPEC §7). The
+// tests below pin it as intentional rather than let it read as an accident.
 //
 // SPEC §4 rule 3 is the gate the cleared policy falls through to: with no\n// `Policy` stored, every context blocks with `Reason::NoPolicy`.
 
