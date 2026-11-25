@@ -2648,6 +2648,104 @@ fn blocked_recipient_wins_over_escape_hatch() {
 }
 
 #[test]
+fn test_only_decision_trace_covers_allow_deny_and_malformed_paths() {
+    use crate::engine::{decide_traced, AccountState, AssetTransferGate, Decision, DecisionGate};
+    use crate::window::Ledger;
+
+    let h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    let policy = h.base_policy();
+    let state = AccountState {
+        admin_frozen: false,
+        last_heartbeat: 0,
+    };
+    let prefix = [
+        DecisionGate::AdminFrozen,
+        DecisionGate::PolicyPresent,
+        DecisionGate::DeadManSwitch,
+        DecisionGate::Paused,
+        DecisionGate::ActiveWindow,
+        DecisionGate::Classified,
+    ];
+
+    let mut ledger = Ledger::empty(&h.env);
+    let (verdicts, trace) = decide_traced(
+        &h.env,
+        &h.guard,
+        Some(&policy),
+        &state,
+        &mut ledger,
+        1_000,
+        soroban_sdk::vec![
+            &h.env,
+            crate::policy_engine_type::transfer_context(&h.env, &h.asset, &recv, 5)
+        ],
+    );
+    assert_eq!(verdicts, std::vec![Decision::Allowed]);
+    let mut expected = prefix.to_vec();
+    expected.extend([
+        DecisionGate::Transfer(AssetTransferGate::AssetPaused),
+        DecisionGate::Transfer(AssetTransferGate::PositiveAmount),
+        DecisionGate::Transfer(AssetTransferGate::RecipientNotBlocked),
+        DecisionGate::Transfer(AssetTransferGate::RecipientAllowed),
+        DecisionGate::Transfer(AssetTransferGate::PerTxCap),
+        DecisionGate::Transfer(AssetTransferGate::WindowCap),
+        DecisionGate::Allowed,
+    ]);
+    assert_eq!(trace.contexts, std::vec![expected]);
+
+    let mut ledger = Ledger::empty(&h.env);
+    let (verdicts, trace) = decide_traced(
+        &h.env,
+        &h.guard,
+        Some(&policy),
+        &state,
+        &mut ledger,
+        1_000,
+        soroban_sdk::vec![
+            &h.env,
+            crate::policy_engine_type::transfer_context(&h.env, &h.asset, &other, 5)
+        ],
+    );
+    assert_eq!(
+        verdicts,
+        std::vec![Decision::Blocked(GuardError::RecipientNotAllowed)]
+    );
+    let mut expected = prefix.to_vec();
+    expected.extend([
+        DecisionGate::Transfer(AssetTransferGate::AssetPaused),
+        DecisionGate::Transfer(AssetTransferGate::PositiveAmount),
+        DecisionGate::Transfer(AssetTransferGate::RecipientNotBlocked),
+        DecisionGate::Transfer(AssetTransferGate::RecipientAllowed),
+    ]);
+    assert_eq!(trace.contexts, std::vec![expected]);
+
+    let malformed = Context::Contract(ContractContext {
+        contract: h.asset.clone(),
+        fn_name: Symbol::new(&h.env, "transfer"),
+        args: soroban_sdk::Vec::new(&h.env),
+    });
+    let mut ledger = Ledger::empty(&h.env);
+    let (verdicts, trace) = decide_traced(
+        &h.env,
+        &h.guard,
+        Some(&policy),
+        &state,
+        &mut ledger,
+        1_000,
+        soroban_sdk::vec![&h.env, malformed],
+    );
+    assert_eq!(
+        verdicts,
+        std::vec![Decision::Blocked(GuardError::UnknownContract)]
+    );
+    let mut expected = prefix.to_vec();
+    expected.push(DecisionGate::UnknownContract);
+    assert_eq!(trace.contexts, std::vec![expected]);
+}
+
+#[test]
 fn blocked_recipients_contradiction_rejected_at_set_policy() {
     let h = Harness::new();
     let client = PolicyEngineClient::new(&h.env, &h.guard);
@@ -5440,6 +5538,10 @@ fn invalid_duplicate_per_asset_cap_rejected() {
             paused: false,
         },
     ];
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard).validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::DuplicateAssetCap)
+    );
     h.env.mock_all_auths();
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
@@ -6253,6 +6355,10 @@ fn validate_policy_reports_duplicate_address_in_list() {
     let mut p = h.base_policy();
     p.recipients = soroban_sdk::vec![&h.env, h.recv.clone(), h.recv.clone()];
     assert_rejects_with(&h, &p, &PolicyRuleId::DuplicateAddressInList);
+
+    let mut p = h.base_policy();
+    p.blocked_recipients = soroban_sdk::vec![&h.env, h.other.clone(), h.other.clone()];
+    assert_rejects_with(&h, &p, &PolicyRuleId::DuplicateAddressInList);
 }
 
 #[test]
@@ -6422,13 +6528,19 @@ fn validate_policy_reports_recipient_allow_and_blocked() {
 fn validate_policy_reports_protocol_contract_duplicate() {
     let h = Harness::new();
     let mut p = h.base_policy();
-    let rule = ProtocolRule {
+    let first = ProtocolRule {
         contract: h.asset.clone(),
         fns: None,
 
         paused: false,
     };
-    p.protocols = soroban_sdk::vec![&h.env, rule.clone(), rule];
+    let second = ProtocolRule {
+        contract: h.asset.clone(),
+        fns: Some(soroban_sdk::vec![&h.env, Symbol::new(&h.env, "swap")]),
+
+        paused: false,
+    };
+    p.protocols = soroban_sdk::vec![&h.env, first, second];
     assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolContractDuplicate);
 }
 
