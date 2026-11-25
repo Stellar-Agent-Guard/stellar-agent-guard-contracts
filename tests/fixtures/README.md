@@ -351,19 +351,21 @@ machine contract, and `schema_version` is what a consumer checks first.
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | int | Breaking-change marker. Bumped only when a field changes meaning or disappears; consumers must reject versions they don't know. |
+| `contract_version` | string | The deployed contract whose behavior these fixtures record. `phase1-testnet` is historical: it predates release versioning and is intentionally not the current `Cargo.toml` version. `scripts/check-fixture-vocab.sh` validates this fixture's reason symbols against the vocabulary recorded for that deployment in [`reason-vocabulary.json`](reason-vocabulary.json), not against today's enum. |
+| `contract_version_note` | string | Human explanation of how `contract_version` was identified and why it is historical. |
 | `network` | object | `name`, `protocol`, `passphrase`, `rpc`, `horizon`, `recorded_on`, `ledger_range_note` — the chain this evidence was captured on. |
 | `contracts` | object | `guard` (the deployed custom-account address) and `token` (the SAC address) from the table above. |
 | `accounts[]` | array | `role`, `address`, `key_alias` for each fixture account. |
 | `setup_transactions[]` | array | The Phase 1 setup table: `step` (stable key), `label` (prose), `tx`, and `ledger` (`null` — setup ledgers were not recorded individually). |
 | `scenarios[]` | array | Exactly five entries with `id` 1–5 matching the headings below. |
 | `scenarios[].outcome` | `"allowed"` \| `"blocked"` | Verdict of the recorded run. |
-| `scenarios[].expected_reason` | string | `allowed` when admitted, otherwise the block reason symbol (`per_tx_cap_exceeded`, `window_cap_exceeded`, `recipient_not_allowed`, `heartbeat_expired`) — the same vocabulary as [`docs/reason-glossary.md`](../../docs/reason-glossary.md). |
+| `scenarios[].expected_reason` | string | `allowed` when admitted, otherwise the block reason symbol emitted by the deployed `contract_version` (`per_tx_cap_exceeded`, `window_cap_exceeded`, `recipient_not_allowed`, `heartbeat_expired`) — the same historical vocabulary as [`docs/reason-glossary.md`](../../docs/reason-glossary.md). `scripts/check-fixture-vocab.sh` fails when a current-version fixture names a symbol outside the current `Error::reason()` vocabulary, and checks historical fixtures against their recorded version vocabulary instead. |
 | `scenarios[].guard` / `.token` / `.policy_tx` | string | Contract IDs the scenario ran against, plus the `set_policy` transaction that armed the policy in effect. |
 | `scenarios[].recipient` / `.amount` | string \| null / int | Transfer shape as recorded; `recipient` is `null` where the command above elided it. |
 | `scenarios[].tx` | string \| null | Confirmed transaction hash, or `null` — blocked scenarios are caught pre-broadcast and have no hash. |
 | `scenarios[].ledger` | int \| null | Ledger index of `tx`; `null` when blocked or not recorded. |
 | `scenarios[].recorded_utc` | string \| null | Horizon `created_at` time of `tx`, when recorded. |
-| `scenarios[].event_topics` | array | Recorded auth_checked topics. The canonical full vocabulary, including the empty reason topic on allowed outcomes, is in [`auth-checked-vocabulary.json`](auth-checked-vocabulary.json). |
+| `scenarios[].event_topics` | array | Recorded auth_checked topics. The canonical full vocabulary, including `[event_auth_checked, allowed, ok]` for allowed outcomes, is in [`auth-checked-vocabulary.json`](auth-checked-vocabulary.json). |
 | `scenarios[].notes[]` | array | The caveats the prose carries for that scenario. |
 | `scenarios[4].reversal` | object | DMS reversal: `action`, `by` (admin address), `tx`, `ledger`, `event_topics` (`[event_unfrozen]`). |
 | `scenarios[4].post_reversal` | object | The transfer that succeeded after `unfreeze()`: `outcome`, `expected_reason`, `amount`, `tx`, `ledger`, `recorded_utc`, `notes`. |
@@ -413,8 +415,8 @@ drift:
 [`auth-checked-vocabulary.json`](auth-checked-vocabulary.json) is the complete,
 machine-readable matrix of the allowed path and every `Error` code/reason
 symbol. Each entry pins its event topics, data map fields, and SPEC reference.
-Allowed decisions carry an empty reason topic because the contract publishes a
-`Symbol("")` when no block reason exists. The `auth_checked_vocabulary`
+Allowed decisions carry the real reason symbol `ok` — every outcome publishes a
+non-empty reason topic (issue #300). The `auth_checked_vocabulary`
 integration test deserializes this fixture and fails if it drifts from the
 `Error` enum or its reason-symbol mapping.
 
@@ -444,7 +446,7 @@ is
 
 | Scenario | Exit code from `agent-tx` | Reason an operator can decode | Reversal |
 |---|---|---|---|
-| 1 allowed | `0` | `topics: [event_auth_checked, allowed, ""]` — the reason topic is empty on an allow ([`auth-checked-vocabulary.json`](auth-checked-vocabulary.json)) | none needed |
+| 1 allowed | `0` | `topics: [event_auth_checked, allowed, ok]` — the reason topic is the real `ok` symbol on an allow ([`auth-checked-vocabulary.json`](auth-checked-vocabulary.json)) | none needed |
 | 2 per-tx cap | `1` | `per_tx_cap_exceeded`, contract code 22 | lower the amount, or `set_policy` to raise `per_tx_cap` |
 | 3 rolling window | `1` | `window_cap_exceeded`, code 23 | wait for the oldest spend to age out of the window; `set_policy` resets the ledger |
 | 4 allowlist | `1` | `recipient_not_allowed`, code 21 | `set_policy` to add the recipient |

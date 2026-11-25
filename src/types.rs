@@ -121,6 +121,10 @@ pub enum PolicyRuleId {
     AssetCapUnknownAsset,
     /// The same asset appears twice in `asset_caps`.
     DuplicateAssetCap,
+    /// A contract appears in both `assets` and `protocols` (issue #296).
+    /// Appended last so the previously documented variant ordinals stay
+    /// wire-stable.
+    AssetProtocolOverlap,
 }
 
 /// Result of the `validate_policy` read (issue #35): whether a candidate
@@ -150,7 +154,10 @@ pub enum ValidationOutcome {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowState {
-    /// Cached rolling total (sum of non-expired entries).
+    /// Cached rolling total, kept for observability and ABI stability only.
+    /// The stored `total` is never used for enforcement: it is recomputed from
+    /// `entries` on every load, so a corrupted cache can never admit spend
+    /// (SPEC §3, issue #346).
     pub total: i128,
     /// Chronological spend entries (oldest first).
     pub entries: Vec<SpendEntry>,
@@ -167,7 +174,9 @@ pub struct WindowState {
 pub struct RecipientWindowState {
     /// Account receiving transfers tracked by this ledger.
     pub recipient: Address,
-    /// Cached rolling total (sum of non-expired entries).
+    /// Cached rolling total for this recipient, kept for observability and ABI
+    /// stability only. Never used for enforcement: recomputed from `entries` on
+    /// every load, so a corrupted cache can never admit spend (SPEC §3, #346).
     pub total: i128,
     /// Chronological spend entries (oldest first).
     pub entries: Vec<SpendEntry>,
@@ -491,14 +500,16 @@ pub fn policy_canonical_encoding(env: &Env, cfg: &PolicyConfig) -> Bytes {
 }
 
 impl Error {
-    /// Convert an `Error` variant into its corresponding `BlockReason` symbol (as used in `CheckResult::Blocked`).
+    /// Convert an `Error` variant into its corresponding block-reason `Symbol`
+    /// (the payload of `CheckResult::Blocked` and the `reason` topic of
+    /// `auth_checked`; there is no separate `BlockReason` type — SPEC §7.1).
     #[allow(clippy::must_use_candidate)]
     pub fn to_block_reason(self) -> Symbol {
         // Uses the existing reason() string which matches SPEC §7 / reason glossary.
         Symbol::new(&soroban_sdk::Env::default(), self.reason())
     }
 
-    /// Attempt to convert a `BlockReason` symbol back to an `Error` variant.
+    /// Attempt to convert a block-reason `Symbol` back to an `Error` variant.
     #[allow(clippy::must_use_candidate)]
     pub fn from_block_reason(symbol: &Symbol) -> Option<Self> {
         let env = soroban_sdk::Env::default();
