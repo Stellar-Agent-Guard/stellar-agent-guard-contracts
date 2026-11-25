@@ -22,7 +22,7 @@ pub fn heartbeat(env: Env)
 `heartbeat` does `require_auth` on the contract itself. Since the contract is a custom account, the host invokes `__check_auth` to verify the authorization. This means:
 
 - The agent's Ed25519 signature is verified.
-- All account-level gates are evaluated: admin freeze, dead-man switch, pause, active window.
+- All account-level gates are evaluated: no policy, admin freeze (including an agent `self_lock`), dead-man switch, pause, active window.
 - A heartbeat arriving after the grace window expired is **rejected** — silence cannot self-revive.
 - A heartbeat while admin-frozen is **rejected**.
 

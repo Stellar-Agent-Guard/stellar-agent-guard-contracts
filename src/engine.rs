@@ -464,7 +464,12 @@ pub fn decide(
         let call = parse_call(env, self_addr, &ctx, cfg);
         let ctx_decision = match call {
             ParsedCall::SelfCall { fname } => {
-                if fname == Symbol::new(env, "heartbeat") {
+                // SPEC §6.1: the fixed self-call allowlist. `self_lock` is a
+                // capability *reduction* (it only sets `AdminFrozen`), so it is
+                // safe to admit inside the policy engine: a runaway agent can
+                // stop itself, but the lock is reversible only by the admin.
+                if fname == Symbol::new(env, "heartbeat") || fname == Symbol::new(env, "self_lock")
+                {
                     Decision::Allowed
                 } else {
                     Decision::Blocked(Error::SelfFunctionNotAllowed)
@@ -625,7 +630,9 @@ pub fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ProtocolRule, RecipientCap, MAX_AUTH_CONTEXTS, MAX_WINDOW_ENTRIES};
+    use crate::types::{
+        AssetCap, ProtocolRule, RecipientCap, MAX_AUTH_CONTEXTS, MAX_WINDOW_ENTRIES,
+    };
     use soroban_sdk::{auth::ContractContext, vec, Address, Env, IntoVal, Symbol, Val, Vec};
 
     fn addr(env: &Env, n: u8) -> Address {
@@ -824,6 +831,78 @@ mod tests {
             d.first().unwrap(),
             Decision::Blocked(Error::NoPolicy)
         ));
+    }
+
+    /// Issue #306: `self_lock` is admitted through the fixed §6.1 self-call
+    /// allowlist; every other non-heartbeat self-function stays denied.
+    #[test]
+    fn self_lock_is_an_admitted_self_call() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![
+            &env,
+            Context::Contract(ContractContext {
+                contract: sa.clone(),
+                fn_name: Symbol::new(&env, "self_lock"),
+                args: Vec::new(&env),
+            }),
+        ];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx);
+        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_eq!(l.total, 0, "self_lock moves no funds");
+    }
+
+    /// Issue #294: the classified asset identity is load-bearing — the
+    /// per-tx cap is resolved from the transfer's own asset, so two listed
+    /// assets with different overrides decide differently for the same amount.
+    #[test]
+    fn asset_identity_selects_the_per_asset_cap() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.per_tx_cap = 100;
+        p.allow_any_recipient = true;
+        p.assets = vec![&env, addr(&env, 1), addr(&env, 2)];
+        p.asset_caps = vec![
+            &env,
+            AssetCap {
+                asset: addr(&env, 1),
+                per_tx_cap: 10,
+                paused: false,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+
+        // Asset 1 carries a 10-unit override: 20 exceeds it even though the
+        // global cap is 100.
+        let capped = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 1, 2, 20)],
+        );
+        assert!(matches!(
+            capped.first().unwrap(),
+            Decision::Blocked(Error::PerTxCapExceeded)
+        ));
+
+        // Asset 2 falls back to the global 100-unit cap: the same amount is
+        // admitted. A decision that ignored `asset` could not tell these apart.
+        let uncapped = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 2, 2, 20)],
+        );
+        assert!(matches!(uncapped.first().unwrap(), Decision::Allowed));
     }
 
     #[test]
@@ -1909,7 +1988,7 @@ mod tests {
     fn bundled_heartbeat_with_spend_evaluated_against_pre_transaction_heartbeat() {
         // Issue #318: A bundle of [heartbeat, transfer] is evaluated against
         // the pre-transaction heartbeat. If the account is expired, both contexts
-        // are blocked by rule #2 with HeartbeatExpired.
+        // are blocked by rule #3 with HeartbeatExpired.
         let env = Env::default();
         let sa = self_addr(&env);
         let bundle = vec![&env, heartbeat_ctx(&env, &sa), transfer_ctx(&env, 1, 2, 5)];
