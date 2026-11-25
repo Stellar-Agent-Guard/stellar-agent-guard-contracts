@@ -7,6 +7,7 @@ on:
       - "fuzz/**"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "fuzz/Cargo.lock"
 
 jobs:
   check-auth-full-path:
@@ -17,5 +18,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+
+      # Cache the fuzz crate's dependency downloads. The key includes fuzz/Cargo.lock so
+      # a lockfile change busts the cache: the cache shortens repeated runs, it never
+      # masks a dependency change. A cold cache rebuilds from fuzz/Cargo.lock and stays
+      # green — never warm-cache a stale dependency set.
+      - name: Cache fuzz dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-
+
       - name: Run bounded check-auth smoke test
         run: cargo +nightly fuzz run check_auth_full_path --fuzz-dir fuzz -- -max_total_time=60
