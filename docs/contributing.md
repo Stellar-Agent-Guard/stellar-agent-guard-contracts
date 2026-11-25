@@ -30,9 +30,10 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 # Build the contract WASM (Soroban 27 targets wasm32v1-none)
 cargo build --release --target wasm32v1-none
 
-# README claim audit + docs link check
+# README claim audit + docs link check + enforcement-scope drift check
 scripts/verify-readme.sh
 scripts/verify-docs-reachability.sh
+scripts/check-enforcement-scope.sh
 
 # tools/agent-tx is a separate cargo project: fmt, clippy, test, build
 cargo fmt --manifest-path tools/agent-tx/Cargo.toml --check
@@ -45,7 +46,7 @@ cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 
 1. **No `unwrap()` / `expect()` / indexing without bounds in contract code** — the contract runs in the host with `panic = "abort"`; failures on the authorization path must be deliberate `panic_with_error!` calls that surface as stable `Error` reasons, never accidental traps.
 
-2. **Every policy change must update SPEC.md and the tests together** — the decision table and the enforcement-scope statement must stay word-for-word consistent with the code; that consistency is a review requirement, not a nicety.
+2. **Every policy change must update SPEC.md and the tests together** — the decision table and the enforcement-scope statement must stay word-for-word consistent with the code; that consistency is enforced, not merely reviewed. Scope wording is single-sourced in SPEC §2: edit the canonical paragraph there, then paste the identical paragraph into the README and `docs/enforcement-scope.md`. `scripts/check-enforcement-scope.sh` fails the `ci` job when the three copies diverge.
 
 3. **`clippy::all` and `clippy::pedantic` clean** — enforced in CI with `-D warnings`.
 
@@ -251,7 +252,7 @@ pub enum Error {
   ```rust
   Self::NewVariant => "new_variant",
   ```
-- Add `Self::NewVariant` to the `all_errors` array in `Error::from_block_reason(&Symbol) -> Option<Self>` so bidirectional `BlockReason` conversion works cleanly.
+- Add `Self::NewVariant` to the `all_errors` array in `Error::from_block_reason(&Symbol) -> Option<Self>` so bidirectional reason-symbol conversion works cleanly.
 
 #### Step 3: Implement the decision site & update `decision-table.json`
 - Emit the error at its decision site:
@@ -273,7 +274,7 @@ pub enum Error {
   ```
   Indicate whether it is reachable via `check()` preflight reads (`Yes` or `No`, with rationale if unreachable).
 - **SPEC §7 (`pub enum Error` code block)**: Add `NewVariant = 34,` into the markdown code block.
-- *Why:* The deny-list CI check (`scripts/check-spec-coverage.sh`) requires that every variant appears in SPEC §4 or §6 and *exactly once* in the SPEC §7 enum listing.
+- *Why:* The deny-list CI check (`scripts/check-spec-coverage.sh`) requires that every variant appears in SPEC §4 or §6, *exactly once* in the SPEC §7 enum listing, and *exactly once* in the §7.1 mapping table with the code and reason symbol declared in `src/types.rs`.
 
 #### Step 6: Update event vocabulary and glossaries
 - **Consumer vocabulary fixture**: Update [`tests/fixtures/auth-checked-vocabulary.json`](../tests/fixtures/auth-checked-vocabulary.json) by adding an outcome entry under `"outcomes"`:
@@ -318,7 +319,7 @@ Run the following verification checks in order before submitting your pull reque
    ```bash
    ./scripts/check-spec-coverage.sh
    ```
-   Fails if any variant is absent from SPEC §4/§6, absent from the §7 enum listing, or duplicated.
+   Fails if any variant is absent from SPEC §4/§6, absent from or duplicated in the §7 enum listing, or absent/duplicated/drifting in the §7.1 mapping table.
 
 2. **Decision-table drift check**:
    ```bash
@@ -376,6 +377,68 @@ Run the following verification checks in order before submitting your pull reque
    after pushing.
 3. Describe the *why* in the PR body: what was broken/wrong, what the fix does, and — for enforcement changes — how it was verified (tests, and testnet evidence where applicable).
 
+## Documentation changes and GitBook sync
+
+The docs site is published by GitBook's Git Sync integration; no workflow in
+this repository builds or deploys it. The full model is in
+[`docs/README.md`](README.md#documentation-site--how-it-is-built-previewed-and-published);
+this section is the contributor-facing checklist plus the one step that needs a
+maintainer.
+
+### Source of truth
+
+| What | File | Authority |
+|---|---|---|
+| Contract behavior | [`SPEC.md`](../SPEC.md) | **Normative.** Behavior, error codes, events, storage and invariants land here first. |
+| Explanatory pages | `docs/**/*.md` | Explanatory only; they never define behavior. |
+| Site structure | [`gitbook-docs.yaml`](../gitbook-docs.yaml) | The repository-side mapping of sections/spaces to source directories. A space's `key` is its permanent identity. |
+| Repository table of contents | [`docs/SUMMARY.md`](SUMMARY.md) and [`docs/.summary-allowlist`](.summary-allowlist) | Checked by CI; not read by GitBook today, because it sits below the mapped space root. |
+
+### Sync trigger
+
+A push to the branch connected in GitBook — `main` today — is imported by
+GitBook. A documentation change is therefore live only after its PR merges; a
+green `ci` check publishes nothing. The connected branch and sync direction
+live in the GitBook app, not in this repository.
+
+### Preview path
+
+1. **Markdown review** — render the file on GitHub or in your editor.
+2. **Repository gate** — run `scripts/verify-docs-reachability.sh` (CI runs it
+   too). It fails when a `docs/` page is not linked from `docs/SUMMARY.md` and
+   not allowlisted, or when a `SUMMARY.md` link dangles.
+3. **Site layout** — GitBook attaches a preview status with its own URL to PRs
+   against the synced branch. PRs from forks do not get one by default, so a
+   fork contributor relies on Markdown review plus a maintainer-run preview
+   from a branch in this repository when layout matters.
+
+### Publisher responsibility
+
+Contributors write the change and open the PR; merging to `main` publishes it.
+Only maintainers with access to the GitBook site can change
+`gitbook-docs.yaml`, configure Git Sync (connected branch, sync direction, fork
+previews), or edit the site in the GitBook editor.
+
+### Maintainer handoff
+
+A documentation PR is not finished at merge, and a layout-sensitive one is not
+verified by `ci`. Before closing the PR, a maintainer must:
+
+1. Confirm the merge landed on the branch GitBook is connected to (`main`); a
+   docs change on any other branch stays unpublished.
+2. Open the site's GitBook sync log and confirm the import succeeded. A failed
+   import leaves the live site on the previous revision.
+3. For a change to `gitbook-docs.yaml`, a space `path`, or a space `title`,
+   check the resulting URLs on the live site. A changed `key` creates a new
+   space and detaches the old one, so it needs explicit maintainer sign-off and
+   is not a routine docs edit.
+4. If GitBook is configured one-way (GitHub → GitBook), remember that editor
+   changes do not return to the repository: the repository remains the source
+   of truth, so the change must be committed here instead.
+
+Until step 2 is confirmed, treat the published site as unchanged regardless of
+how green the PR was.
+
 ## Project structure
 
 ```
@@ -396,4 +459,4 @@ SPEC.md                # Architecture specification (mechanism is settled)
 
 ## Issue backlog
 
-Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the [issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues); each carries one `complexity: trivial|small|medium|large` label.
+Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the [issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues); each carries one type label (`bug`, `enhancement`, `documentation`, or `question`) and one `complexity: trivial|small|medium|large` label. The full triage taxonomy, ownership rules, and the private route for security reports are in [CONTRIBUTING.md § Issue backlog](../CONTRIBUTING.md#issue-backlog).

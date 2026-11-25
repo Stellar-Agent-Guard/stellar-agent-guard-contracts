@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "event": "event_auth_checked",
-  "description": "Canonical topics and data-shape vocabulary for every auth_checked outcome. Allowed emits an empty reason topic because the contract represents a missing reason as Symbol(\"\").",
+  "description": "Canonical topics and data-shape vocabulary for every auth_checked outcome. Allowed emits the real reason symbol `ok`; no outcome publishes an empty-symbol topic.",
   "outcomes": [
     {
       "code": null,
@@ -10,7 +10,7 @@
       "topics": [
         "event_auth_checked",
         "allowed",
-        ""
+        "ok"
       ],
       "data": {
         "type": "Map",
