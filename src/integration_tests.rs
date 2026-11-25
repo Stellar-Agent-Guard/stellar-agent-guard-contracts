@@ -202,7 +202,8 @@ use soroban_sdk::xdr::{
     SorobanCredentials, WriteXdr,
 };
 use soroban_sdk::{
-    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, InvokeError, Symbol, Val,
+    contract, contractimpl, vec, Address, BytesN, Env, FromVal, IntoVal, InvokeError, Symbol,
+    TryFromVal, Val,
 };
 use std::format;
 
@@ -820,6 +821,10 @@ impl Harness {
         self.invocation(&self.guard, "freeze", std::vec![])
     }
 
+    fn self_lock_invocation(&self) -> SorobanAuthorizedInvocation {
+        self.invocation(&self.guard, "self_lock", std::vec![])
+    }
+
     fn propose_admin_invocation(&self, new_admin: &Address) -> SorobanAuthorizedInvocation {
         self.invocation(
             &self.guard,
@@ -1153,6 +1158,30 @@ impl Harness {
         PolicyEngineClient::new(&self.env, &self.guard).unfreeze();
     }
 
+    /// Agent-initiated `self_lock` (issue #306), signed with the agent key and
+    /// routed through `__check_auth`.
+    fn self_lock(&mut self) {
+        let root = self.self_lock_invocation();
+        let entry = self.guard_entry(&root);
+        self.enforce(entry);
+        PolicyEngineClient::new(&self.env, &self.guard).self_lock();
+    }
+
+    /// Attempt an agent-signed `unfreeze`: the admin-only path must reject it,
+    /// so the account stays locked.
+    fn agent_signed_unfreeze_expect_failure(&mut self) {
+        let root = self.unfreeze_invocation();
+        let entry = self.guard_entry(&root);
+        self.enforce(entry);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            PolicyEngineClient::new(&self.env, &self.guard).unfreeze();
+        }));
+        assert!(
+            res.is_err(),
+            "the agent must not be able to clear its own self-lock"
+        );
+    }
+
     /// `set_policy` once the harness has entered enforcing auth mode: the
     /// plain `install_policy` relies on mock auth and would be rejected.
     fn set_policy_enforcing(&mut self, cfg: &PolicyConfig) {
@@ -1206,16 +1235,21 @@ impl Harness {
 
     /// Did the guard emit an `auth_checked` event with `result = allowed`?
     /// `#[contractevent]` prepends the event name to the topic list, so the
-    /// `result` topic (SPEC §9) is at index 1.
+    /// `result` topic (SPEC §9) is at index 1 and the reason at index 2. An
+    /// allowed decision carries the real `ok` reason symbol, never an empty one
+    /// (issue #300).
     fn emitted_allowed_auth(&self) -> bool {
         let want = ScVal::Symbol(ScSymbol::try_from(std::vec::Vec::from("allowed")).unwrap());
+        let reason = symbol_val("ok");
         self.env
             .events()
             .all()
             .events()
             .iter()
             .any(|e| match &e.body {
-                xdr::ContractEventBody::V0(v0) => v0.topics.get(1) == Some(&want),
+                xdr::ContractEventBody::V0(v0) => {
+                    v0.topics.get(1) == Some(&want) && v0.topics.get(2) == Some(&reason)
+                }
             })
     }
 
@@ -2122,6 +2156,25 @@ fn no_policy_is_default_deny_on_chain() {
     s.at(1_000).expect_block(GuardError::NoPolicy, &recv, 10);
 }
 
+/// Issue #299: `AuthSnapshot::load` resolves the installed policy before any
+/// account-gate flag is read, so an account that is both admin-frozen and
+/// policy-less reports `no_policy` — not `admin_frozen`. Pins the precedence
+/// the reordered SPEC §4 table documents.
+#[test]
+fn frozen_and_no_policy_reports_no_policy_on_chain() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    h.set_time(1_000);
+    h.env.mock_all_auths();
+    PolicyEngineClient::new(&h.env, &h.guard).freeze();
+
+    let log = h.transfer_blocked_reason(&recv, 10);
+    assert!(
+        log.contains(GuardError::NoPolicy.reason()),
+        "a frozen, policy-less account must report no_policy; got: {log}"
+    );
+}
+
 #[test]
 fn per_tx_cap_violation_blocked_without_window_effect() {
     let s = GuardScenario::new();
@@ -2363,6 +2416,76 @@ fn allow_any_recipient_with_empty_list_still_enforces_both_caps() {
     h.transfer_expect_blocked(&other, 1);
 }
 
+/// Issue #317: `check()`'s synthetic context must be a faithful replica of the
+/// context the host hands `__check_auth` for the real transfer — SAC
+/// `transfer(from, to, amount)` with `from` = the guarded account, not the
+/// token address.
+///
+/// Nothing in the decision table reads `args[0]` today, so a wrong slot
+/// changes no verdict; the shape is pinned here so the
+/// `from`-is-the-guarded-account validation (issue #10) can land on top of a
+/// pre-flight path that already agrees with on-chain authorization. The second
+/// half of the test runs the identical transfer through both paths and asserts
+/// the same verdict — one allowed, one blocked.
+#[test]
+fn check_and_check_auth_agree_on_the_synthetic_transfer_context() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    h.install_policy(&h.base_policy());
+    h.set_time(1_000);
+
+    // 1. Shape: the synthetic context is `transfer(from, to, amount)` with
+    //    `from` = the account that would authorize it.
+    let synthetic = h.env.as_contract(&h.guard, || {
+        crate::policy_engine_type::transfer_context(&h.env, &h.asset, &recv, 5)
+    });
+    let Context::Contract(ContractContext {
+        contract,
+        fn_name,
+        args,
+    }) = synthetic
+    else {
+        panic!("preflight must build a contract-call context");
+    };
+    assert_eq!(contract, h.asset, "the synthetic call targets the SAC");
+    assert_eq!(fn_name, Symbol::new(&h.env, "transfer"));
+    assert_eq!(args.len(), 3, "SAC transfer arity is exactly 3");
+    let slot = |i: u32| {
+        Address::try_from_val(&h.env, &args.get(i).expect("arg slot")).expect("address arg")
+    };
+    assert_eq!(
+        slot(0),
+        h.guard,
+        "args[0] must be the guarded account (the SAC `from`), not the token address"
+    );
+    assert_eq!(slot(1), recv, "args[1] is the SAC `to`");
+    assert_eq!(
+        i128::try_from_val(&h.env, &args.get(2).expect("amount slot")).expect("i128 arg"),
+        5,
+        "args[2] is the SAC `amount`"
+    );
+
+    // 2. Allowed case: pre-flight and the host-routed authorization agree.
+    let preflight = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check(h.env.clone(), h.asset.clone(), recv.clone(), 5)
+    });
+    assert_eq!(preflight, CheckResult::Allowed);
+    h.transfer(&recv, 5); // `__check_auth` admits the identical transfer
+
+    // 3. Blocked case: pre-flight names the same reason `__check_auth` does.
+    let preflight = h.env.as_contract(&h.guard, || {
+        PolicyEngine::check(h.env.clone(), h.asset.clone(), other.clone(), 5)
+    });
+    assert_eq!(
+        preflight,
+        CheckResult::Blocked(Symbol::new(&h.env, "recipient_not_allowed"))
+    );
+    // `transfer_expect_blocked` re-runs the pre-flight, asserts the host log
+    // carries that same reason, and proves the blocked transfer moved nothing.
+    h.transfer_expect_blocked(&other, 5);
+}
+
 #[test]
 fn dead_man_switch_freeze_and_admin_reversal() {
     let s = GuardScenario::new();
@@ -2394,7 +2517,7 @@ fn dead_man_switch_freeze_and_admin_reversal() {
 ///
 /// Every auth context in one `__check_auth` call shares a single state snapshot
 /// loaded from storage before any context is executed. Even though the bundle contains
-/// a heartbeat intended to revive the account, the dead-man gate (rule #2) evaluates
+/// a heartbeat intended to revive the account, the dead-man gate (rule #3) evaluates
 /// every context in the transaction against the existing pre-transaction storage snapshot.
 /// Because the account is expired, `__check_auth` blocks the bundle with
 /// `HeartbeatExpired`, the transaction is rejected, and `LastHeartbeat` in storage
@@ -2514,6 +2637,74 @@ fn unfreeze_while_dms_fresh_emits_rearmed_dms_false() {
     assert_eq!(h.status().last_heartbeat, 1_000_010);
 }
 
+// ── Agent-initiated self-lock (issue #306) ──────────────────────────────
+//
+// `self_lock` is a capability *reduction*: the registered agent sets
+// `AdminFrozen` through its own auth path, blocking every subsequent
+// transaction — including further self-calls — and only the admin's
+// `unfreeze` can revive the account (SPEC §5 / §6.1).
+
+#[test]
+fn agent_self_lock_blocks_subsequent_validly_signed_transfer() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    h.set_time(1_000);
+    h.install_policy(&h.base_policy());
+    // Capture the policy generation immediately: `events().all()` exposes one
+    // invocation's log, not a cumulative history.
+    let revision = last_event_revision(&h.env, "event_policy_set");
+    // Baseline: this exact transfer is admitted before the lock.
+    h.transfer(&recv, 10);
+
+    h.self_lock();
+    // Assert the event before any other invocation: `events().all()` exposes
+    // only the most recent invocation's log.
+    assert_eq!(
+        last_event_revision(&h.env, "event_self_locked"),
+        revision,
+        "self_lock must emit its dedicated event under the policy generation it locked"
+    );
+    assert!(h.status().admin_frozen, "self_lock must set AdminFrozen");
+
+    // Still a validly signed, policy-shaped transfer — and now blocked by the
+    // account-level AdminFrozen gate before classification.
+    let log = h.transfer_blocked_reason(&recv, 10);
+    assert!(log.contains(GuardError::AdminFrozen.reason()));
+}
+
+#[test]
+fn agent_cannot_undo_its_own_self_lock() {
+    let mut h = Harness::new();
+    h.set_time(1_000);
+    h.install_policy(&h.base_policy());
+    h.self_lock();
+
+    // There is no agent-reachable unlock: the only reversal is admin
+    // `unfreeze`, and an agent-signed attempt is rejected by admin auth.
+    h.agent_signed_unfreeze_expect_failure();
+    assert!(
+        h.status().admin_frozen,
+        "only the admin can clear AdminFrozen after a self-lock"
+    );
+}
+
+#[test]
+fn admin_unfreeze_reverses_agent_self_lock() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    h.set_time(1_000);
+    h.install_policy(&h.base_policy());
+    h.self_lock();
+    h.transfer_expect_blocked(&recv, 10);
+
+    h.unfreeze();
+    assert!(
+        !h.status().admin_frozen,
+        "admin unfreeze clears the self-lock"
+    );
+    h.transfer(&recv, 10);
+}
+
 #[test]
 fn refresh_deadman_records_auto_freeze_and_emits_event() {
     let mut h = Harness::new();
@@ -2619,7 +2810,7 @@ fn admin_freeze_blocks_immediately_and_unfreeze_restores() {
 
 // ── Issue #48: the DMS timeline as one executable matrix (SPEC §5) ────────
 //
-// SPEC §5 rule #2 is a three-clause boolean — `grace > 0`, `LastHeartbeat != 0`
+// SPEC §5 rule #3 is a three-clause boolean — `grace > 0`, `LastHeartbeat != 0`
 // and `now - LastHeartbeat > grace` — and every clause has its own edge. Those
 // edges used to live in separate narrative tests, so nothing showed the whole
 // timeline at once. `dms_timeline_edge_matrix` is the table-driven unit twin of
@@ -2931,7 +3122,7 @@ fn dms_timeline_edge_matrix() {
 
     // ── B: `LastHeartbeat == 0` means "clock not armed" ────────────────────
     // The gate's `!= 0` clause and `dms_health`'s sentinel check read the same
-    // bytes and answer differently, on purpose: rule #2 never freezes an
+    // bytes and answer differently, on purpose: rule #3 never freezes an
     // account it has no attestation for, while the health view calls that state
     // Expired so consumers can alert. This scenario pins the asymmetry and the
     // moment the clock becomes armed.
@@ -2947,7 +3138,7 @@ fn dms_timeline_edge_matrix() {
             ),
             ("t=500_000", DmsOp::Time { t: 500_000 }),
             (
-                "rule #2 cannot fire on the sentinel: not expired",
+                "rule #3 cannot fire on the sentinel: not expired",
                 DmsOp::Status {
                     admin_frozen: false,
                     heartbeat_expired: false,
@@ -2992,7 +3183,7 @@ fn dms_timeline_edge_matrix() {
     );
 
     // ── C: `grace == 0` and the manual brake ──────────────────────────────
-    // grace = 0 is how "disabled" is encoded: neither clause of rule #2 can be
+    // grace = 0 is how "disabled" is encoded: neither clause of rule #3 can be
     // satisfied, so no amount of silence expires the account. `freeze()` is the
     // operator's answer for that configuration, and it is checked *before* the
     // DMS — which is why an admin-frozen live agent sees `admin_frozen` for the
@@ -3517,7 +3708,7 @@ fn rotate_agent_key_next_heartbeat_validity_spec_5_7() {
     // Edge: the DMS clock keeps counting from heartbeats *signed by the old
     // key* while a rotation lands inside a nearly-expired grace (SPEC §5).
     // Post-rotate, the new key is the only accepted signer (SPEC §7), and the
-    // DMS rule #2 still gates the new key's heartbeats: fine within grace,
+    // DMS rule #3 still gates the new key's heartbeats: fine within grace,
     // `HeartbeatExpired` once the grace elapses. Unit-level counterpart of the
     // on-chain agent-key-rotation proof (issue #5, SPEC §11 scenario 6).
     let mut h = Harness::new();
@@ -3551,13 +3742,13 @@ fn rotate_agent_key_next_heartbeat_validity_spec_5_7() {
     assert_eq!(h.status().last_heartbeat, 1_000_010);
 
     // 2. New key is accepted while grace remains (signature verifies against
-    //    the new stored key; 45 of 60s elapsed — rule #2 still passes).
+    //    the new stored key; 45 of 60s elapsed — rule #3 still passes).
     h.set_time(1_000_055);
     h.heartbeat_with(&new);
     assert_eq!(h.status().last_heartbeat, 1_000_055);
 
     // 3. Once the grace elapses, the (correctly signed) new-key heartbeat is
-    //    blocked — DMS rule #2 fires with `HeartbeatExpired`. This pins that
+    //    blocked — DMS rule #3 fires with `HeartbeatExpired`. This pins that
     //    the DMS is not reset by a valid signature alone; only a heartbeat
     //    admitted by the engine restarts the clock. The host event log records
     //    the emitted `auth_checked` reason (`heartbeat_expired`) even though
@@ -3630,7 +3821,17 @@ fn revoke_policy_is_instant_default_deny() {
 
 // ── revoke_policy mid-flight (issue #95) ────────────────────────────────
 //
-// SPEC §7 documents `revoke_policy` as "Removes Policy and Window ->\n// default-deny immediately", and SPEC §3's storage table makes `Window` the\n// account's only rolling spend ledger. The behaviour those two statements\n// jointly promise is *not* pinned by any test, and the interesting part is\n// precisely the interaction an admin could exploit: because the window is\n// **cleared** (not merely paused), an admin cycling revoke -> set_policy starts\n// the account on a fresh window, so spend history does not survive the cycle.\n// That is admin-attested by design (SPEC §7: "fresh window on every policy\n// change"), so the tests below pin it as intentional rather than let it read\n// as an accident.
+// SPEC §7 documents `revoke_policy` as "Removes Policy and Window ->
+// default-deny immediately", and SPEC §3's storage table makes `Window` the
+// account's only rolling spend ledger. The behaviour those two statements
+// jointly promise is *not* pinned by any test, and the interesting part is
+// precisely the interaction an admin could exploit: because the window is
+// **cleared** (not merely paused), an admin cycling revoke -> set_policy starts
+// the account on a fresh window, so spend history does not survive the cycle.
+// That is admin-attested by design: `set_policy` preserves the window only on
+// an *edit* of an installed policy (issue #289), so with no `Policy` stored
+// the next call is a first install and seeds an empty window (SPEC §7). The
+// tests below pin it as intentional rather than let it read as an accident.
 //
 // SPEC §4 rule 3 is the gate the cleared policy falls through to: with no\n// `Policy` stored, every context blocks with `Reason::NoPolicy`.
 
@@ -5365,6 +5566,47 @@ fn status_reads_never_write_window_or_emit_events() {
     assert_eq!(h.status().window_remaining, Some(0));
 }
 
+#[test]
+fn protocol_only_authorization_persists_the_pruned_window() {
+    // Issue #345: pruning in memory is correct for the current decision, but
+    // without a write the expired entries stay in storage and are re-loaded and
+    // re-summed on every later authorization. A non-spending (protocol-only)
+    // authorization must commit the prune through `save_ledger`.
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    policy.window_secs = 100;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+    h.set_asset_balance(&h.guard, 100);
+
+    h.transfer(&recv, 40);
+    h.set_time(1_001);
+    h.transfer(&recv, 30);
+
+    let before = h.stored_window().expect("admissions persist the window");
+    assert_eq!(before.entries.len(), 2);
+    assert_eq!(before.total, 70);
+
+    // Both entries are expired at 1_101 (ts + window_secs <= now). `heartbeat`
+    // routes through `__check_auth` but is a self-call, so it admits no spend.
+    h.set_time(1_101);
+    h.heartbeat();
+
+    let after = h.stored_window().expect("the window key is still present");
+    assert!(
+        after.entries.is_empty(),
+        "the protocol-only authorization must commit its prune"
+    );
+    assert_eq!(after.total, 0);
+    assert!(
+        after.protocol_call_entries.is_empty(),
+        "a heartbeat must not be counted as a rate-limited protocol call"
+    );
+    assert_eq!(h.status().window_remaining, Some(policy.window_cap));
+}
+
 // ── heartbeat `expires_at` (SPEC §9) ───────────────────────────────────
 // The event records the deadline the heartbeat was attested under, derived
 // from the policy current at emission time, so a consumer never has to
@@ -5536,6 +5778,24 @@ fn validate_policy_reports_per_tx_cap_exceeds_window_cap() {
     p.per_tx_cap = 200;
     p.window_cap = 100;
     assert_rejects_with(&h, &p, &PolicyRuleId::PerTxCapExceedsWindowCap);
+}
+
+#[test]
+fn validate_policy_reports_asset_protocol_overlap() {
+    // Issue #296: a contract in both `assets` and `protocols` would always be
+    // classified by the asset branch, silently dead-lettering its
+    // `ProtocolRule` (including any `fns` allowlist). Rejected at install.
+    let h = Harness::new();
+    let mut p = h.base_policy();
+    p.protocols = soroban_sdk::vec![
+        &h.env,
+        ProtocolRule {
+            contract: h.asset.clone(),
+            fns: None,
+            paused: false,
+        },
+    ];
+    assert_rejects_with(&h, &p, &PolicyRuleId::AssetProtocolOverlap);
 }
 
 #[test]

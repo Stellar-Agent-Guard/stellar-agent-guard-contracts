@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # scripts/check-spec-coverage.sh
 #
-# Deny-list CI check: every Error variant must appear in SPEC §4/§6 tables at least once
-# and exactly once in §7 enum (glossary).
-# Fails on: variant absent from §4/§6; variant absent from §7 enum; duplicate in §7 enum.
-# Runtime: <1s (grep-level, no codegen).
+# Deny-list CI check: every Error variant must appear in SPEC §4/§6 tables at least once,
+# exactly once in the §7 enum (glossary), and exactly once in the §7.1 mapping table with
+# the same numeric discriminant and reason symbol declared in src/types.rs.
+# Fails on: variant absent from §4/§6; variant absent from or duplicated in §7 enum;
+# variant absent from, duplicated in, or drifting from the §7.1 table.
+# Runtime: <1s (grep/awk-level, no codegen).
 #
 # Usage: ./scripts/check-spec-coverage.sh
 # Exit codes: 0 = all good, 1 = violations found, 2 = usage/internal error.
@@ -40,6 +42,12 @@ echo "$variants" | sed 's/^/  /'
 spec_section_4=$(awk '/^## 4\./ {p=1} /^## [56]\./ {p=0} p' "$SPEC_FILE")
 spec_section_6=$(awk '/^## 6\./ {p=1} /^## 7\./ {p=0} p' "$SPEC_FILE")
 spec_section_7_enum=$(awk '/pub enum Error/ {p=1} /^}/ {if(p) {print; p=0; exit}} p' "$SPEC_FILE")
+spec_section_7_1=$(awk '/^### 7\.1 / {p=1} /^### 7\.2 / {p=0} p' "$SPEC_FILE")
+
+if [[ -z "$spec_section_7_1" ]]; then
+    echo "ERROR: SPEC §7.1 mapping table not found in $SPEC_FILE" >&2
+    exit 2
+fi
 
 # Pre-compute all variant mentions in §4 (both Reason:: and bare in tables)
 # We just need to know IF a variant appears in §4, not count duplicates across tables
@@ -88,11 +96,36 @@ for variant in $variants; do
     else
         echo "  OK:   $variant — found exactly once in §7 enum glossary"
     fi
+
+    # Check §7.1: exactly one mapping row, carrying the same discriminant and
+    # reason symbol as src/types.rs. The table is the published ABI (issue #314).
+    expected_code=$(grep -E "^\s+${variant}\s*=\s*[0-9]+" "$TYPES_FILE" | sed -E 's/.*=\s*([0-9]+).*/\1/' | head -n1 || true)
+    expected_reason=$(grep -E "Self::${variant} => \"[a-z_]+\"" "$TYPES_FILE" | sed -E 's/.*=> "([a-z_]+)".*/\1/' | head -n1 || true)
+
+    row=$(echo "$spec_section_7_1" | grep -E "^\| *[0-9]+ *\| \`${variant}\` *\|" || true)
+    row_count=$(printf '%s\n' "$row" | grep -c . || true)
+
+    if [[ "$row_count" -ne 1 ]]; then
+        echo "  FAIL: $variant — FOUND $row_count TIMES in §7.1 mapping table (expected exactly once)"
+        errors=$((errors + 1))
+    else
+        row_code=$(printf '%s\n' "$row" | awk -F'|' '{gsub(/[ `]/, "", $2); print $2}')
+        row_reason=$(printf '%s\n' "$row" | awk -F'|' '{gsub(/[ `]/, "", $4); print $4}')
+        if [[ -n "$expected_code" && "$row_code" != "$expected_code" ]]; then
+            echo "  FAIL: $variant — §7.1 code $row_code does not match src/types.rs discriminant $expected_code"
+            errors=$((errors + 1))
+        elif [[ -n "$expected_reason" && "$row_reason" != "$expected_reason" ]]; then
+            echo "  FAIL: $variant — §7.1 reason '$row_reason' does not match Error::reason() '$expected_reason'"
+            errors=$((errors + 1))
+        else
+            echo "  OK:   $variant — §7.1 row matches code $row_code and reason '$row_reason'"
+        fi
+    fi
 done
 
 echo ""
 if [[ $errors -eq 0 ]]; then
-    echo "All Error variants covered in SPEC.md §4/§6 and exactly once in §7 enum ✓"
+    echo "All Error variants covered in SPEC.md §4/§6, exactly once in §7 enum, and pinned in §7.1 ✓"
     exit 0
 else
     echo "FAIL: $errors variant(s) have coverage issues"
