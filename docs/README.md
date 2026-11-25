@@ -221,6 +221,9 @@ preview or the GitBook editor.
   branch.
 - The repository's normal review rules apply to documentation like any other
   change: a green `ci` check and an approving review before merge.
+- Merging is not the end of a docs change: the maintainer who merges also owns
+  confirming GitBook picked the commit up. That handoff, step by step, is
+  ["Maintainer handoff" in `docs/contributing.md`](contributing.md#maintainer-handoff).
 
 ## Checklist for a documentation change
 

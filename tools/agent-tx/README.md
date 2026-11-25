@@ -81,7 +81,7 @@ agent-tx transfer --guard C... --token C... --to G... --amount 110 \
     --agent-secret "$AGENT_SECRET" --json
 ```
 
-Three shapes cover every run. An admitted decision, with the ledger the run
+Four shapes cover every run. An admitted decision, with the ledger the run
 observed:
 
 ```json
@@ -102,9 +102,29 @@ track:
 {"outcome":"allowed","tx_hash":"4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8","ledger":4566285,"network":"testnet"}
 ```
 
+A run that never produced an admission verdict, or whose submission failed —
+here a submitted transfer that was never confirmed. The hash is still present so
+the transaction stays trackable:
+
+```json
+{"outcome":"failed","reason":"timeout","tx_hash":"4c5759298c0364b01d386a5935b964532b04978ea595d96d904d9011f58d64b8","ledger":4566285,"network":"testnet"}
+```
+
+That same shape covers a transaction the RPC refused
+(`{"outcome":"failed","reason":"submission_failed",...}`), an unsigned
+`preflight` (`unsigned_simulation`), and a failed on-chain inclusion
+(`tx_failed`, with its `tx_hash`).
+
 `ledger` is absent where the command never queries one (`check`), and `network`
 is absent where no preset named the endpoint (a custom `--rpc-url`); neither is
 guessed.
+
+Every example above is safe to copy as-is: the agent secret is passed by
+reference (`"$AGENT_SECRET"`) rather than written on the command line, and the
+object never contains the seed, an address, or a signature — only the five
+fields below. When pasting a real run into an issue or a report, the guard and
+recipient addresses and the `tx_hash` are public, but treat the surrounding
+`AGENT_TX_DEBUG` envelope as sensitive: it prints signed XDR, never the seed.
 
 ### Fields
 
@@ -159,9 +179,22 @@ On a `failed` run the symbol names the failure itself:
   never produce an object.
 
 For the subcommands that produce a verdict (`check`, `preflight`, `transfer`,
-`heartbeat`), exit codes are identical with and without `--json` — the
-`preflight` table below — so switching a fixture or a script to the structured
-output cannot change what either of them treats as success.
+`heartbeat`), exit codes are identical with and without `--json`, so switching
+a fixture or a script to the structured output cannot change what either of
+them treats as success:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Admitted, or a policy block that `--expect-blocked` expected. |
+| `1` | Blocked by policy, rejected pre-broadcast, or `failed` (`expect_block_unmet`, `submission_failed`, `tx_failed`, `timeout`); also a usage error, in both modes. |
+| `2` | `preflight` without an agent secret: admission is inconclusive (`unsigned_simulation`). |
+| `3` | RPC timeout, transport, or HTTP failure. |
+| `4` | JSON-RPC rejection or an invalid RPC response. |
+
+Exit codes `3` and `4` end the run inside the RPC layer before any verdict
+exists, so they print no object even under `--json` (the diagnostic goes to
+stderr). A driver should read a missing object with a nonzero exit as a
+transport failure rather than as an absent verdict.
 
 ## Read-only diagnostics
 
