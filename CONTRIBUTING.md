@@ -1,6 +1,7 @@
 # Contributing to stellar-agent-guard-contracts
 
 We welcome contributions! Here's how to get started.
+testing
 
 > **Heads up:** this is a **security contract that gates fund movement**. Changes
 > to policy semantics, the decision table, or the auth path have real financial
