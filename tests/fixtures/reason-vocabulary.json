@@ -12,5 +12,135 @@
         "window_cap_exceeded"
       ]
     }
+  },
+  "remediation": {
+    "description": "Per-reason remediation guidance for the three primary observer seats (agent, operator, auditor). Authoritative text lives in docs/reason-glossary.md; this object exposes machine-readable summaries for SDK middleware and tooling. Extend with new reasons when src/types.rs adds a variant — see docs/contributing.md#how-to-add-a-new-error-variant-end-to-end.",
+    "reasons": {
+      "unauthorized": {
+        "agent": "Stop; the observable failure is a host abort, not a block reason. Re-derive credentials, verify nonce/expiry, escalate. Never try alternate keys.",
+        "operator": "Re-register the intended key via rotate_agent_key or re-provision credentials.",
+        "auditor": "Wrong-key attempts surface as host aborts, not auth_checked events."
+      },
+      "already_initialized": {
+        "agent": "Not agent-initiated; treat as an idempotency note if surfaced. Stop automated retries; escalate if unexpected.",
+        "operator": "None — the account is already initialized. Verify with status() before considering redeployment.",
+        "auditor": "Documents a double-init attempt (usually benign automation); on-chain state unchanged."
+      },
+      "not_initialized": {
+        "agent": "Not agent-initiated; cease operations and notify the operator — the guard is in pre-activation default-deny.",
+        "operator": "Run initialize with the admin identity and the registered agent public key; verify with status().",
+        "auditor": "Marks the pre-activation window where all calls were default-denied."
+      },
+      "invalid_config": {
+        "agent": "Not agent-initiated; the previous policy is still in effect (fail-closed). Notify the operator.",
+        "operator": "Correct the config per §8 validation rules and re-apply. Use validate_policy to surface the failing rule before submitting.",
+        "auditor": "The proposed policy was refused; the on-chain policy is unchanged (fail-closed)."
+      },
+      "invalid_amount": {
+        "agent": "Fix the caller: zero or negative amounts are a client bug, not a policy limit.",
+        "operator": "Check the agent code path is not emitting non-positive amounts; high frequency indicates a noisy client.",
+        "auditor": "Attests the account never admits a non-positive transfer."
+      },
+      "no_pending_admin": {
+        "agent": "Not agent-initiated; no action required.",
+        "operator": "Propose a rotation first (propose_admin_rotation), or verify whether a concurrent operator already confirmed or cancelled.",
+        "auditor": "Records an out-of-order rotation attempt; admin, policy, and revision are unchanged."
+      },
+      "admin_frozen": {
+        "agent": "Halt immediately; do not retry. Heartbeat is blocked too — escalate to the operator.",
+        "operator": "Establish why the freeze was set, then unfreeze() (also re-arms LastHeartbeat).",
+        "auditor": "A hard stop; the later unfrozen event is the admin's recovery attestation."
+      },
+      "heartbeat_expired": {
+        "agent": "Cannot self-recover; notify the operator immediately and stop all operations.",
+        "operator": "Verify agent liveness, then unfreeze() to re-arm LastHeartbeat; consider raising dms_grace_secs.",
+        "auditor": "Proves the dead-man switch fired for the recorded silence window; reconcile with policy."
+      },
+      "no_policy": {
+        "agent": "Cease — default-deny is by design; request a policy from the operator.",
+        "operator": "Install a policy with set_policy.",
+        "auditor": "At revoke time default-deny held; the later policy_set event is the record."
+      },
+      "paused": {
+        "agent": "Suspend activity and poll status() at a reasonable interval until paused clears; do not route around.",
+        "operator": "Resume via set_policy with paused: false after maintenance completes.",
+        "auditor": "Operator kill-switch usage; pairs with the re-open event."
+      },
+      "outside_active_window": {
+        "agent": "Wait for the activity window; schedule operations inside it.",
+        "operator": "Correct the window bounds via set_policy if the timetable changed.",
+        "auditor": "Attests spend stays within the declared activity window at T."
+      },
+      "asset_not_allowed": {
+        "agent": "Only operate on policy-listed assets; read policy() before choosing.",
+        "operator": "Add the asset to assets if it is intended (admin-attested change).",
+        "auditor": "Asset allowlist compliance at T."
+      },
+      "recipient_not_allowed": {
+        "agent": "Only send to allowlisted recipients.",
+        "operator": "Add the recipient, or consciously enable allow_any_recipient.",
+        "auditor": "Recipient allowlist compliance at T."
+      },
+      "per_tx_cap_exceeded": {
+        "agent": "Halt and escalate; do not retry immediately. Never split one payment into multiple smaller ones to dodge the cap — that is evasion.",
+        "operator": "Raise per_tx_cap if the business need genuinely grew, or restate the limit.",
+        "auditor": "Per-tx bound held at T (event and tx reference)."
+      },
+      "window_cap_exceeded": {
+        "agent": "Wait for window entries to expire (window_secs) before retrying; escalate. Do not re-route spend outside the accounting path to evade the window.",
+        "operator": "Raise window_cap if legitimately needed, or reset cadence expectations.",
+        "auditor": "Rolling cap held over the [T − window_secs, T] span (invariant, §3.1)."
+      },
+      "protocol_not_allowed": {
+        "agent": "Only call allowlisted protocol contracts.",
+        "operator": "Add the protocol to the allowlist if intended.",
+        "auditor": "Protocol allowlist compliance at T."
+      },
+      "function_not_allowed": {
+        "agent": "Only call allowlisted functions.",
+        "operator": "Extend the per-protocol fns list if intended.",
+        "auditor": "Function-level allowlist compliance at T."
+      },
+      "asset_fn_not_allowed": {
+        "agent": "Use only the SAC transfer functions supported by the policy; do not attempt other asset operations.",
+        "operator": "Use an admin-approved path if the asset operation is intended; the guard does not authorize SAC minting or burning.",
+        "auditor": "Records that a non-transfer function on a listed asset was denied."
+      },
+      "unknown_contract": {
+        "agent": "Unknown contracts are default-deny in v1; consult policy() and do not attempt workarounds.",
+        "operator": "Allowlist the contract if it should be callable under v1 intent.",
+        "auditor": "Default-deny held at T."
+      },
+      "self_function_not_allowed": {
+        "agent": "The agent may only call its own heartbeat; management functions belong to the admin seat.",
+        "operator": "Use the admin path for management; align tooling, no contract change needed.",
+        "auditor": "Records the self-call surface being contained to the heartbeat/check path."
+      },
+      "create_contract_not_allowed": {
+        "agent": "The account never authorizes contract creation in v1 — route creation to a dedicated operator-owned account.",
+        "operator": "Create contracts from a non-guarded account.",
+        "auditor": "Proves the account never authorizes creation."
+      },
+      "recipient_blocked": {
+        "agent": "Do not retry or attempt to disguise the destination; stop and escalate.",
+        "operator": "Remove the denylist entry only if policy intent changed.",
+        "auditor": "The explicit recipient denylist blocked this destination."
+      },
+      "protocol_call_rate_exceeded": {
+        "agent": "Wait for calls in the rolling window to expire; do not route around the configured protocol limit or dispatch via a different entry to evade the count.",
+        "operator": "Raise protocol_calls_per_window via set_policy if the limit is legitimately too low; investigate whether the agent is making more calls than intended.",
+        "auditor": "Records that the configured per-protocol rolling call limit was reached at T."
+      },
+      "decision_invariant_violation": {
+        "agent": "Stop and escalate; do not retry or attempt workarounds. The enforcement engine detected an impossible state.",
+        "operator": "Report contract version, transaction hash, and full diagnostic event log to maintainers. Pause the policy (set_policy with paused: true) until root cause is understood.",
+        "auditor": "Signals an enforcement implementation invariant failure. Preserve full transaction diagnostics and the auth_checked event log."
+      },
+      "too_many_auth_contexts": {
+        "agent": "Do not split or reroute the batch to evade the bound; reduce the intended authorization only if its policy meaning is unchanged, otherwise escalate.",
+        "operator": "Review the router batch size and transaction design; the contract limit is fixed, not policy-configurable.",
+        "auditor": "The engine rejected the whole authorization before parsing contexts or staging window admissions."
+      }
+    }
   }
 }
