@@ -459,4 +459,4 @@ SPEC.md                # Architecture specification (mechanism is settled)
 
 ## Issue backlog
 
-Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the [issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues); each carries one `complexity: trivial|small|medium|large` label.
+Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the [issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues); each carries one type label (`bug`, `enhancement`, `documentation`, or `question`) and one `complexity: trivial|small|medium|large` label. The full triage taxonomy, ownership rules, and the private route for security reports are in [CONTRIBUTING.md § Issue backlog](../CONTRIBUTING.md#issue-backlog).

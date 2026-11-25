@@ -3,6 +3,9 @@
 # Maintainer decision recorded per issue #70.
 blank_issues_enabled: false
 contact_links:
+  - name: "Security vulnerability (private report)"
+    url: "https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/security/advisories/new"
+    about: "Report a suspected vulnerability privately. Do not open a public issue or post exploit details. See SECURITY.md."
   - name: "Telegram community"
     url: "https://t.me/+EzSusj-2vVhhNmI0"
     about: "Chat with the Stellar Agent Guard community (see README Community section)."
