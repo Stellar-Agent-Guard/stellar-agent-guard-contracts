@@ -134,6 +134,14 @@ fn unknown_current_symbol_fails_with_exact_line() {
         stderr.contains("retired_reason"),
         "missing symbol: {stderr}"
     );
+    assert!(
+        stderr.contains("Remediation"),
+        "missing remediation hint: {stderr}"
+    );
+    assert!(
+        stderr.contains("SPEC §11"),
+        "missing maintenance instruction reference: {stderr}"
+    );
 }
 
 #[test]

@@ -219,6 +219,15 @@ if errors:
         + ", ".join(sorted(current_symbols)),
         file=sys.stderr,
     )
+    print(
+        "\nRemediation: keep the fixture reason vocabulary in sync with the contract. Add the "
+        "missing symbol to src/types.rs (and its SPEC §4/§6 row, §7.1 mapping table, and "
+        "docs/reason-glossary.md entry), record historical vocabulary in "
+        "tests/fixtures/reason-vocabulary.json, or correct the references in "
+        "tests/fixtures/index.json and tests/fixtures/README.md. See CONTRIBUTING.md rule 6 "
+        "(testnet proof plan) and SPEC §11 before re-running.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 print("OK: every fixture reason symbol is valid for its contract_version.")
