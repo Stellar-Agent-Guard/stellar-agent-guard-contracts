@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Verifies that every page under docs/ is reachable from docs/SUMMARY.md
-# (unless explicitly allowlisted), and verifies that all links in docs/SUMMARY.md
-# resolve to existing files.
+# Verifies documentation integrity in two directions:
+#   1. every page under docs/ is reachable from docs/SUMMARY.md unless
+#      explicitly allowlisted, and every link in docs/SUMMARY.md resolves;
+#   2. every repository-local Markdown link resolves to a file on disk.
+#
+# The link check walks every tracked Markdown file (not only docs/) so a link
+# from a tool README or the root README cannot rot unnoticed. Fenced code
+# blocks are ignored because links in examples are not navigation.
 set -euo pipefail
 
 readonly ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,12 +28,12 @@ check_pass() {
 }
 
 check_fail() {
-  printf '[FAIL] %s\n' "$1"
+  printf '[FAIL] %s\n' "$1" >&2
   fail=$((fail + 1))
 }
 
-printf 'Documentation Reachability Verification\n'
-printf '%s\n' '======================================'
+printf 'Documentation Integrity Verification\n'
+printf '%s\n' '===================================='
 
 # Load allowlist into an associative array
 declare -A allowlist
@@ -64,7 +69,7 @@ while IFS= read -r link; do
   if [[ -e "$resolved" ]]; then
     check_pass "SUMMARY link points to existing target: ${file_target}"
   else
-    check_fail "SUMMARY link '${file_target}' does not exist (resolved: ${resolved})"
+    check_fail "docs/SUMMARY.md: link '${file_target}' does not exist (resolved: ${resolved})"
   fi
 done < <(grep -oE '\[[^]]*\]\([^)]+\)' "$SUMMARY_FILE" | sed -E 's/.*\]\(([^)]+)\)/\1/')
 
@@ -89,6 +94,72 @@ while IFS= read -r file; do
     check_fail "docs/${rel_path} is not reachable from SUMMARY.md and not listed in docs/.summary-allowlist"
   fi
 done < <(find "$DOCS_DIR" -type f -name "*.md" | sort)
+
+# 3. Link integrity: every repository-local Markdown link resolves.
+printf '\n3. Verifying local links in Markdown files resolve...\n'
+
+while IFS= read -r source; do
+  rel_source="${source#"${ROOT_DIR}/"}"
+
+  # Drop fenced code blocks so example snippets are not parsed as navigation.
+  links="$(
+    awk '
+      /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+      !fence { print }
+    ' "$source" |
+      grep -oE '!?\[[^]]*\]\([^)]+\)' |
+      sed -E 's/^!?\[[^]]*\]\(([^)]*)\)$/\1/' || true
+  )"
+
+  file_links=0
+  file_failures=0
+
+  while IFS= read -r link; do
+    [[ -z "$link" ]] && continue
+
+    # Trim surrounding whitespace, then drop an optional Markdown title
+    # ("path" or 'path' after the target) so only the target remains.
+    link="${link#"${link%%[![:space:]]*}"}"
+    link="${link%"${link##*[![:space:]]}"}"
+    link="${link%%[[:space:]]*}"
+
+    # External, protocol-relative, anchor-only, and placeholder links are not
+    # repository-local targets.
+    case "$link" in
+      '' | '#'* | '<'* | '//'* | http://* | https://* | mailto:* | tel:* | *'://'*)
+        continue
+        ;;
+    esac
+
+    target="${link%%#*}"
+    target="${target%%\?*}"
+    [[ -z "$target" ]] && continue
+
+    file_links=$((file_links + 1))
+
+    if [[ "$target" == /* ]]; then
+      resolved="${ROOT_DIR}${target}"
+    else
+      resolved="$(dirname "$source")/${target}"
+    fi
+
+    if [[ -e "$resolved" ]]; then
+      continue
+    fi
+
+    check_fail "${rel_source}: link target '${link}' does not resolve (resolved: ${resolved})"
+    file_failures=$((file_failures + 1))
+  done <<< "$links"
+
+  if [[ "$file_links" -gt 0 && "$file_failures" -eq 0 ]]; then
+    check_pass "${rel_source}: ${file_links} local link(s) resolve"
+  fi
+done < <(
+  find "$ROOT_DIR" -type f -name '*.md' \
+    -not -path '*/.git/*' \
+    -not -path '*/target/*' |
+    sort
+)
 
 printf '\nSummary: %d passed, %d failed\n' "$pass" "$fail"
 if [[ "$fail" -ne 0 ]]; then

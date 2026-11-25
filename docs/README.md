@@ -151,7 +151,8 @@ Both files matter, at different levels. Neither silently overrides the other.
    [`scripts/verify-docs-reachability.sh`](../scripts/verify-docs-reachability.sh)
    fails CI when a Markdown file under `docs/` is neither linked from it nor
    listed in [`docs/.summary-allowlist`](.summary-allowlist). CI also fails
-   when a `SUMMARY.md` link points at a file that does not exist.
+   when a `SUMMARY.md` link points at a file that does not exist, or when any
+   repository-local Markdown link does not resolve.
 
 If the project later wants `SUMMARY.md` to drive the published sidebar, the
 change is to add a `SUMMARY.md` at the repository root (the space root) — a
@@ -195,7 +196,8 @@ has two parts:
    ```
 
    This proves every `docs/` page is reachable from `docs/SUMMARY.md` (or
-   explicitly allowlisted) and that every `SUMMARY.md` link resolves.
+   explicitly allowlisted), that every `SUMMARY.md` link resolves, and that
+   every repository-local Markdown link resolves.
 2. **Site layout (GitBook account required).** Open a pull request against the
    synced branch. GitBook's GitHub app attaches a **preview status with a
    unique URL** to that PR, rendering the change in the real site layout before
