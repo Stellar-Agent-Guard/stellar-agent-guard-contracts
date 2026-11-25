@@ -772,27 +772,37 @@ verification, with the expected output and the most likely failure of each step 
 
 ### Download a released artifact (instead of building)
 
-Each tagged release (`v*`) publishes the contract WASM built by the
-[`release` workflow](.github/workflows/release.yml) — after the full gate
-suite (format, clippy, tests) went green — together with a SHA-256 checksum,
-a build-provenance file (git tag, commit SHA, toolchain version), and a
-CycloneDX SBOM. Prefer this over a local build when you want the exact bytes
-CI blessed:
+Each tagged release (`v*`) publishes the contract WASM and the `agent-tx` tool
+built by the [`release` workflow](.github/workflows/release.yml) — after the
+full gate suite (format, clippy, tests) went green. Every artifact has a
+SHA-256 checksum and a build-provenance file (package version, git tag, commit
+SHA, target, toolchain, build command), and the WASM release also carries a
+CycloneDX SBOM. The workflow runs `scripts/verify-release-artifacts.sh` against
+the staged files and refuses to publish if any metadata is missing or
+mismatched. Prefer this over a local build when you want the exact bytes CI
+blessed:
 
 ```bash
 VERSION=v0.1.0  # pick a release from the Releases page
 REPO=Stellar-Agent-Guard/stellar-agent-guard-contracts
 curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm
 curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/stellar_agent_guard_contracts.wasm.sha256
+curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/provenance.txt
+curl -sSL -O https://github.com/$REPO/releases/download/$VERSION/sbom.cdx.json
 sha256sum -c stellar_agent_guard_contracts.wasm.sha256
 # → stellar_agent_guard_contracts.wasm: OK
 ```
 
-Then cross-check `provenance.txt` from the same release (it pins the git tag,
-commit, and `rustc` version the WASM was built from — see
+The `agent-tx` release assets are `agent-tx`, `agent-tx.sha256`, and
+`agent-tx.provenance.txt`; the published binary is the Linux runner build, so
+verify its `target` line (or build from the same tag on your platform).
+
+Cross-check `provenance.txt` (it pins the version, tag, commit, target, and
+`rustc` version the WASM was built from — see
 [Reproducible builds](#reproducible-builds)) and `sbom.cdx.json` for the
-dependency inventory. See [SECURITY.md](SECURITY.md) for the full verification
-steps.
+dependency inventory. See [SECURITY.md](SECURITY.md) and
+[docs/verification.md](docs/verification.md#release-artifact-metadata) for the
+full verification steps.
 
 ### Reproducible builds
 

@@ -274,33 +274,46 @@ To verify what a deployment contains:
 
 ## Release artifact verification
 
-Every tagged release (`v*`) publishes four assets, built only after the full
+Every tagged release (`v*`) publishes seven assets, built only after the full
 gate suite (format, clippy, tests) went green — a failed gate blocks the
-release (see `.github/workflows/release.yml`):
+release (see `.github/workflows/release.yml`). Before publication the workflow
+runs `scripts/verify-release-artifacts.sh` against the staged directory; a
+missing or mismatched version, tag, commit, target, toolchain, build command,
+checksum, or SBOM field blocks the release:
 
 - `stellar_agent_guard_contracts.wasm` — the deployable contract build.
 - `stellar_agent_guard_contracts.wasm.sha256` — its SHA-256 checksum.
-- `provenance.txt` — the git tag, commit SHA, exact build command, toolchain
-  version (`rustc`/`cargo`), and runner the WASM was built on.
+- `provenance.txt` — the package version, git tag, commit SHA, target, exact
+  build command, toolchain version (`rustc`/`cargo`), runner, and WASM SHA-256.
 - `sbom.cdx.json` — the CycloneDX inventory described above.
+- `agent-tx` — the Linux runner build of the submission tool.
+- `agent-tx.sha256` — its SHA-256 checksum.
+- `agent-tx.provenance.txt` — the same metadata fields for `agent-tx`, with its
+  host target and binary SHA-256.
 
 Before deploying a released artifact:
 
 1. Verify the checksum: `sha256sum -c stellar_agent_guard_contracts.wasm.sha256`
-   must print `OK`. A mismatch means the download is corrupt or tampered with —
-   do not deploy it.
-2. Confirm `provenance.txt` pins the git tag and commit you expect, then
-   rebuild that tag yourself (`cargo build --release --target wasm32v1-none`)
-   and compare hashes for a reproducibility check. The compiler is pinned in
-   `rust-toolchain.toml`, so `rustup` builds that tag with the same `rustc`
-   version the release used; run `./scripts/check-wasm-reproducible.sh` to
-   confirm your environment is deterministic before trusting the comparison
-   (issue #67). Hashes published **before** that pin existed cannot be
+   must print `OK` (and `sha256sum -c agent-tx.sha256` for the tool). A mismatch
+   means the download is corrupt or tampered with — do not deploy it.
+2. Confirm `provenance.txt` pins the package version, git tag, commit, and
+   target you expect, then rebuild that tag yourself
+   (`cargo build --release --target wasm32v1-none`) and compare hashes for a
+   reproducibility check. The compiler is pinned in `rust-toolchain.toml`, so
+   `rustup` builds that tag with the same `rustc` version the release used; run
+   `./scripts/check-wasm-reproducible.sh` to confirm your environment is
+   deterministic before trusting the comparison (issue #67). For `agent-tx`,
+   compare `agent-tx.provenance.txt` with
+   `cargo build --release --manifest-path tools/agent-tx/Cargo.toml` on the
+   named target. Hashes published **before** that pin existed cannot be
    reproduced from this repository — the toolchain that produced them was never
    recorded — so verify those by checksum and provenance only, and prefer a
    release cut after the pin.
 3. Diff the SBOM component list against a locally regenerated one as described
    above.
+4. Consumers can inspect all fields without trusting the asset name:
+   `grep -E '^(package|version|tag|commit|target|build command|rustc|cargo|sha256):' provenance.txt`
+   and `jq '.metadata.component' sbom.cdx.json`.
 
 ## Security Considerations
 

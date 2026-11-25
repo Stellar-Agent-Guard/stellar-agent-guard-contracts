@@ -5,12 +5,15 @@ name: Release
 #
 # The `gates` job runs the same suite as CI (format, clippy, tests); the
 # `release` job only runs when the gates are green, so a failed gate blocks
-# release creation. On success the deployable WASM is published to the GitHub
-# Release together with its SHA-256 checksum, a build-provenance file
-# (toolchain version + commit SHA), and a CycloneDX SBOM (sbom.cdx.json) that
-# inventories every crate and version compiled into that WASM build — the
-# artifact an auditor or bug bounty reviewer needs to know exactly what
-# shipped. See README ("Installation") and SECURITY.md for the verifier side.
+# release creation. On success the deployable WASM and the agent-tx tool are
+# published to the GitHub Release together with SHA-256 checksums,
+# build-provenance files (package version, tag, commit, target, toolchain), and
+# a CycloneDX SBOM (sbom.cdx.json) that inventories every crate and version
+# compiled into that WASM build — the artifacts an auditor or bug bounty
+# reviewer needs to know exactly what shipped. A final metadata check fails the
+# release on missing or mismatched provenance before anything is published.
+# See README ("Installation"), docs/verification.md, and SECURITY.md for the
+# verifier side.
 on:
   push:
     tags: ["v*"]
@@ -99,10 +102,14 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            tools/agent-tx/target
           key: ${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build contract (wasm32v1-none)
         run: cargo build --release --target wasm32v1-none
+
+      - name: Build agent submission tool (tools/agent-tx)
+        run: cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 
       # Tool choice: cargo-cyclonedx (cyclonedx-rust-cargo). Unlike lockfile-only
       # scanners it sources Cargo metadata + Cargo.lock and honours --target, so
@@ -118,22 +125,51 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          crate_version="$(sed -nE 's/^version = "([^"]+)"$/\1/p' Cargo.toml | head -n 1)"
+          tool_version="$(sed -nE 's/^version = "([^"]+)"$/\1/p' tools/agent-tx/Cargo.toml | head -n 1)"
+          host_target="$(rustc -vV | sed -n 's/^host: //p')"
           cp target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm dist/
           (cd dist && sha256sum stellar_agent_guard_contracts.wasm > stellar_agent_guard_contracts.wasm.sha256)
           # `--describe binaries` emits one SBOM per binary target; this crate
           # has exactly one (the shipped cdylib), renamed to a stable asset name.
           cp ./*-cdylib.cdx.json dist/sbom.cdx.json
+          cp tools/agent-tx/target/release/agent-tx dist/agent-tx
+          (cd dist && sha256sum agent-tx > agent-tx.sha256)
           {
             echo "package: stellar-agent-guard-contracts"
+            echo "version: ${crate_version}"
+            echo "artifact: stellar_agent_guard_contracts.wasm"
             echo "tag: ${{ github.ref_name }}"
             echo "commit: ${{ github.sha }}"
+            echo "target: wasm32v1-none"
             echo "build command: cargo build --release --target wasm32v1-none"
             echo "rustc: $(rustc --version)"
             echo "cargo: $(cargo --version)"
             echo "runner: ${{ runner.os }} / ${{ runner.arch }}"
+            echo "sha256: $(cut -d' ' -f1 dist/stellar_agent_guard_contracts.wasm.sha256)"
             echo "wasm sha256: $(cut -d' ' -f1 dist/stellar_agent_guard_contracts.wasm.sha256)"
           } > dist/provenance.txt
+          {
+            echo "package: agent-tx"
+            echo "version: ${tool_version}"
+            echo "artifact: agent-tx"
+            echo "tag: ${{ github.ref_name }}"
+            echo "commit: ${{ github.sha }}"
+            echo "target: ${host_target}"
+            echo "build command: cargo build --release --manifest-path tools/agent-tx/Cargo.toml"
+            echo "rustc: $(rustc --version)"
+            echo "cargo: $(cargo --version)"
+            echo "runner: ${{ runner.os }} / ${{ runner.arch }}"
+            echo "sha256: $(cut -d' ' -f1 dist/agent-tx.sha256)"
+          } > dist/agent-tx.provenance.txt
           cat dist/provenance.txt
+          cat dist/agent-tx.provenance.txt
+
+      # Issue #634: a release can be reproducible and still be unidentifiable
+      # if its metadata is missing or names the wrong version/target/commit.
+      # This gate reads the staged bytes and fails before publication.
+      - name: Verify release artifact metadata
+        run: scripts/verify-release-artifacts.sh dist
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
@@ -143,4 +179,7 @@ jobs:
             dist/stellar_agent_guard_contracts.wasm.sha256
             dist/provenance.txt
             dist/sbom.cdx.json
+            dist/agent-tx
+            dist/agent-tx.sha256
+            dist/agent-tx.provenance.txt
           generate_release_notes: true
