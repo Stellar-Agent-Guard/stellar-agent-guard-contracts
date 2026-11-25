@@ -38,6 +38,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 # 4. Unit + integration tests
 cargo test
+#    Adding or removing tests? Update the "N tests" count in README.md (Quick
+#    Start and Testing & CI) in the same PR. scripts/verify-readme.sh sums the
+#    `test result: ok. N passed` lines and fails CI if the README disagrees.
 
 # 5. Public API documentation, warnings denied
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
