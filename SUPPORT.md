@@ -2,7 +2,9 @@
 
 Three channels point at this project and they are not interchangeable. This page
 says which one to use for what, and what response to expect. For the security
-disclosure process itself — scope, report template, advisory policy — see
+disclosure process itself — including the **[security-reporting decision
+tree](SECURITY.md#security-reporting-decision-tree)** that tells you whether to
+go private or public — scope, report template, and advisory policy — see
 [SECURITY.md](SECURITY.md); this page only routes you to it.
 
 ## Where to go
