@@ -149,6 +149,93 @@ value so the freeze is observable — production guidance is several days. Once 
 agent must heartbeat within the grace or the account self-freezes, and only the admin can
 reverse that. See the [incident playbook](incident-playbook-admin-key-lost.md).
 
+## 5a. Policy review checklist
+
+Before executing the `set_policy` call in step 5, go through each item below.
+Every item links to the relevant field in the config object (§8) or SPEC section.
+
+### Assets
+
+- [ ] Every address in `assets` is the correct **SAC contract ID (`C…`)**,
+      not the issuer `G…` address. The guard enforces transfers on these contract
+      addresses only. (§6.2 / `policy.assets`)
+- [ ] No entry in `assets` is the guard's own contract address `<GUARD_ID>`.
+      Self-referential asset entries are rejected by `InvalidConfig`. (§8 validation)
+- [ ] Asset-cap overrides in `asset_caps` have matching entries in `assets`; a
+      cap for an unlisted asset is rejected. (§8 validation)
+- [ ] The asset allowlist covers every token the agent will use in this deployment
+      and no unused tokens. Unused entries are not harmful but widen the blast radius.
+
+### Recipients
+
+- [ ] Every address in `recipients` is a valid `G…` Stellar account address.
+      Pasting from a typed document? Verify the check-digit. (§6.2 / `policy.recipients`)
+- [ ] No address appears in both `recipients` and `blocked_recipients`; that
+      combination is rejected by `InvalidConfig`. (§8 validation)
+- [ ] `allow_any_recipient: false` is the intended default unless the deployment
+      explicitly requires unrestricted recipients. The flag cannot be undone
+      without an admin `set_policy` call. (§8 / `policy.allow_any_recipient`)
+- [ ] Every address the agent might send to is in `recipients`, including addresses
+      the agent derives dynamically. Missing addresses produce `recipient_not_allowed`
+      blocks that are not actionable by the agent. (§6.2)
+
+### Caps
+
+- [ ] `per_tx_cap` is a positive integer that reflects the **maximum single-transfer
+      amount** you are willing to allow. A cap of 0 is rejected. (§3 / §6.2)
+- [ ] `window_cap` is a positive integer ≥ `per_tx_cap`. A window cap smaller
+      than the per-tx cap makes every transaction immediately block the window.
+      (§3.1 / §8 validation)
+- [ ] `window_secs` is non-zero whenever `window_cap` is non-zero. Setting one
+      without the other is rejected by `InvalidConfig`. (§8 validation)
+- [ ] The `window_secs` / `window_cap` combination reflects the cadence the agent
+      will operate at: a window too short rejects legitimate bursts; a window too
+      long makes the cap ineffective. (§3.1)
+- [ ] Per-recipient caps in `asset_caps` are ≤ `per_tx_cap` and ≤ `window_cap`
+      (the minimum is enforced at admission time). (§3 / §6.2)
+
+### Pause and active window
+
+- [ ] `paused: false` for a live deployment. If you install the policy before
+      the agent is ready, install with `paused: true` and release with a second
+      `set_policy` call. The `paused` flag is included in the policy hash — every
+      change to it changes the drift anchor. (§4 rule 4 / §7.3)
+- [ ] `active_from` and `active_until` are both `0` to disable time-bounding, or
+      both set to a valid `[active_from, active_until)` range whose **lower bound is
+      not in the past**. A range entirely in the past starts the account
+      immediately blocked. (§4 rule 5)
+
+### Key rotation state
+
+- [ ] The agent public key installed in step 4 (`--agent_pubkey`) matches the hex
+      fingerprint the running agent will sign with. Use `echo 'S...' | cargo run --example agent_pubkey`
+      to derive the hex from the agent's secret key. (§4.0 step 2)
+- [ ] No `PendingAdmin` rotation is in flight (`status()` shows no `pending_admin`
+      field, or the field is absent/null). An in-flight rotation is not an error,
+      but confirm the intent before it is superseded. (§7.2 / §6.6)
+- [ ] The admin key used to sign this call is securely held and matches the
+      `admin` shown by a prior `status()` read. (§7)
+
+### Hash comparison
+
+- [ ] Record the **WASM SHA-256** from step 1 in the deployment record before
+      broadcasting. This hash is what downstream verifiers pin; it must never
+      change after deployment.
+- [ ] After step 5 succeeds, capture `policy_hash` from step 6.1
+      (`agent-tx verify`) and record it alongside the `set_policy` transaction
+      hash. This is the **drift anchor**: any later difference in `policy_hash`
+      means the policy changed. (§7.3)
+- [ ] If you are re-applying a policy that was previously installed (e.g. a
+      config correction), compare the new `policy_hash` with the previous record
+      to confirm only the intended fields changed. SPEC §3.2 describes the exact
+      encoding; two configs that differ only in `paused` have different digests.
+      (§7.3 / §3.2)
+
+> Sign the completed checklist and store it with the deployment record. The
+> deployment record fields are listed at the end of this runbook.
+
+---
+
 ## 6. Verify with `status`
 
 Reads are permissionless and simulation-only, so use `--send=no`:

@@ -1,5 +1,10 @@
 # Testnet Verification
 
+> **Before running verification scenarios**, complete the
+> [policy review checklist](operations/deployment-runbook.md#5a-policy-review-checklist)
+> in the deployment runbook. The checklist covers assets, recipients, caps, pause controls,
+> key rotation state, and the hash comparison step that anchors every later drift check.
+
 All five enforcement scenarios were proven against a **real deployed contract** on Stellar testnet (protocol 28, `Test SDF Network ; September 2015`). Nothing here is simulated — every transaction was actually submitted to or enforced against live testnet state.
 
 ## Deployed contracts
