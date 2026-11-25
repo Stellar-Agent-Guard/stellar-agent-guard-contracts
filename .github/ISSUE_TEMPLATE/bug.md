@@ -2,10 +2,10 @@
 name: "Bug report"
 description: "Report something broken or unexpected"
 title: "[bug]: "
-labels: []
+labels: ["bug"]
 ---
 
-<!-- Maintainers: tag one `complexity: trivial|small|medium|large` label per CONTRIBUTING.md ("Issue backlog"). -->
+<!-- Maintainers: keep the template type label and add one `complexity: trivial|small|medium|large` label per CONTRIBUTING.md ("Triage labels and ownership"). -->
 
 ## Summary
 
