@@ -1,5 +1,7 @@
 {
   "schema_version": 1,
+  "contract_version": "phase1-testnet",
+  "contract_version_note": "The guard WASM deployed for the Phase 1 testnet proof was uploaded on 2026-09-08 (tx d43edd086ac9b376371f33b72ad89b37a9b6b4d43bf34dfea9717a29688b887c) before release versioning existed. This identifier scopes these fixtures to the reason vocabulary that deployment actually emitted; see tests/fixtures/reason-vocabulary.json. It is intentionally not the current Cargo.toml package version.",
   "description": "Machine-readable index of the Phase 1 testnet evidence recorded in prose in README.md. Same facts, stable shape: scenario -> tx hash -> ledger -> expected reason -> contract ID. Field schema is documented in README.md (section 'Machine-readable index'); tests/fixtures_index.rs fails CI when this file and README.md drift apart.",
   "network": {
     "name": "testnet",
