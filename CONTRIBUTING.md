@@ -148,6 +148,43 @@ Install cargo-fuzz with cargo install cargo-fuzz --locked, then run locally:
 
 The corpus is stored under fuzz/corpus/policy_config_deserialization; minimized failures are written under fuzz/artifacts/policy_config_deserialization.
 
+## Performance regression threshold (issue #612)
+
+Changes to the decision engine (`src/engine.rs`), the rolling window (`src/window.rs`), or any hot-path called from `__check_auth` require a performance review when they increase the worst-case CPU instruction count beyond the documented baseline.
+
+### Baselines
+
+| Scenario | Baseline (instructions) | Source |
+|---|---|---|
+| Worst-case decision path (escape off, 2×256 recipient sweep) | ≤ 100 000 000 | `DECISION_PATH_CPU_BUDGET` in `benches/worst_case_decision_path.rs` |
+| Worst-case decision path (escape on, 1×256 sweep + window) | documented in bench output | same benchmark |
+| Maximum-bounds `validate_config` | documented in bench output | `benches/policy_deserialization.rs` |
+
+The `engine::tests::worst_case_decision_path_measured_cost` unit test asserts the escape-off path stays under `DECISION_PATH_CPU_BUDGET`; CI fails it automatically. Policy-deserialization cost has no unit-test assertion today — the bench is the documented reference.
+
+### Review trigger
+
+A PR that **increases** the instruction count of any benchmarked scenario by more than **10 %** above its baseline must include:
+
+1. The new bench output in the PR body.
+2. A written justification (new feature, security fix, or external dependency bump).
+3. An updated baseline constant or comment in the bench file when the new figure becomes the new floor.
+
+### How to run the benchmarks
+
+```bash
+# Decision-path worst case (the one CI's unit test gates)
+cargo run --manifest-path benches/Cargo.toml --bin worst_case_decision_path
+
+# Policy deserialization at minimum / typical / maximum bounds
+cargo run --manifest-path benches/Cargo.toml --bin policy_deserialization
+
+# Denial-path gas at each gate
+cargo run --manifest-path benches/Cargo.toml --bin denial_path_gas
+```
+
+Instruction counts come from the Soroban test environment's cost estimator. On-chain costs include host overhead not measured here; the budgets and thresholds are conservative enough to absorb that overhead while still surfacing significant regressions.
+
 ## Clean Build Artifacts
 
 ```bash
