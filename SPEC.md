@@ -1262,6 +1262,25 @@ pub fn increase_window_cap(env: Env, new_cap: i128)
     // when the resulting policy violates §8 (e.g. window_secs == 0 or
     // per_tx_cap > new_cap). Increments PolicyRevision and emits
     // window_cap_increased { by, old_cap, new_cap, revision } (§9).
+pub fn add_recipient(env: Env, recipient: Address)
+    // require_auth(Admin). Targeted recipient-allowlist patch (issue #303):
+    // appends `recipient` to the stored PolicyConfig.recipients WITHOUT
+    // resending the full PolicyConfig. The resulting full config is run
+    // through validate_config (section 8) before any write; an invalid
+    // result (duplicate, self-addressed, ...) leaves stored state, the
+    // rolling window, and the DMS clock untouched (fail-closed). Requires an
+    // installed policy (NoPolicy otherwise). Preserves the rolling window
+    // and the DMS clock (like any set_policy edit); bumps PolicyRevision
+    // and emits policy_set on success.
+
+pub fn remove_recipient(env: Env, recipient: Address)
+    // require_auth(Admin). Targeted patch (issue #303): drops `recipient`
+    // from PolicyConfig.recipients. Validates the resulting full config
+    // before writing; NoPolicy when no policy is installed. Preserves the
+    // rolling window and the DMS clock. Bumps PolicyRevision and emits
+    // policy_set only when the list actually changes; a redundant removal
+    // (recipient not present) is a true no-op.
+
 pub fn revoke_policy(env: Env)
     // require_auth(Admin). Removes Policy and Window -> default-deny immediately.
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
