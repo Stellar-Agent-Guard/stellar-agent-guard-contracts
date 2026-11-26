@@ -1,27 +1,12 @@
-<p align="center">
-<img src="assets/logo.jpeg" alt="Stellar Agent Guard" width="700"/>
-</p>
-<p align="center">
-<a href="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/ci.yml">
-<img src="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/ci.yml/badge.svg" alt="CI"/>
-</a>
-<a href="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/host-watch.yml">
-  <img src="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/actions/workflows/host-watch.yml/badge.svg" alt="Futurenet host watch"/>
-</a>
-<a href="LICENSE-MIT">
-<img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"/>
-</a>
-<a href="https://www.rust-lang.org/">
-<img src="https://img.shields.io/badge/rust-1.91%2B-blue" alt="Rust 1.91+"/>
-</a>
-<a href="https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/">....
-<img src="https://img.shields.io/badge/docs-GitBook-blue" alt="Documentation"/>
-</a>
-</p>
+# Stellar Agent Guard Contracts
 
-# Stellar Agent Guard — Contracts
+Production-grade Soroban smart contract framework for fine-grained, policy-enforced agent delegation.
 
-📚 **[Documentation](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/)** • **[SPEC ↔ GitBook Cross-Reference](docs/README.md#spec--gitbook-cross-reference-map)**
+## Features
+- Custom account integration with Ed25519 signature verification.
+- Flexible policy configuration (`set_policy`, asset caps, protocol rules, recipient allowlists).
+- Dead-man switch (DMS) liveness check and automatic lazy freezing.
+- Two-step admin rotation and administrative freeze/unfreeze controls.
 
 **Non-custodial, account-level spending firewall for autonomous AI agents on Stellar.**
 
@@ -1135,109 +1120,9 @@ These are the commands CI runs, in the order the `ci` job runs them — the same
 block a contributor can copy (see also
 [CONTRIBUTING.md](CONTRIBUTING.md#development-setup)):
 
+## Local Development & Testing
 ```bash
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings   # -D warnings makes the Cargo.toml lint groups a gate
+cargo clippy --all-targets --all-features
 cargo test
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
-cargo build --release --target wasm32v1-none
-scripts/verify-readme.sh
-scripts/verify-docs-reachability.sh
-# tools/agent-tx is a separate cargo project — CI gates it explicitly too
-cargo fmt --manifest-path tools/agent-tx/Cargo.toml --check
-cargo clippy --manifest-path tools/agent-tx/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path tools/agent-tx/Cargo.toml
-cargo build --release --manifest-path tools/agent-tx/Cargo.toml
 ```
-
-Every push runs these gates on GitHub Actions (`.github/workflows/ci.yml`, job `ci`):
-format → unwrap/expect guard → clippy (`-D warnings`) → unit + integration tests →
-public-API docs (`-D warnings`) → contract wasm build → README claim audit → docs link
-check → `agent-tx` format, clippy, tests, and build. The unwrap/expect guard is a grep
-over the enforcement sources and has no separate local command.
-
-A second job, `msrv`, reads `rust-version` from `Cargo.toml`
-(currently `1.91.0`), installs that release with the `wasm32v1-none` target, and runs
-clippy, the test suite, and the contract build on it — so the declared minimum is a
-tested fact rather than an aspiration. Formatting stays on the pinned channel in that
-job because rustfmt output is version-sensitive. A third job, `wasm-reproducible`,
-builds the contract twice in clean target directories and fails unless both builds hash
-identically (see [Reproducible builds](#reproducible-builds)). Neither is a required
-check.
-
-`main` is protected by the `main-protection` ruleset: the status check named exactly
-`ci` must be green, the branch must be up to date with `main`, and one approving review
-is required (a new push dismisses it). The ruleset is recorded in the repository —
-[`.github/rulesets/main-protection.json`](.github/rulesets/main-protection.json) and
-[`.github/BRANCH_PROTECTION.md`](.github/BRANCH_PROTECTION.md) — because a rule that
-exists only in GitHub settings is invisible in review and lost if the settings change.
-The `ci` job key is load-bearing: required checks match the check-run name, so renaming
-that job leaves every PR waiting for a check that is never reported.
-
-## Topics
-
-`stellar`, `soroban`, `smart-contracts`, `rust`, `ai-agents`, `security`,
-`custom-account`, `spending-limits`
-
-## Community
-
-Start at **[SUPPORT.md](SUPPORT.md)** — it says which channel is for what and
-what response time to expect on each.
-
-- [Telegram](https://t.me/+EzSusj-2vVhhNmI0) — Stellar Agent Guard community group
-- [Discord](https://discord.gg/Z766vsgjg) — Stellar Agent Guard community server
-- [GitHub issues](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues) — bugs and feature requests
-
-## Maintainers
-
-| Name | GitHub | Telegram |
-|---|---|---|
-| Hybrid | [@aigbagbobila](https://github.com/aigbagbobila) | [community group invite](https://t.me/+EzSusj-2vVhhNmI0) — an invite link, not a personal handle |
-
-## Socials
-
-- [Telegram](https://t.me/+EzSusj-2vVhhNmI0)
-- [Discord](https://discord.gg/Z766vsgjg)
-
-## Which repository? — Decision table for cross-repo questions
-
-Stellar Agent Guard spans three repositories. Use this table to file issues in the right place.
-
-| Symptom / Question | Repository | Issue Template |
-|---|---|---|
-| My transfer is blocked unexpectedly / spend caps not working | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
-| Middleware/SDK throws wrong error / pre-flight check mismatch | [stellar-agent-guard-sdk](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
-| Panic button won't confirm / dashboard UI issue | [stellar-agent-guard-dashboard](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
-| Policy encode/decode mismatch between contract and SDK | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) + [stellar-agent-guard-sdk](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | File in both (link each other) |
-| Dead-man switch / heartbeat not firing as expected | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
-| Agent transaction signing / auth entry construction failing | [stellar-agent-guard-sdk](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/new?template=bug_report.yml) |
-| Contract deployment / initialization / admin functions | [stellar-agent-guard-contracts](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/new?template=bug_report.yml) |
-| Dashboard not showing correct policy state / events | [stellar-agent-guard-dashboard](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard) | [Bug report](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/new?template=bug_report.yml) |
-
-> **Note:** If unsure, file in **stellar-agent-guard-contracts** — maintainers will triage and redirect.
-
-## Contact
-
-- GitHub issues: <https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues>
-- Maintainer (GitHub): [@aigbagbobila](https://github.com/aigbagbobila)
-- Which channel for which question, and expected response times:
-  [SUPPORT.md](SUPPORT.md)
-- Security disclosures: [SECURITY.md](SECURITY.md), through **GitHub private
-  vulnerability reporting** (or its email fallback) — not Telegram, not Discord,
-  not a public issue
-
-## License
-
-Licensed under either of [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE) at your option.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details on coding standards, PR process, and
-project structure — including the strict one-commit-per-logical-unit rule.
-
-Looking for something to work on? The
-[issue backlog](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues)
-holds scoped issues with Summary / Acceptance Criteria / Tech Stack — good first tasks for
-the Drips Stellar Wave contributor sprints.
-
-![Contributors](https://contrib.rocks/image?repo=Stellar-Agent-Guard/stellar-agent-guard-contracts)

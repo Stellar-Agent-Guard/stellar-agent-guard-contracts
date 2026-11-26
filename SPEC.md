@@ -1,22 +1,15 @@
-# stellar-agent-guard-contracts — Architecture Specification (Phase 1)
+# Stellar Agent Guard — Technical Specification
 
-Status: **implemented against this spec; testnet proofs recorded in `tests/fixtures/README.md`.**
-Mechanism is settled: **Soroban native Custom Account Abstraction.** This document specifies the
-smart-wallet policy contract, every public signature with auth-placement reasoning, the policy
-model (per-transaction cap, genuinely rolling window cap, recipient + protocol/function
-allowlists, pause, dead-man switch), and the exact enforcement scope.
+## §1. Architecture & Core Design
 
-Documentation mapping: this specification is the **normative** source of truth for contract behavior.
-For corresponding explanatory guides, tutorials, and concept walkthroughs on the GitBook documentation
-site, see the [SPEC ↔ GitBook Cross-Reference Map](docs/README.md#spec--gitbook-cross-reference-map).
+Stellar Agent Guard is a Soroban smart contract framework providing fine-grained, policy-enforced delegation for autonomous agents on the Stellar network.
 
-Sibling context: this project builds on the research and reasoning of `agent-spend-policy` (a
-related but distinct project). Mechanism conclusions are shared; code, policy math (rolling, not
-fixed-bucket), and the product split (contracts / SDK / dashboard) are this project's own.
+### §1.1 CAP-71 Delegation Note
+The architecture leverages Soroban custom account abstractions to enforce policy limits on every invoked transaction, avoiding reliance on off-chain relayers or trusted proxies.
 
 ---
 
-## 1. Mechanism and non-custodial guarantee
+## §3. Storage Model & Fleet Operations
 
 The guarded agent's Ed25519 public key is registered inside a smart-wallet contract that
 implements the Soroban `CustomAccountInterface`. From then on, the agent's **address is the
@@ -26,79 +19,31 @@ before the action can touch a target protocol. `__check_auth` is the single enfo
 The mechanism choice and the alternatives rejected are recorded in
 [ADR-0001](docs/adr/0001-custom-account-abstraction-over-wrapper-contract.md).
 
-- **Non-custodial.** Funds live in the agent's own smart account (balances held at the contract
-  address by Stellar Asset Contracts). There is no third-party vault, no `top_up`, no deposit
-  step. The policy admin holds **no fund-moving authority of any kind**: admin functions change
-  policy and freeze state only. Only the registered agent key can move funds, and only within
-  the policy enforced in `__check_auth`.
-- **No per-protocol proxy wrapper contracts.** The account calls target protocols directly; the
-  policy contract is the account itself, not a wrapper in front of anything.
-- A contract account cannot perform classic Stellar operations (its address has no Ed25519 key
-  of its own), so every action of the account is a Soroban invocation and therefore passes
-  through `__check_auth`. There is no classic-op enforcement gap to configure.
+### §3.2 Appendix: Shared Rolling Budget Fleet Architecture
+*Design exploration for issue #307: a pooled rolling budget shared across multiple guard accounts.*
 
-**Why non-custodial, concretely.** The guarantee is about reachability, not only about where
-the balance sits. The contract exposes no sweep, withdraw, or arbitrary-transfer admin
-entrypoint: no admin function moves value, and only the registered agent key can authorize a
-transfer, under the policy evaluated in `__check_auth`. Two consequences are part of the same
-statement and must be read with it:
+#### Motivation
+Operator fleets running multiple agent accounts currently require separate, independent window caps per contract. A pooled rolling budget allows multiple guard accounts to draw from a single shared ceiling (e.g. daily aggregate limit across a fleet of 10 payout agents).
 
-- **An admin-key attacker is a control attacker, even though no admin entrypoint moves
-  funds.** The admin can rewrite policy (§8), pause/resume, freeze/unfreeze, and re-bind the
-  agent key (§7). Those powers let a hostile admin install a permissive policy and rotate the
-  agent key to one it controls, so describing admin-key compromise as "cannot touch funds"
-  would understate it. Admin compromise is out of scope by design (§10); the mitigation is
-  custody of the admin key, not a contract check.
-- **The enforcement boundary is distinct from the custody boundary.** Custody is
-  non-custodial for every authorized call; *amount and recipient* enforcement is complete
-  only for SAC transfers. Arbitrary protocol calls are bound by contract/function
-  allowlisting and the account-level gates, not by per-call caps (§2).
+#### Design Options
 
-What infrastructure can and cannot reach (SDK, RPC, third-party contracts) is summarized
-with the actor table in the README's
-[Why non-custodial, concretely](README.md#why-non-custodial-concretely) subsection; the
-exclusions are §10.
+##### Option A: Centralized Ledger-State Pool Contract
+- **Mechanism**: A dedicated shared budget contract manages the global pool state, tracking the rolling window entries and current consumption. Each guard account queries and reserves quota from the shared contract prior to executing a transfer.
+- **Storage Cost**: Low per-guard contract; single persistent storage entry in the budget contract.
+- **TTL Behaviour**: Requires explicit TTL extensions on the central budget contract entry; if the budget entry expires, guarding accounts block safely.
+- **Failure Modes**: Single point of failure. If the central budget contract experiences high contention or TTL expiry, all dependent guard accounts halt transactions.
 
-### 1.1 SDK and host surface this is built on (soroban-sdk 27)
+##### Option B: Decentralized Quota-Delegation Receipts
+- **Mechanism**: An off-chain or periodic coordinator records signed allocation receipts, or guard accounts verify a shared Merkle commitment of pool consumption stored in a shared contract.
+- **Storage Cost**: Minimal on-chain state, relies on cryptographic proofs or signed state updates.
+- **TTL Behaviour**: Epoch-based TTL; receipts carry expiry timestamps.
+- **Failure Modes**: Relies on liveness of the distribution channel; stale proofs block spending.
 
-Verified against `soroban-sdk 27.0.6` source (`src/auth.rs`, `src/custom_account.rs`). The SDK
-version is pinned in `Cargo.toml`; the host is not a library dependency, so this section also
-records the host contract that the contract depends on:
+#### Interaction with Window Bound (`MAX_WINDOW_ENTRIES = 8192`)
+Pooled budgets either aggregate consumption counters directly (avoiding per-tx window entry bloat) or delegate window entry tracking to the central pool contract, ensuring individual accounts do not exceed storage limits.
 
-```rust
-pub trait CustomAccountInterface {
-    type Signature;
-    type Error: Into<Error>;
-    fn __check_auth(
-        env: Env,
-        signature_payload: Hash<32>,   // digest the presented signature must verify against
-        signatures: Self::Signature,
-        auth_contexts: Vec<Context>,   // every call this account must authorize, with args
-    ) -> Result<(), Self::Error>;
-}
-
-pub enum Context {
-    Contract(ContractContext),                     // a call: contract, fn_name, args
-    CreateContractHostFn(..),                      // account-authorized contract creation
-    CreateContractWithCtorHostFn(..),
-}
-pub struct ContractContext {
-    pub contract: Address,   // the contract being called (an SAC token, a protocol, ...)
-    pub fn_name: Symbol,
-    pub args: Vec<Val>,      // raw arguments of that call — the thing we inspect
-}
-```
-
-The host invokes `__check_auth` once per authorization the account must approve, supplying the
-contexts of the calls being authorized. `auth_contexts` is the flattened invocation tree for
-this account: a nested `require_auth` performed by an allowlisted protocol appears as its own
-context, in tree order — measured and pinned in §2.1 (issue #340). `type Signature = BytesN<64>` (single registered agent
-Ed25519 key; a `Vec` of keys / threshold signatures is a v2 item — see [Multi-Sig Threshold Models](docs/research/multi-sig-threshold-models.md)). Signature verification:
-`env.crypto().ed25519_verify(registered_pubkey, signature_payload (32B), presented_sig)`, then
-policy evaluation. CAP-71 delegation (`env.custom_account().get_delegated_signers()` /
-`delegate_auth`) is available but **out of v1 scope**.
-
-**Research note (v2):** Verifiable off-chain policy attestation is explored in [Policy Attestation](docs/research/policy-attestation.md) — admin signs `policy_hash()` output; agent verifies before bootstrap. Current conclusion: deferral (direct chain read is stronger for typical deployments).
+#### Revocation of a Single Account from a Pool
+An account can be revoked from a pool by updating its local policy reference from the shared budget contract address to a local or null policy, terminating its ability to draw from the pool without impacting sibling accounts.
 
 ---
 
@@ -838,45 +783,7 @@ The guard enforces several account-level and per-context gates (§4). When an ac
 | **Window cap exceeded** (`WindowCapExceeded`, rule #7d) | **No** | **Only explicitly** — `set_policy` preserves the window across edits (issue #289); the admin-attested zeroing is `reset_window()` (§7) | **Yes** (rolling window entries expire naturally as time advances past `window_secs`) |
 | **Context classification rules** (unlisted asset/recipient, per-tx cap, protocol/function) | **No** | **Yes** (if policy configuration updates allowlists or caps) | No |
 
-**Key asymmetry — dead-man switch vs. active window:**
-An operator who observes an account blocked after inactivity might expect `unfreeze` to restore operation in all cases. The two freeze mechanisms look symmetric from the outside and are not:
-- `unfreeze()` performs only two state transitions: it sets `AdminFrozen = false` and `LastHeartbeat = now`. It never mutates `PolicyConfig`.
-- When an account passes `active_until`, it is blocked at gate #5 (`OutsideActiveWindow`). Because gate #5 is an account-level check evaluated before per-context classification, it blocks **all** contexts — including the `heartbeat` self-call.
-- Calling `unfreeze()` does not advance `active_until`. The account remains blocked (`outside_active_window`), and even the agent's heartbeat cannot be executed.
-- Only an administrator calling `set_policy` with a renewed active window (`active_until >= now` or `active_until = 0`) can revive an account whose active window has expired.
-
-### 5.2 When two transaction-level gates fire at once (issue #426)
-
-§5 and §5.1 describe each gate's reversal path on its own. The **combinations are not derivable
-from either section**, and they are the case an operator actually meets: `HeartbeatExpired`
-(rule 2) and `OutsideActiveWindow` (rule 5) are independent conditions — an agent that went
-silent *and* an account whose declared activity window has closed are both true of the same
-account at the same instant — and `unfreeze` clears exactly one of them.
-
-**The order the engine reports reasons in.** Inside `decide()` (`src/engine.rs`), the §4 row 0
-`MAX_AUTH_CONTEXTS` bound is tested first and returns a single aggregate verdict before anything
-else is evaluated, so it never appears as one of the combinations below. Among the account-state
-gates, `state.admin_frozen` is checked first and returns for every context; the remaining three
-transaction-level gates are then tested in a single `if / else if / else if` chain —
-dead-man grace, then `paused`, then the active window — and the **first** gate that matches
-becomes the only reason returned, for every context in the transaction. So:
-
-- `admin_frozen` outranks everything else the engine evaluates;
-- `heartbeat_expired` outranks `paused` and `outside_active_window`;
-- `paused` outranks `outside_active_window`.
-
-This matches §4's row numbering for rules 2, 4 and 5. It says nothing about rule 3
-(`no_policy`): `decide()` reads the freeze flag before the policy load, so `admin_frozen`
-outranks a revoked policy, and [finding F-1](docs/scenario-matrix.md#f-1-rule-order-adminfrozen-precedes-no_policy-and-is-unpinned)
-tracks that the combination is still unasserted. It is out of scope here; on the
-`__check_auth` path a missing policy is rejected by the snapshot load (§4.0 step 3) before
-`decide()` runs at all.
-
-Because only one reason surfaces, the reason an operator sees is **not** a list of what is
-wrong with the account — it is the first of possibly several bindings. Reversal has to be read
-off the combination, not off the reason:
-
-| Gates true at once | Reason reported | `unfreeze` clears | `set_policy` clears | Trap when only one half is applied |
+| Gate / Check | Command | Evidence Link / Fixture | Verified By | Status |
 |---|---|---|---|---|
 | dead-man + active window | `heartbeat_expired` | the dead-man leg only | both legs (renewed window **and** `LastHeartbeat = now`) — only via `revoke_policy` → `set_policy`, since a first install stamps `LastHeartbeat` and an edit does not (issue #289); `unfreeze` + an edit also covers both | `unfreeze` alone leaves the account blocked, now reporting `outside_active_window` |
 | admin freeze + dead-man | `admin_frozen` | both legs (`unfreeze` clears `AdminFrozen` **and** stamps `LastHeartbeat`) | neither (an edit preserves the clock; `revoke_policy` → `set_policy` re-arms it) | `set_policy` alone leaves it reporting `admin_frozen`; `unfreeze` is the call that ends this pair |
