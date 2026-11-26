@@ -1470,7 +1470,6 @@ pub struct Status { pub admin_frozen: bool, pub heartbeat_expired: bool,
 pub struct WindowConsumption {
     pub total: i128,                      // live (pruned) global rolling total
     pub entries: u32,                     // number of live global spend entries
-    pub oldest_expires_at: Option<u64>,   // oldest.ts + window_secs; None if empty or window_secs == 0
 }
 
 #[contracttype]
@@ -1541,12 +1540,10 @@ pub enum Error {            // values stable; see tests/fixtures
 `check()` simulation: the ledger is loaded and lazily pruned at the current
 ledger timestamp, so `total` is the sum of non-expired global spend entries and
 `entries` counts those live entries (same-second spends coalesce, so it is an
-entry count, not a transaction count). `oldest_expires_at` is
-`oldest.ts + window_secs`, or `None` when the ledger is empty or `window_secs == 0`
-(a disabled rolling window never expires). The read is auth-free and event-free
+entry count, not a transaction count). The read is auth-free and event-free
 like the rest of this block, returns the defined empty value
-`{ total: 0, entries: 0, oldest_expires_at: None }` when no policy is installed,
-and does not change spend accounting. Per-recipient override headroom and
+`{ total: 0, entries: 0 }` when no policy is installed, and does not change
+spend accounting. Per-recipient override headroom and
 protocol-call counters are not projected; use `check_detailed` for
 recipient-targeted headroom.
 

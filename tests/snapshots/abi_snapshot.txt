@@ -144,7 +144,6 @@ struct Status
 struct WindowConsumption
   total: i128
   entries: u32
-  oldest_expires_at: Option<u64>
 enum CheckResult
   Allowed
   Blocked(Symbol)

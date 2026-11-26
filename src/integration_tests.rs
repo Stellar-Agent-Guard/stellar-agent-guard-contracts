@@ -1989,7 +1989,6 @@ fn window_consumption_is_empty_without_a_policy() {
     let wc = client.window_consumption();
     assert_eq!(wc.total, 0);
     assert_eq!(wc.entries, 0);
-    assert_eq!(wc.oldest_expires_at, None);
 }
 
 /// Issue #348: the read reports live consumption after zero, partial and full
@@ -2008,14 +2007,13 @@ fn window_consumption_tracks_spend_and_rolls_over() {
     // Zero consumption: policy installed, nothing spent.
     h.set_time(1_000);
     let wc = client.window_consumption();
-    assert_eq!((wc.total, wc.entries, wc.oldest_expires_at), (0, 0, None));
+    assert_eq!((wc.total, wc.entries), (0, 0));
 
     // Partial consumption: one entry, expiring at 1000 + 60.
     h.transfer(&recv, 60);
     let wc = client.window_consumption();
     assert_eq!(wc.total, 60);
     assert_eq!(wc.entries, 1);
-    assert_eq!(wc.oldest_expires_at, Some(1_060));
 
     // Full consumption: a second entry fills the cap.
     h.set_time(1_010);
@@ -2023,33 +2021,29 @@ fn window_consumption_tracks_spend_and_rolls_over() {
     let wc = client.window_consumption();
     assert_eq!(wc.total, 100);
     assert_eq!(wc.entries, 2);
-    assert_eq!(wc.oldest_expires_at, Some(1_060));
 
     // Rollover: at 1060 the first entry is exactly expired, at 1070 the second
     // is too — the read prunes rather than replaying the cached total.
     h.set_time(1_060);
     let wc = client.window_consumption();
-    assert_eq!(
-        (wc.total, wc.entries, wc.oldest_expires_at),
-        (40, 1, Some(1_070))
-    );
+    assert_eq!((wc.total, wc.entries), (40, 1));
 
     h.set_time(1_070);
     let wc = client.window_consumption();
-    assert_eq!((wc.total, wc.entries, wc.oldest_expires_at), (0, 0, None));
+    assert_eq!((wc.total, wc.entries), (0, 0));
 }
 
-/// Issue #348: with the rolling window disabled (`window_secs == 0`) no entry
-/// can expire, so the read reports no oldest-expiry timestamp.
+/// Issue #348: with the rolling window disabled, the read remains
+/// well-defined and reports zero consumption.
 #[test]
-fn window_consumption_reports_no_expiry_when_window_disabled() {
+fn window_consumption_is_empty_when_window_disabled() {
     let h = Harness::new();
     let mut policy = h.base_policy();
     policy.window_secs = 0;
     h.install_policy(&policy);
     let client = PolicyEngineClient::new(&h.env, &h.guard);
     let wc = client.window_consumption();
-    assert_eq!((wc.total, wc.entries, wc.oldest_expires_at), (0, 0, None));
+    assert_eq!((wc.total, wc.entries), (0, 0));
 }
 
 #[test]

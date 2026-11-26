@@ -476,10 +476,6 @@ pub struct WindowConsumption {
     /// Number of live global spend entries in the ledger (same-second spends
     /// coalesce, so this is an entry count, not a transaction count).
     pub entries: u32,
-    /// Unix timestamp at which the oldest live entry leaves the window
-    /// (`oldest.ts + window_secs`), or `None` when the ledger is empty or the
-    /// policy disables the rolling window (`window_secs == 0`).
-    pub oldest_expires_at: Option<u64>,
 }
 
 /// Permissionless policy decision returned by `check`.

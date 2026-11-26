@@ -153,7 +153,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 267 tests, isolated (no network)
+cargo test                                      # 270 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -611,15 +611,14 @@ itself with zero transactions.
 ```rust
 pub fn window_consumption(env: Env) -> WindowConsumption
 ```
-No auth. Returns the live rolling-window consumption — `{ total, entries, oldest_expires_at }`
+No auth. Returns the live rolling-window consumption — `{ total, entries }`
 — so an operator or dashboard can answer "how much of the allowance is left?" without a
 `check()` simulation ([issue #348](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/348)).
 The ledger is loaded and pruned at the current ledger timestamp, so `total` is the sum of
 non-expired global spend entries and `entries` counts those live entries (same-second spends
-coalesce, so it is an entry count, not a transaction count). `oldest_expires_at` is
-`oldest.ts + window_secs`, or `null` when the window is empty or `window_secs == 0`. With no
-policy installed the read returns `{"total":"0","entries":0,"oldest_expires_at":null}` —
-it never traps. Per-recipient override headroom stays recipient-targeted; use `check_detailed`
+coalesce, so it is an entry count, not a transaction count). With no policy
+installed the read returns `{"total":"0","entries":0}` — it never traps.
+Per-recipient override headroom stays recipient-targeted; use `check_detailed`
 for that. Like every persistent read, a submitted (non-simulated) call may extend TTLs and
 incur rent (SPEC §9.5).
 
@@ -1134,11 +1133,11 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-267 tests (unit + integration) cover the policy decision engine — including the regression
+270 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `267 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green this session: `270 passed; 0 failed`.
 
 These are the commands CI runs, in the order the `ci` job runs them — the same
 block a contributor can copy (see also

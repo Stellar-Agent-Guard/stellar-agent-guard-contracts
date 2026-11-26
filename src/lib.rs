@@ -1305,45 +1305,30 @@ mod policy_engine_type {
             status_snapshot(&env, as_of)
         }
 
-        /// Rolling-window consumption (`window_consumption`): the live global
-        /// window total, the number of live entries, and when the oldest one
-        /// expires — without running a `check` simulation (issue #348).
+        /// Rolling-window consumption (`window_consumption`): live global
+        /// window total and entry count, without a `check` simulation
+        /// (issue #348).
         ///
-        /// No auth and event-free, consistent with the other reads. The ledger
-        /// is loaded and lazily pruned at the current ledger timestamp, so
-        /// expired entries are never counted. `oldest_expires_at` is
-        /// `oldest.ts + window_secs` and is `None` when the window is empty or
-        /// `window_secs == 0` (a disabled rolling window never expires). With no
-        /// policy installed the read returns the defined empty value
-        /// `{ total: 0, entries: 0, oldest_expires_at: None }` — it never traps.
+        /// No auth, event-free. The ledger is loaded and pruned at the current
+        /// ledger timestamp, so expired entries never count. With no policy
+        /// installed it returns `{ total: 0, entries: 0 }` and never traps.
         ///
-        /// Like every persistent read, a submitted (non-simulated) call may
-        /// refresh entry TTLs and incur rent (SPEC §9.5); simulation does not
-        /// persist those extensions.
+        /// Like every persistent read, a submitted call may refresh TTLs and
+        /// incur rent (SPEC §9.5); simulation does not persist them.
         #[allow(clippy::must_use_candidate)] // public read surface
         pub fn window_consumption(env: Env) -> WindowConsumption {
             let Some(policy) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
                 return WindowConsumption {
                     total: 0,
                     entries: 0,
-                    oldest_expires_at: None,
                 };
             };
             let now = env.ledger().timestamp();
             let (mut ledger, _) = load_window(&env);
             ledger.prune(now, policy.window_secs);
-            let oldest_expires_at = if policy.window_secs == 0 {
-                None
-            } else {
-                ledger
-                    .entries
-                    .get(0)
-                    .map(|entry| entry.ts.saturating_add(policy.window_secs))
-            };
             WindowConsumption {
                 total: ledger.total,
                 entries: ledger.len(),
-                oldest_expires_at,
             }
         }
 
