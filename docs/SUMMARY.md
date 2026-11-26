@@ -7,6 +7,8 @@
   * [Deployment Runbook](operations/deployment-runbook.md)
   * [Migrating a Funded Agent Wallet](operations/migration-guide.md)
   * [Incident Playbook — DMS-Frozen, Admin Key Lost](operations/incident-playbook-admin-key-lost.md)
+  * [Rollback and Policy Recovery](operations/rollback-and-recovery.md)
+  * [Incident Evidence Bundle](operations/incident-evidence-bundle.md)
 * [Concepts](concepts/)
   * [Custom Account Enforcement](concepts/custom-account-enforcement.md)
   * [Spend Limits](concepts/spend-limits.md)
