@@ -1,0 +1,92 @@
+{
+  "bundle_version": 1,
+  "incident_id": "2026-11-25-synthetic-policy-mismatch",
+  "created_at": "2026-11-25T14:05:00Z",
+  "title": "Synthetic sample: allowed recipient typo blocked an intended spend",
+  "severity": "medium",
+  "summary": "The agent was blocked with reason `recipient_not_allowed` after a policy edit. Values in this file are synthetic and exist only to show the bundle layout.",
+  "network": {
+    "name": "testnet",
+    "passphrase": "Test SDF Network ; September 2015"
+  },
+  "guard_contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+  "wasm_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "policy_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "policy_revision": 7,
+  "tx_hashes": [
+    "3333333333333333333333333333333333333333333333333333333333333333",
+    "4444444444444444444444444444444444444444444444444444444444444444"
+  ],
+  "events": [
+    {
+      "tx_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "ledger": 4566285,
+      "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+      "topics": ["event_policy_set"],
+      "data": {
+        "by": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        "revision": 7
+      }
+    },
+    {
+      "tx_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+      "ledger": 4566290,
+      "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+      "topics": ["event_auth_checked", "blocked", "recipient_not_allowed"],
+      "data": {
+        "context_index": 0,
+        "revision": 7,
+        "contract": "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        "fn_name": "transfer"
+      }
+    }
+  ],
+  "toolchain": {
+    "rustc_version": "1.91.0",
+    "stellar_cli_version": "27.1.0",
+    "agent_tx_version": "0.1.0"
+  },
+  "rpc_url": "https://soroban-testnet.stellar.org",
+  "ledger_range": {
+    "start": 4566200,
+    "end": 4566300
+  },
+  "status_snapshot": {
+    "admin_frozen": false,
+    "paused": false,
+    "has_policy": true,
+    "heartbeat_expired": false,
+    "heartbeat_expires_at": null,
+    "outside_active_window": false,
+    "window_remaining": "450",
+    "policy_revision": 7
+  },
+  "policy": {
+    "active_from": 0,
+    "active_until": 0,
+    "allow_any_recipient": false,
+    "assets": ["CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"],
+    "dms_grace_secs": 0,
+    "paused": false,
+    "per_tx_cap": "100",
+    "protocols": [],
+    "recipients": ["GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCHF"],
+    "window_cap": "500",
+    "window_secs": 86400
+  },
+  "agent_fingerprint": "0123456789abcdef",
+  "admin_address": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  "attachments": [
+    {
+      "name": "agent-loop.log",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    }
+  ],
+  "reproduction_steps": [
+    "stellar contract invoke --id CAAAA... --network testnet --source-account admin --send=no -- status",
+    "stellar contract invoke --id CAAAA... --network testnet --source-account admin --send=no -- policy",
+    "agent-tx preflight --guard CAAAA... --asset CBBB... --to GCCCC... --amount 1"
+  ],
+  "operator_notes": "Synthetic example. Replace every value with the real incident's public data before sharing.",
+  "redactions": ["rpc_url.query", "operator_notes.contact"]
+}
