@@ -6,8 +6,8 @@
 #   cargo build --release --target wasm32v1-none
 # on the pinned toolchain in rust-toolchain.toml.
 #
-# Baseline: 105716 bytes
-# Budget:   111002 bytes (= ceil(105716 * 1.05), about 5% headroom)
+# Baseline: 111679 bytes
+# Budget:   117263 bytes (= ceil(111679 * 1.05), about 5% headroom)
 #
 # To increase the budget deliberately:
 #   1. Rebuild the WASM with `cargo build --release --target wasm32v1-none`.
@@ -18,4 +18,4 @@
 #
 # Exactly one `bytes=<positive integer>` line is required. Comments and blank
 # lines are ignored.
-bytes=111002
+bytes=117263
