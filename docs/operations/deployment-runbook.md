@@ -187,6 +187,86 @@ and `heartbeat_expires_at` is `null` (or absent) regardless of silence.
 | `heartbeat_expired: true` right after install | More than `dms_grace_secs` has elapsed since install with no agent heartbeat. Start the agent loop, then `unfreeze` (admin) — a heartbeat cannot revive an expired account. |
 | `outside_active_window: true` | The policy's `active_from`/`active_until` does not cover the current ledger time. Only a `set_policy` with a renewed window revives the account. |
 
+### 6.1 Run the deployment preflight
+
+Before handing the guard over to the agent loop, run the automated preflight
+script. It calls `agent-tx verify` internally (read-only, no secrets) and
+checks network reachability, the contract address, the installed policy hash,
+and the registered admin signer in one pass:
+
+```bash
+./scripts/preflight-deploy.sh \
+    --guard      <GUARD_ID>          \
+    --network    testnet             \
+    --admin      <ADMIN_G>           \
+    --policy-hash <64-hex policy digest from step 6>  \
+    --agent-pubkey <64-hex agent pubkey from step 4>
+# → ✅  All checks passed. Safe to proceed.
+# Exit 0 = every check passed. Exit 1 = one or more checks failed (see output).
+```
+
+The script validates address formats, connects to the RPC endpoint, reads live
+contract state, and prints a PASS / FAIL line for each check. No secret is ever
+read or printed; the check is safe to run in CI or in a monitoring job. Resolve
+any failure before proceeding.
+
+```
+EXIT 0  All checks passed. Safe to proceed.
+EXIT 1  One or more checks failed.
+EXIT 3  RPC transport failure — retry or check the endpoint.
+```
+
+The full option reference is in the script's `--help` output and in
+[`scripts/preflight-deploy.sh`](../../scripts/preflight-deploy.sh).
+
+### 6.2 Confirm the live configuration with `agent-tx verify`
+
+The `status`/`policy`/`policy_hash` invocations above answer each question
+separately. [`agent-tx verify`](../../tools/agent-tx/README.md#verify) collects
+them into one read-only object — policy hash, pause/freeze state, and the
+registered admin and agent key — so a post-deployment check (and every later
+drift check) is a single command that can be repeated safely: it simulates the
+contract's own `status()` and `policy_hash()` reads and fetches the instance
+entry, signing and submitting nothing.
+
+```bash
+agent-tx verify --guard <GUARD_ID> --network testnet
+# → {"guard":"<GUARD_ID>","network":"testnet","ledger":<N>,
+#    "initialized":true,"admin":"<ADMIN_G>",
+#    "agent_pubkey":"<AGENT_PUBKEY_HEX>","policy_version":1,
+#    "policy_hash":"<64 hex characters>",
+#    "status":{"admin_frozen":false,"dms_grace_secs":0,"has_policy":true,
+#      "heartbeat_expired":false,"heartbeat_expires_at":null,
+#      "last_heartbeat":<install time>,"now":<ledger time>,
+#      "outside_active_window":false,"paused":false,
+#      "policy_revision":1,"window_remaining":<cap>}}
+```
+
+**Expected:** `initialized: true`; `admin` equal to `<ADMIN_G>`; `agent_pubkey`
+equal to `<AGENT_PUBKEY_HEX>`; `policy_version: 1`; a `policy_hash` that matches
+the value you just recorded; and a `status` block matching step 6
+(`has_policy: true`, `paused: false`, `admin_frozen: false`,
+`outside_active_window: false`). Record the `policy_hash` in the deployment
+record: it is the drift anchor, and any later difference means the policy
+changed (every field, including `paused`, is part of the digest).
+
+**Escalation — what a surprising read means and what to do:**
+
+| Read | Meaning | Escalation |
+|---|---|---|
+| `initialized: false`, `admin: null` | `initialize` never landed. | Do **not** redeploy: re-run step 4 against `<GUARD_ID>` and re-check. |
+| `agent_pubkey` is not `<AGENT_PUBKEY_HEX>` | The guard was initialized with a different agent key (wrong hex, or another deployment's key). | Stop the agent loop. Rotate the key through [`docs/key-rotation.md`](../key-rotation.md); a key change is admin-authorized and audited. |
+| `policy_hash: "e3b0c4…b855"` (`NO_POLICY_DIGEST`) or `has_policy: false` | No policy is installed — the account is default-deny. | Re-run step 5. The agent is safe (it can spend nothing) but cannot operate. |
+| `paused: true` | The policy's kill switch is on. | `set_policy` with `paused: false` (admin). Re-check the hash afterwards — pausing changes it. |
+| `admin_frozen: true` | An admin `freeze` is in effect. | `unfreeze` (admin); a heartbeat cannot clear an admin freeze. |
+| `heartbeat_expired: true` | The dead-man switch fired (grace elapsed with no heartbeat). | Start the agent heartbeat loop **first**, then `unfreeze` (admin). |
+| `outside_active_window: true` | `active_from`/`active_until` does not cover ledger time. | `set_policy` with a renewed window (admin). |
+| `policy_hash` differs from the deployment record | The policy changed since install. | Compare against the intended `set_policy` transaction; if the change is unexplained, treat it as an incident and pause the policy. |
+| Any read fails with exit `3`/`4` | RPC timeout/transport or JSON-RPC rejection. | Nothing was written. Retry, raise `--rpc-timeout`, or use another `--network`/`--rpc-url`; investigate the endpoint before concluding the guard is wrong. |
+
+`verify` reads only, so repeating it (before and after each remediation) is the
+intended workflow and cannot itself change state.
+
 ## 7. Put the balance where the guard expects it
 
 Funds must arrive at `<GUARD_ID>` (the `C...` address), not at the agent's `G...` key. An
@@ -223,8 +303,37 @@ Keep these with the deployment, because every later incident question starts fro
 - `policy_hash` after the first install, and the `set_policy` transaction;
 - `dms_grace_secs` and the heartbeat cadence the agent runtime is configured with.
 
+## Announcing a release to sibling repositories
+
+Downstream consumers pin bytes, not "latest". The dashboard currently pins a single WASM hash,
+so **every release that changes the artifact invalidates that pin** and the dashboard cannot
+deploy the new contract until someone updates it by hand. Treat the announcement as part of the
+release, not a follow-up:
+
+- The GitHub Release body (or the PR that cuts the tag) states the tag, the released
+  `stellar_agent_guard_contracts.wasm.sha256`, and where `provenance.txt` and `sbom.cdx.json`
+  live. Do not announce a short hash prefix — consumers need the full 64 hex characters.
+- Link the consumer-side tracking in the same announcement: in the dashboard repository,
+  multi-artifact support is tracked by
+  [issue #13](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/13),
+  the pinned-artifact maintainer checklist by
+  [issue #561](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/561),
+  and deploy-time bytecode provenance by
+  [issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/290).
+- The cross-repo dependency is tracked here as
+  [issue #90](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/90).
+  A release that silently changes the hash re-opens it.
+
+A release whose hash is not announced is still valid on-chain; it is simply invisible to a
+consumer that pins the previous hash. The announcement is what turns a published artifact into a
+deployable one.
+
 ## See also
 
+- [Rollback and policy recovery](rollback-and-recovery.md) — safe recovery after a bad policy
+  installation, and the difference between pause, replacement, and key rotation.
+- [Incident evidence bundle](incident-evidence-bundle.md) — the redaction-safe evidence layout
+  for an incident review.
 - [Migration guide](migration-guide.md) — moving an existing funded wallet into the account.
 - [Incident playbook — DMS-frozen, admin key unavailable](incident-playbook-admin-key-lost.md) —
   what arming the dead-man switch commits you to.

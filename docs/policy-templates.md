@@ -1,10 +1,12 @@
 # Policy templates / presets — named starter configs for common operator personas
 
-Every new operator faces a blank `PolicyConfig` with 11 fields and must learn the
-semantics from [SPEC §8](../SPEC.md#8-config-validation-set_policy). This page documents
-four named presets — copy-paste JSON installable via `set_policy` — for the most common
-operator personas, each with a one-paragraph rationale and an explicit list of what it
-does **not** protect against.
+Every new operator faces a blank `PolicyConfig` and must learn the semantics from
+[SPEC §8](../SPEC.md#8-config-validation-set_policy). This page documents four named
+presets for the most common operator personas, each with a one-paragraph rationale and
+an explicit list of what it does **not** protect against. The presets themselves are
+loadable JSON files in [`examples/policies/`](../examples/policies/) — that directory,
+not this page, is the source of truth. A CI test discovers every file there, validates
+it against `policy.schema.json`, and installs it via `set_policy`.
 
 > ⚠️ **Read first — these are unaudited starting points, not security advice.**
 >
@@ -23,8 +25,8 @@ does **not** protect against.
 
 ## How to install a preset
 
-Each preset is valid JSON in the exact shape the `stellar` CLI expects for
-`set_policy --config`. Copy the JSON block, substitute your own addresses, and:
+Each preset file is valid JSON in the exact shape the `stellar` CLI expects for
+`set_policy --config`. Copy the file, substitute your own addresses, and:
 
 ```bash
 stellar contract invoke --id GUARD_CONTRACT_ID --network testnet \
@@ -41,37 +43,14 @@ for an explicit, admin-attested window reset. Invalid configs are rejected with
 
 ### 1. Day-trader agent — high per-tx, tight window
 
+**File:** [`examples/policies/day-trader-agent.json`](../examples/policies/day-trader-agent.json)
+
 **Rationale.** A high-frequency trading agent needs room to move: large per-transaction
 caps and a tight rolling window so that even a fully-compromised agent key cannot drain
 more than `window_cap` units inside any `window_secs` span. The dead-man grace matches
 the window (5 minutes) so a frozen or killed trading agent stops spending almost
 immediately, and a DEX protocol rule lets the agent call only the specific swap/liquidity
 functions it needs — everything else is default-deny.
-
-```json
-{
-  "active_from": 0,
-  "active_until": 0,
-  "allow_any_recipient": false,
-  "asset_caps": [],
-  "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
-  "blocked_recipients": [],
-  "dms_grace_secs": 300,
-  "paused": false,
-  "per_tx_cap": "50000",
-  "protocols": [
-    {
-      "contract": "CCYIRHS5OIVHEBKM27BDOPS6N3XKJSBQW2JAAV2F47GJH4C7ESLYGKVM",
-      "fns": ["swap", "add_liquidity"]
-    }
-  ],
-  "protocol_calls_per_window": 0,
-  "recipient_window_caps": [],
-  "recipients": ["GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"],
-  "window_cap": "250000",
-  "window_secs": 300
-}
-```
 
 **What it does NOT protect against:**
 
@@ -87,34 +66,13 @@ functions it needs — everything else is default-deny.
 
 ### 2. Payments bot — fixed recipients, modest caps
 
+**File:** [`examples/policies/payments-bot.json`](../examples/policies/payments-bot.json)
+
 **Rationale.** A payroll/vendor payments bot sends known amounts to known recipients on
 a schedule. Modest caps bound the blast radius of any single buggy run, the recipient
 allowlist is the whole security model (only the payroll, vendor, and treasury addresses
 can ever receive funds), and a 1-day dead-man grace tolerates a weekend outage without
 freezing the account.
-
-```json
-{
-  "active_from": 0,
-  "active_until": 0,
-  "allow_any_recipient": false,
-  "asset_caps": [],
-  "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
-  "blocked_recipients": [],
-  "dms_grace_secs": 86400,
-  "paused": false,
-  "per_tx_cap": "1000",
-  "protocols": [],
-  "protocol_calls_per_window": 0,
-  "recipient_window_caps": [],
-  "recipients": [
-    "GBQ6OQUM5FTH7M5AU4PXFGB5GZXDF742E6ORZUP6UUJ6IHA653Z6LPQL",
-    "GCR2RCC7QOFAHRNGHTAMQ4VZFXSG2ICZGL6DGW7X2OMKOJHY2MAWJANI"
-  ],
-  "window_cap": "10000",
-  "window_secs": 3600
-}
-```
 
 **What it does NOT protect against:**
 
@@ -128,32 +86,14 @@ freezing the account.
 
 ### 3. Watch-only + heartbeat — paused baseline
 
+**File:** [`examples/policies/watch-only-heartbeat.json`](../examples/policies/watch-only-heartbeat.json)
+
 **Rationale.** The safest possible baseline: `paused: true` blocks **every**
 authorization — transfers, protocol calls, and even `heartbeat` (SPEC §4 gate #4 runs
 before the self-call allowance in gate #6). Deploy in this posture while you audit the
 agent, then flip to a live preset with a fresh `set_policy`. Caps are disabled and the
 allowlists are empty, so even an unpause without further edits cannot move funds. The
 7-day dead-man grace gives you a week to notice a silent account before it freezes.
-
-```json
-{
-  "active_from": 0,
-  "active_until": 0,
-  "allow_any_recipient": false,
-  "asset_caps": [],
-  "assets": [],
-  "blocked_recipients": [],
-  "dms_grace_secs": 604800,
-  "paused": true,
-  "per_tx_cap": "0",
-  "protocols": [],
-  "protocol_calls_per_window": 0,
-  "recipient_window_caps": [],
-  "recipients": [],
-  "window_cap": "0",
-  "window_secs": 86400
-}
-```
 
 **Operational note.** Because `paused` blocks `heartbeat` too, the account will
 dead-man-freeze after the grace period and stay frozen until the admin runs `unfreeze`
@@ -171,30 +111,12 @@ heartbeating while spending stays impossible, drop `paused` to `false` — the e
 
 ### 4. Max security — tiny caps, short DMS
 
+**File:** [`examples/policies/max-security.json`](../examples/policies/max-security.json)
+
 **Rationale.** For an account that should barely move: 100 units per transaction, 500
 units per hour, a single cold-wallet recipient, and a 1-hour dead-man grace so silence
 freezes the account within the hour. This is the right posture for a long-horizon
 savings account an agent can top up but never meaningfully spend from.
-
-```json
-{
-  "active_from": 0,
-  "active_until": 0,
-  "allow_any_recipient": false,
-  "asset_caps": [],
-  "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
-  "blocked_recipients": [],
-  "dms_grace_secs": 3600,
-  "paused": false,
-  "per_tx_cap": "100",
-  "protocols": [],
-  "protocol_calls_per_window": 0,
-  "recipient_window_caps": [],
-  "recipients": ["GCDCESJSIFS2K2MI5OIUWJUJZVEM2WM2PBEAZMFRC5QU7HVJETCXYC3G"],
-  "window_cap": "500",
-  "window_secs": 3600
-}
-```
 
 **What it does NOT protect against:**
 
@@ -219,14 +141,17 @@ savings account an agent can top up but never meaningfully spend from.
   key, and freeze/unfreeze the account. Guard it like a key that can reconfigure the
   firewall — because that is what it is.
 
-## CI keeps this doc honest
+## CI keeps these files honest
 
-`src/policy_preset_tests.rs` extracts every fenced `json` block from this document,
-deserializes it into a `PolicyConfig`, installs it via `set_policy` against the real
-contract in the Soroban test environment (running the production `validate_config`
-path, SPEC §8), and reads the policy back to assert a faithful round-trip. If a preset
-ever stops deserializing, stops validating, or stops round-tripping, `cargo test`
-fails — doc rot cannot ship silently.
+`src/policy_preset_tests.rs` discovers every `*.json` file in
+[`examples/policies/`](../examples/policies/), deserializes it into a `PolicyConfig`,
+installs it via `set_policy` against the real contract in the Soroban test environment
+(running the production `validate_config` path, SPEC §8), and reads the policy back to
+assert a faithful round-trip. `tests/policy_schema.rs` separately validates every file
+against [`policy.schema.json`](../policy.schema.json). If a preset stops parsing, stops
+validating, or stops round-tripping, `cargo test` fails — preset rot cannot ship
+silently, and adding a file without validation is impossible because discovery is
+dynamic.
 
 ## See also
 

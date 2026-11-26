@@ -73,6 +73,23 @@ pub const MAX_WINDOW_SECS: u64 = 315_360_000; // 86_400 × 3_650
 /// Same upper bound as `MAX_WINDOW_SECS`, applied to the DMS grace.
 pub const MAX_DMS_GRACE_SECS: u64 = MAX_WINDOW_SECS;
 
+/// Upper bound on every cap magnitude in a policy: `per_tx_cap`, `window_cap`,
+/// `asset_caps[i].per_tx_cap`, and `recipient_window_caps[i].cap` (issue #321).
+///
+/// `10^24` smallest units is a deliberately generous ceiling that no realistic
+/// token supply can reach: at Stellar's usual 7 decimals it is `10^17` whole
+/// tokens, roughly two million times the entire XLM supply (~`5 × 10^10` XLM =
+/// `5 × 10^17` stroops). Above it a "cap" is indistinguishable from "unlimited"
+/// while still reading as policy, and the account still pays for a window
+/// ledger that nothing will ever prune.
+///
+/// The bound also keeps the saturating additions in `window.rs` / `engine.rs`
+/// belt-and-braces rather than load-bearing: even the pathological window
+/// (8192 entries, each at the ceiling) totals ~`8.2 × 10^27`, more than ten
+/// orders of magnitude below `i128::MAX` (`≈1.7 × 10^38`). `0` (disabled)
+/// remains legal, and the boundary value itself is accepted.
+pub const MAX_CAP_MAGNITUDE: i128 = 1_000_000_000_000_000_000_000_000;
+
 /// Which SPEC §8 validation rule rejected a policy (issue #35). `validate_policy`
 /// reports the **first** failing rule. Variants added after the original set
 /// preserve their established contract-type ordinals.
@@ -121,6 +138,13 @@ pub enum PolicyRuleId {
     AssetCapUnknownAsset,
     /// The same asset appears twice in `asset_caps`.
     DuplicateAssetCap,
+    /// A contract appears in both `assets` and `protocols` (issue #296).
+    /// Appended last so the previously documented variant ordinals stay
+    /// wire-stable.
+    AssetProtocolOverlap,
+    /// A cap field (`per_tx_cap`, `window_cap`, or an override cap) exceeds
+    /// `MAX_CAP_MAGNITUDE` (issue #321).
+    CapMagnitudeExceedsBound,
 }
 
 /// Result of the `validate_policy` read (issue #35): whether a candidate
@@ -150,7 +174,10 @@ pub enum ValidationOutcome {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowState {
-    /// Cached rolling total (sum of non-expired entries).
+    /// Cached rolling total, kept for observability and ABI stability only.
+    /// The stored `total` is never used for enforcement: it is recomputed from
+    /// `entries` on every load, so a corrupted cache can never admit spend
+    /// (SPEC §3, issue #346).
     pub total: i128,
     /// Chronological spend entries (oldest first).
     pub entries: Vec<SpendEntry>,
@@ -167,7 +194,9 @@ pub struct WindowState {
 pub struct RecipientWindowState {
     /// Account receiving transfers tracked by this ledger.
     pub recipient: Address,
-    /// Cached rolling total (sum of non-expired entries).
+    /// Cached rolling total for this recipient, kept for observability and ABI
+    /// stability only. Never used for enforcement: recomputed from `entries` on
+    /// every load, so a corrupted cache can never admit spend (SPEC §3, #346).
     pub total: i128,
     /// Chronological spend entries (oldest first).
     pub entries: Vec<SpendEntry>,
@@ -501,14 +530,16 @@ pub fn policy_canonical_encoding(env: &Env, cfg: &PolicyConfig) -> Bytes {
 }
 
 impl Error {
-    /// Convert an `Error` variant into its corresponding `BlockReason` symbol (as used in `CheckResult::Blocked`).
+    /// Convert an `Error` variant into its corresponding block-reason `Symbol`
+    /// (the payload of `CheckResult::Blocked` and the `reason` topic of
+    /// `auth_checked`; there is no separate `BlockReason` type — SPEC §7.1).
     #[allow(clippy::must_use_candidate)]
     pub fn to_block_reason(self) -> Symbol {
         // Uses the existing reason() string which matches SPEC §7 / reason glossary.
         Symbol::new(&soroban_sdk::Env::default(), self.reason())
     }
 
-    /// Attempt to convert a `BlockReason` symbol back to an `Error` variant.
+    /// Attempt to convert a block-reason `Symbol` back to an `Error` variant.
     #[allow(clippy::must_use_candidate)]
     pub fn from_block_reason(symbol: &Symbol) -> Option<Self> {
         let env = soroban_sdk::Env::default();

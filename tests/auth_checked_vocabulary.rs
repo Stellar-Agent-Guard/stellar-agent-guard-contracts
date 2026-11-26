@@ -40,7 +40,7 @@ fn auth_checked_fixture_covers_every_error_variant_and_allowed() {
     assert_eq!(allowed[0]["symbol"], "allowed");
     assert_eq!(
         allowed[0]["topics"],
-        json!(["event_auth_checked", "allowed", ""])
+        json!(["event_auth_checked", "allowed", "ok"])
     );
     assert_eq!(allowed[0]["data"], expected_data);
     assert_eq!(allowed[0]["spec_ref"], "§9");
