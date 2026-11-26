@@ -94,6 +94,25 @@ If `window_cap > 0`, then `window_secs` must also be > 0 (validated by `set_poli
 - Overrides for assets not present in the configured `assets` list are rejected, not silently ignored. This prevents a mistyped asset address from seemingly accepting an override that never applies.
 - An absent map is valid and encodes identically to a config that never had the field.
 
+## Validation cost at scale
+
+Policy validation (`set_policy` → SPEC §8) is O(N) in the total number of list entries across all policy lists. Each list is bounded by a `MAX_*` constant:
+
+| List | Constant | Limit |
+|---|---|---|
+| `assets` | `MAX_POLICY_ASSETS` | 256 |
+| `protocols` | `MAX_POLICY_PROTOCOLS` | 256 |
+| `recipients` + `blocked_recipients` | `MAX_RECIPIENT_ENTRIES` each | 256 each |
+| `asset_caps` | `MAX_ASSET_CAP_ENTRIES` | 256 |
+
+A maximum-bounds policy (all four lists at their limit, all caps set) validates with a predictable instruction count. The `benches/policy_deserialization.rs` benchmark measures this cost at minimum, typical, and maximum bounds and documents the result. Run it with:
+
+```
+cargo run --manifest-path benches/Cargo.toml --bin policy_deserialization
+```
+
+The rolling window entries (bounded by `MAX_WINDOW_ENTRIES = 8192`) are runtime state, not policy configuration, so they are not part of `set_policy` validation cost.
+
 ## Scope
 
 Both caps apply **only to SAC token transfers** (`transfer` / `transfer_from`). For other Soroban contract calls, the policy engine still enforces account-level gates — admin freeze, dead-man switch, pause, and the active window (`active_from` / `active_until`) — but per-call amount limits and rolling-window spend accounting are not applied. See [Enforcement Scope](../enforcement-scope.md) for details.

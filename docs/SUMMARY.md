@@ -21,6 +21,8 @@
   * [freeze / unfreeze](functions/freeze-unfreeze.md)
   * [admin rotation](functions/admin-rotation.md)
   * [check\_auth](functions/check-auth.md)
+* [Walkthroughs](walkthroughs/)
+  * [End-to-end guarded transfer](walkthroughs/guarded-transfer.md)
 * [Policy Templates](policy-templates.md)
 * [Policy Anti-patterns](anti-patterns.md)
 * [Key Rotation](key-rotation.md)
