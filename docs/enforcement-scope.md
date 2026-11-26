@@ -62,6 +62,10 @@ For arbitrary protocol calls (DEX swaps, lending operations, etc.):
 | Dead-man switch | ✅ | ✅ |
 | Default deny | ✅ | ✅ |
 
+## Threat model boundary diagram
+
+The [Architecture](architecture.md#threat-model-boundary-spec-2) page contains a Mermaid diagram that maps this boundary visually: what the guard enforces, what the underlying Stellar account layer enforces, and what is out of scope in v1.
+
 ## v2 tracking
 
 Extending fine-grained enforcement to arbitrary Soroban calls is tracked as a v2 item. The classification that produces this boundary (`AssetTransfer` vs `Protocol` vs `Unknown` default-deny) is spelled out in the [Architecture](architecture.md) page.
