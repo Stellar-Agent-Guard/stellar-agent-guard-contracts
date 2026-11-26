@@ -230,24 +230,31 @@ fn near_maximum_invalid_policy(env: &Env) -> PolicyConfig {
 }
 
 /// A preconfigured guard contract ready for `set_policy` calls.
+/// Stores the `Address` rather than a `PolicyEngineClient` to avoid a
+/// self-referential struct (the client borrows `env`).
 struct BenchEnv {
     env: Env,
-    client: PolicyEngineClient,
+    contract: Address,
 }
 
 fn bench_env() -> BenchEnv {
     let env = Env::default();
     env.mock_all_auths();
     let admin = admin_addr(&env);
-    let guard = env.register(PolicyEngine, ());
-    let client = PolicyEngineClient::new(&env, &guard);
+    let contract = env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&env, &contract);
     client.initialize(&admin, &BytesN::from_array(&env, &[7u8; 32]));
-    BenchEnv { env, client }
+    BenchEnv { env, contract }
 }
 
 /// Measure the CPU instruction cost of one `set_policy` call.
-/// Returns the instruction count; `expected_ok` asserts whether the call should succeed.
-fn measure_set_policy<F>(env: &Env, client: &PolicyEngineClient, name: &str, mut f: F) -> u64
+/// Returns the instruction count.
+fn measure_set_policy<'e, F>(
+    env: &'e Env,
+    client: &PolicyEngineClient<'e>,
+    name: &str,
+    mut f: F,
+) -> u64
 where
     F: FnMut() -> PolicyConfig,
 {
@@ -266,7 +273,8 @@ where
 
 #[allow(clippy::too_many_lines)]
 fn main() {
-    let BenchEnv { env, client } = bench_env();
+    let BenchEnv { env, contract } = bench_env();
+    let client = PolicyEngineClient::new(&env, &contract);
     env.cost_estimate().budget().reset_unlimited();
 
     println!("=== Policy Deserialization / Validation Benchmarks (issue #611) ===");
@@ -291,7 +299,7 @@ fn main() {
     let bad_cost = measure_set_policy(
         &env,
         &client,
-        "near-maximum malformed (full sweep → RecipientAllowAndBlocked rejection)",
+        "near-maximum malformed (full sweep, RecipientAllowAndBlocked rejection)",
         || near_maximum_invalid_policy(&env),
     );
 
