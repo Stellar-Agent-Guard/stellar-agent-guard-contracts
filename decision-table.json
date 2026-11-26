@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "spec_section": "§4",
-  "purpose": "Single machine-readable source of truth for the policy decision table. `condition` and `result` are rendered verbatim into the SPEC §4 table; `reasons` is what the engine actually returns for that row. tests/decision_table.rs fails `cargo test` if any of these drift apart.",
+  "purpose": "Machine-readable source of truth for the policy decision table and the asset-transfer denial precedence. `condition` and `result` are rendered verbatim into the SPEC §4 table; `reasons` is what the engine actually returns for that row. The transfer precedence is consumed by src/engine.rs and parity-tested. tests/decision_table.rs fails `cargo test` if the table artifacts drift apart.",
   "notes": [
     "SPEC §4 is the prose table; this file is the data behind it. Edit `condition`/`result` here and paste the rendered row back into SPEC.md — never edit the SPEC row alone, the drift test will reject it.",
     "`result` reproduces SPEC §4's cell verbatim, including reasons SPEC lists there that the v1 engine cannot emit. `reasons` below is engine truth. Where the two disagree, the per-row `note` says so and points at the audit that records it; see docs/scenario-matrix.md findings F-2, F-3 and F-4.",
@@ -9,10 +9,19 @@
   ],
   "readme_gate_order_anchor": "**Account-level gates** (in this order):",
   "readme_gate_order": [
+    "no policy",
     "admin freeze",
     "dead-man switch",
     "pause",
     "active window"
+  ],
+  "asset_transfer_denial_precedence": [
+    "asset_paused",
+    "positive_amount",
+    "recipient_not_blocked",
+    "recipient_allowed",
+    "per_tx_cap",
+    "window_cap"
   ],
   "rows": [
     {
@@ -34,7 +43,25 @@
     },
     {
       "id": 1,
-      "condition": "`AdminFrozen` is set",
+      "condition": "no `Policy` stored (revoked or never set)",
+      "result": "**Block** (`Reason::NoPolicy`) — default deny",
+      "verdict": "block",
+      "readme_terms": [
+        "no policy"
+      ],
+      "reasons": [
+        {
+          "error": "NoPolicy",
+          "tests": [
+            "no_policy_is_default_deny"
+          ]
+        }
+      ],
+      "note": "The policy snapshot is resolved before any account-gate flag is read, so a policy-less account reports `no_policy` even when `AdminFrozen` is set (issue #299)."
+    },
+    {
+      "id": 2,
+      "condition": "`AdminFrozen` is set (admin `freeze`, or agent `self_lock`; §5)",
       "result": "**Block** (`Reason::AdminFrozen`)",
       "verdict": "block",
       "readme_terms": [
@@ -47,10 +74,11 @@
             "account_gates_order_beats_calls"
           ]
         }
-      ]
+      ],
+      "note": "Set by the admin's `freeze` or the agent's `self_lock`; both are cleared only by admin `unfreeze` (issue #306)."
     },
     {
-      "id": 2,
+      "id": 3,
       "condition": "dead-man switch enabled AND `LastHeartbeat != 0` AND `now - LastHeartbeat > dms_grace_secs`",
       "result": "**Block** (`Reason::HeartbeatExpired`) — automatic freeze, derived lazily, no background write",
       "verdict": "block",
@@ -68,23 +96,6 @@
         }
       ],
       "note": "The gate also blocks `heartbeat` itself once the grace elapsed: reviving the account is the admin's `unfreeze` (§5)."
-    },
-    {
-      "id": 3,
-      "condition": "no `Policy` stored (revoked or never set)",
-      "result": "**Block** (`Reason::NoPolicy`) — default deny",
-      "verdict": "block",
-      "readme_terms": [
-        "NoPolicy"
-      ],
-      "reasons": [
-        {
-          "error": "NoPolicy",
-          "tests": [
-            "no_policy_is_default_deny"
-          ]
-        }
-      ]
     },
     {
       "id": 4,
@@ -123,11 +134,12 @@
     },
     {
       "id": 6,
-      "condition": "context is a call to this account's own administrative/self functions (`heartbeat`, `check`)",
-      "result": "allow into §5 handling (heartbeat state update only)",
+      "condition": "context is a call to this account's own administrative/self functions (`heartbeat`, `self_lock`)",
+      "result": "allow `heartbeat` (§5 state update) or `self_lock` (§5 agent-initiated freeze); any other self-function is blocked (`Reason::SelfFunctionNotAllowed`)",
       "verdict": "mixed",
       "readme_terms": [
-        "heartbeat"
+        "heartbeat",
+        "self_lock"
       ],
       "kinds": [
         "SelfCall"
@@ -140,7 +152,7 @@
           ]
         }
       ],
-      "note": "Only `heartbeat` is admitted; `check` and `check_detailed` never require auth so they never reach `auth_contexts` at all. SPEC's cell names both, which overstates the allowed set — see docs/scenario-matrix.md finding F-4."
+      "note": "Only `heartbeat` and `self_lock` are admitted; `check` and `check_detailed` never require auth so they never reach `auth_contexts` at all. `self_lock` (issue #306) is a capability reduction — it sets `AdminFrozen`, moves no funds, and cannot be undone by the agent."
     },
     {
       "id": 7,

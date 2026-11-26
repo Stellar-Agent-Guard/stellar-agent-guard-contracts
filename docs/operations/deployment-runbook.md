@@ -187,7 +187,39 @@ and `heartbeat_expires_at` is `null` (or absent) regardless of silence.
 | `heartbeat_expired: true` right after install | More than `dms_grace_secs` has elapsed since install with no agent heartbeat. Start the agent loop, then `unfreeze` (admin) — a heartbeat cannot revive an expired account. |
 | `outside_active_window: true` | The policy's `active_from`/`active_until` does not cover the current ledger time. Only a `set_policy` with a renewed window revives the account. |
 
-### 6.1 Confirm the live configuration with `agent-tx verify`
+### 6.1 Run the deployment preflight
+
+Before handing the guard over to the agent loop, run the automated preflight
+script. It calls `agent-tx verify` internally (read-only, no secrets) and
+checks network reachability, the contract address, the installed policy hash,
+and the registered admin signer in one pass:
+
+```bash
+./scripts/preflight-deploy.sh \
+    --guard      <GUARD_ID>          \
+    --network    testnet             \
+    --admin      <ADMIN_G>           \
+    --policy-hash <64-hex policy digest from step 6>  \
+    --agent-pubkey <64-hex agent pubkey from step 4>
+# → ✅  All checks passed. Safe to proceed.
+# Exit 0 = every check passed. Exit 1 = one or more checks failed (see output).
+```
+
+The script validates address formats, connects to the RPC endpoint, reads live
+contract state, and prints a PASS / FAIL line for each check. No secret is ever
+read or printed; the check is safe to run in CI or in a monitoring job. Resolve
+any failure before proceeding.
+
+```
+EXIT 0  All checks passed. Safe to proceed.
+EXIT 1  One or more checks failed.
+EXIT 3  RPC transport failure — retry or check the endpoint.
+```
+
+The full option reference is in the script's `--help` output and in
+[`scripts/preflight-deploy.sh`](../../scripts/preflight-deploy.sh).
+
+### 6.2 Confirm the live configuration with `agent-tx verify`
 
 The `status`/`policy`/`policy_hash` invocations above answer each question
 separately. [`agent-tx verify`](../../tools/agent-tx/README.md#verify) collects
@@ -271,8 +303,37 @@ Keep these with the deployment, because every later incident question starts fro
 - `policy_hash` after the first install, and the `set_policy` transaction;
 - `dms_grace_secs` and the heartbeat cadence the agent runtime is configured with.
 
+## Announcing a release to sibling repositories
+
+Downstream consumers pin bytes, not "latest". The dashboard currently pins a single WASM hash,
+so **every release that changes the artifact invalidates that pin** and the dashboard cannot
+deploy the new contract until someone updates it by hand. Treat the announcement as part of the
+release, not a follow-up:
+
+- The GitHub Release body (or the PR that cuts the tag) states the tag, the released
+  `stellar_agent_guard_contracts.wasm.sha256`, and where `provenance.txt` and `sbom.cdx.json`
+  live. Do not announce a short hash prefix — consumers need the full 64 hex characters.
+- Link the consumer-side tracking in the same announcement: in the dashboard repository,
+  multi-artifact support is tracked by
+  [issue #13](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/13),
+  the pinned-artifact maintainer checklist by
+  [issue #561](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/561),
+  and deploy-time bytecode provenance by
+  [issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-dashboard/issues/290).
+- The cross-repo dependency is tracked here as
+  [issue #90](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/90).
+  A release that silently changes the hash re-opens it.
+
+A release whose hash is not announced is still valid on-chain; it is simply invisible to a
+consumer that pins the previous hash. The announcement is what turns a published artifact into a
+deployable one.
+
 ## See also
 
+- [Rollback and policy recovery](rollback-and-recovery.md) — safe recovery after a bad policy
+  installation, and the difference between pause, replacement, and key rotation.
+- [Incident evidence bundle](incident-evidence-bundle.md) — the redaction-safe evidence layout
+  for an incident review.
 - [Migration guide](migration-guide.md) — moving an existing funded wallet into the account.
 - [Incident playbook — DMS-frozen, admin key unavailable](incident-playbook-admin-key-lost.md) —
   what arming the dead-man switch commits you to.
