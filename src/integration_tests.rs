@@ -2686,7 +2686,7 @@ fn test_only_decision_trace_covers_allow_deny_and_malformed_paths() {
     };
     let state = AccountState {
         admin_frozen: false,
-        last_heartbeat: 0,
+        last_heartbeat: Some(0),
     };
     let prefix = [
         DecisionGate::AdminFrozen,
@@ -3292,6 +3292,10 @@ enum DmsOp {
         last_heartbeat: u64,
     },
     /// `status()` snapshot: the two DMS-ish flags plus the persisted clock.
+    /// The `last_heartbeat` field is `u64` for wire-stability: it reads as `0`
+    /// for both "never heartbeated" (`None`) and a real epoch-zero heartbeat
+    /// (`Some(0)`). The gate uses the stored `Option`, so the two states are
+    /// distinct internally.
     Status {
         admin_frozen: bool,
         heartbeat_expired: bool,
