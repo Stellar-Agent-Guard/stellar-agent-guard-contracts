@@ -108,6 +108,7 @@ fn typical_policy(env: &Env) -> PolicyConfig {
 /// Build a maximum-bounds policy: every list at its documented `MAX_*` limit.
 ///
 /// Addresses use disjoint tag bytes so none of the overlap-rejection rules fire.
+#[allow(clippy::cast_possible_truncation)] // MAX_* <= 256; loop indices fit in u8
 fn maximum_policy(env: &Env) -> PolicyConfig {
     // assets: tag 1 (up to MAX_POLICY_ASSETS = 256)
     let mut assets = Vec::new(env);
@@ -171,6 +172,7 @@ fn maximum_policy(env: &Env) -> PolicyConfig {
 /// end of SPEC §8's check sequence. All list lengths stay at or below their
 /// MAX_* limits so the rejection comes from the content check, not the length check.
 /// Measures the full validation sweep cost up to the final rejection.
+#[allow(clippy::cast_possible_truncation)] // MAX_* <= 256; loop indices fit in u8
 fn near_maximum_invalid_policy(env: &Env) -> PolicyConfig {
     // recipients: MAX_RECIPIENT_ENTRIES entries, all tag-3 addresses.
     let mut recipients = Vec::new(env);
