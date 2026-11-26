@@ -116,7 +116,7 @@ fn maximum_policy(env: &Env) -> PolicyConfig {
     for i in 0..MAX_POLICY_ASSETS {
         let a = addr(env, 1, i as u8);
         assets.push_back(a.clone());
-        if asset_caps.len() as usize < MAX_ASSET_CAP_ENTRIES {
+        if (asset_caps.len() as usize) < MAX_ASSET_CAP_ENTRIES {
             asset_caps.push_back(AssetCap {
                 asset: a,
                 per_tx_cap: 1_000,
@@ -193,7 +193,7 @@ fn near_maximum_invalid_policy(env: &Env) -> PolicyConfig {
     for i in 0..MAX_POLICY_ASSETS {
         let a = addr(env, 1, i as u8);
         assets.push_back(a.clone());
-        if asset_caps.len() as usize < MAX_ASSET_CAP_ENTRIES {
+        if (asset_caps.len() as usize) < MAX_ASSET_CAP_ENTRIES {
             asset_caps.push_back(AssetCap {
                 asset: a,
                 per_tx_cap: 1_000,
