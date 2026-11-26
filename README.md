@@ -153,7 +153,7 @@ that keeps heartbeating. Full derivation and caveats:
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 281 tests, isolated (no network)
+cargo test                                      # 286 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -692,7 +692,10 @@ host invokes it automatically on every authorization the account must approve. S
 3. Snapshot policy state: `PolicyConfig` (missing → `NoPolicy`), `AdminFrozen`,
    `LastHeartbeat`, ledger time.
 4. Run the decision table (`decide`) — account-level gates first, then a per-context
-   decision loop, then commit window admissions only if every context passed.
+   decision loop. Asset transfers check asset pause, positive amount, blocked
+   recipient, recipient allowlist, per-transaction cap, then window cap, in the
+   stable precedence documented in [SPEC §6.2](SPEC.md#62-asset-sac-calls--fully-enforced).
+   Window admissions commit only if every context passed.
 5. Return `Ok(())` to approve the transaction, or `Err(reason)` to reject it — and emit
    the `auth_checked` event either way, with real topics in both cases:
    `[event_auth_checked, allowed, ok]` on approval and
@@ -1122,7 +1125,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-281 tests (unit + integration) cover the policy decision engine — including the regression
+286 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
