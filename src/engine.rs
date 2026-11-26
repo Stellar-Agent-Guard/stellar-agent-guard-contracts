@@ -261,10 +261,10 @@ pub fn worst_case_addr(env: &Env, tag: u8, index: u8) -> Address {
 /// destination is deliberately in **none** of them:
 ///
 /// - `allow_any_recipient == false` — the expensive case. `decide` scans
-///   `blocked_recipients` (§6.2 rule 1), then `recipients` (rule 2), and
+///   `blocked_recipients` (§6.2 rule 2), then `recipients` (rule 3), and
 ///   misses on the *last* element of each: a full sweep of both lists, with no
 ///   early exit. This is what the escape hatch buys you.
-/// - `allow_any_recipient == true` — the cheap case. Rule 2 is skipped, so
+/// - `allow_any_recipient == true` — the cheap case. Rule 3 is skipped, so
 ///   only the denylist is swept before the caps and window are applied. This
 ///   is the case the escape hatch actually costs.
 ///
@@ -297,7 +297,7 @@ pub fn worst_case_transfer_policy(env: &Env, allow_any_recipient: bool) -> Polic
         per_tx_cap: 0,
         window_secs: 86_400,
         // A cap and a window are on, so the measured path also pays for the
-        // §6.2 rule-4 window evaluation the escape-on case must still run.
+        // §6.2 rule-5 window evaluation the escape-on case must still run.
         window_cap: 1_000,
         assets: {
             let mut assets = Vec::new(env);
@@ -1250,7 +1250,7 @@ mod tests {
         p.per_tx_cap = 50;
         let mut l = Ledger::empty(&env);
 
-        // amount == per_tx_cap (50): admitted (SPEC §6.2 rule 3: cap is inclusive).
+        // amount == per_tx_cap (50): admitted (SPEC §6.2 rule 4: cap is inclusive).
         let ctx_admit = vec![&env, transfer_ctx(&env, 1, 2, 50)];
         let d1 = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx_admit);
         assert_eq!(d1.first(), Some(&Decision::Allowed));
@@ -1284,6 +1284,52 @@ mod tests {
         let ctx2 = vec![&env, transfer_ctx(&env, 1, 99, 5)];
         let d2 = decide(&env, &sa, Some(&p2), &alive(), &mut l, 1000, ctx2.clone());
         assert!(matches!(d2.first().unwrap(), Decision::Allowed));
+    }
+
+    /// SPEC §6.2: the asset-transfer rules run in a fixed order and only the
+    /// **first** failure is reported. A transfer that violates the recipient
+    /// allowlist *and* the per-tx cap must report the allowlist, because the
+    /// cap is never reached for a disallowed destination. Reordering the checks
+    /// for readability would silently change every incident report for this
+    /// case, so the order is pinned here.
+    #[test]
+    fn transfer_violating_recipient_and_per_tx_cap_reports_recipient_first() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.per_tx_cap = 10;
+        p.window_cap = 100;
+        let mut l = Ledger::empty(&env);
+
+        // addr(99) is not in `recipients` (the base policy lists addr(2)) and
+        // 50 also exceeds the per-tx cap of 10: both rules fail at once.
+        let ctx = vec![&env, transfer_ctx(&env, 1, 99, 50)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, ctx);
+        assert_eq!(
+            d.first(),
+            Some(&Decision::Blocked(Error::RecipientNotAllowed)),
+            "the recipient allowlist is evaluated before the per-tx cap (SPEC §6.2)"
+        );
+    }
+
+    /// Amount validity is the first numbered rule, so a zero amount sent to a
+    /// disallowed destination reports `InvalidAmount`, not `RecipientNotAllowed`.
+    #[test]
+    fn transfer_violating_amount_and_recipient_reports_invalid_amount_first() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.per_tx_cap = 10;
+        p.window_cap = 100;
+        let mut l = Ledger::empty(&env);
+
+        let ctx = vec![&env, transfer_ctx(&env, 1, 99, 0)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, ctx);
+        assert_eq!(
+            d.first(),
+            Some(&Decision::Blocked(Error::InvalidAmount)),
+            "amount validity is evaluated before the recipient allowlist (SPEC §6.2)"
+        );
     }
 
     #[test]

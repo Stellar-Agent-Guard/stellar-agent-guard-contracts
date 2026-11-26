@@ -85,6 +85,7 @@ enum PolicyRuleId
   AssetCapUnknownAsset
   DuplicateAssetCap
   AssetProtocolOverlap
+  CapMagnitudeExceedsBound
 enum ValidationOutcome
   Valid
   Invalid(PolicyRuleId)
