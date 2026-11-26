@@ -613,6 +613,10 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
 /// single stable `InvalidConfig` error code — deliberately unchanged by
 /// issue #35 so the on-chain error surface (and every consumer matching on
 /// it) stays byte-compatible.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidConfig` if any SPEC §8 validation rule fails.
 pub fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
     first_failing_rule(env, cfg).map_err(|_| Error::InvalidConfig)
 }
