@@ -46,8 +46,8 @@ pub use types::{
 };
 use types::{
     CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_ASSET_CAP_ENTRIES,
-    MAX_DMS_GRACE_SECS, MAX_POLICY_ASSETS, MAX_POLICY_PROTOCOLS, MAX_RECIPIENT_ENTRIES,
-    MAX_WINDOW_SECS,
+    MAX_CAP_MAGNITUDE, MAX_DMS_GRACE_SECS, MAX_POLICY_ASSETS, MAX_POLICY_PROTOCOLS,
+    MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
 };
 use window::{Ledger, WindowMerge, WindowMergeKind};
 
@@ -488,6 +488,30 @@ fn first_failing_asset_cap_rule(cfg: &PolicyConfig, self_addr: &Address) -> Opti
     None
 }
 
+/// Returns `true` when any cap field exceeds the documented ceiling
+/// `MAX_CAP_MAGNITUDE` (issue #321): the global `per_tx_cap`/`window_cap`
+/// and every override cap in `asset_caps` / `recipient_window_caps`.
+fn any_cap_exceeds_magnitude(cfg: &PolicyConfig) -> bool {
+    if cfg.per_tx_cap > MAX_CAP_MAGNITUDE || cfg.window_cap > MAX_CAP_MAGNITUDE {
+        return true;
+    }
+    for i in 0..cfg.asset_caps.len() {
+        if let Some(cap) = cfg.asset_caps.get(i) {
+            if cap.per_tx_cap > MAX_CAP_MAGNITUDE {
+                return true;
+            }
+        }
+    }
+    for i in 0..cfg.recipient_window_caps.len() {
+        if let Some(cap) = cfg.recipient_window_caps.get(i) {
+            if cap.cap > MAX_CAP_MAGNITUDE {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId> {
     // Reject excessive vectors before content checks and duplicate scans, so
     // both validation cost and the later authorization scans stay bounded.
@@ -508,6 +532,14 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     }
     if cfg.per_tx_cap < 0 || cfg.window_cap < 0 {
         return Err(PolicyRuleId::AmountSign);
+    }
+    // No cap may exceed the documented ceiling (issue #321). An absurd cap is
+    // indistinguishable from "unlimited" to the decision path while still
+    // reading as policy, and it makes the saturating window arithmetic
+    // load-bearing. Override caps are bounded too: they are the effective
+    // per-tx / per-recipient ceiling for the assets and recipients they name.
+    if any_cap_exceeds_magnitude(cfg) {
+        return Err(PolicyRuleId::CapMagnitudeExceedsBound);
     }
     if cfg.window_cap_enabled() && cfg.window_secs == 0 {
         return Err(PolicyRuleId::WindowRequiresWidth);
@@ -615,7 +647,11 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
 /// single stable `InvalidConfig` error code — deliberately unchanged by
 /// issue #35 so the on-chain error surface (and every consumer matching on
 /// it) stays byte-compatible.
-pub(crate) fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
+///
+/// # Errors
+///
+/// Returns `Error::InvalidConfig` if any SPEC §8 validation rule fails.
+pub fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
     first_failing_rule(env, cfg).map_err(|_| Error::InvalidConfig)
 }
 
@@ -1025,6 +1061,65 @@ mod policy_engine_type {
         }
 
         /// Removes the policy and window → immediate default-deny.
+        /// Targeted recipient allowlist patch (issue #303): adds `recipient`
+        /// to the stored policy's `recipients` without resending the full
+        /// `PolicyConfig`. The resulting full config is run through
+        /// `validate_config` before anything is written, so a duplicate,
+        /// self-addressed, or otherwise invalid result leaves the stored
+        /// policy (and the rolling window / DMS clock) untouched.
+        /// Admin-only; requires an installed policy (`NoPolicy` otherwise).
+        /// Preserves the rolling window and the dead-man-switch clock (like
+        /// any `set_policy` edit); bumps `PolicyRevision` and emits
+        /// `policy_set` on success.
+        pub fn add_recipient(env: Env, recipient: Address) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            // Push first so the full resulting config is validated; a
+            // duplicate / self-addressed entry is caught by validation below
+            // before any write happens.
+            cfg.recipients.push_back(recipient);
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_policy_set(&env, &admin);
+        }
+
+        /// Targeted recipient allowlist patch (issue #303): removes
+        /// `recipient` from the stored policy's `recipients`. The resulting
+        /// full config is validated before writing; an invalid result leaves
+        /// stored state untouched. Admin-only; requires an installed policy.
+        /// Preserves the rolling window and the dead-man-switch clock; bumps
+        /// `PolicyRevision` and emits `policy_set` only when the list actually
+        /// changes. A redundant removal (recipient not present) is a true
+        /// no-op: no write, no revision bump, no event.
+        pub fn remove_recipient(env: Env, recipient: Address) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            let mut next: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+            let mut changed = false;
+            for i in 0..cfg.recipients.len() {
+                if let Some(r) = cfg.recipients.get(i) {
+                    if r == recipient {
+                        changed = true;
+                    } else {
+                        next.push_back(r);
+                    }
+                }
+            }
+            if !changed {
+                return;
+            }
+            cfg.recipients = next;
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_policy_set(&env, &admin);
+        }
+
         pub fn revoke_policy(env: Env) {
             let admin = Self::admin_or_panic(&env);
             env.storage().persistent().remove(&DataKey::Policy);
@@ -1704,9 +1799,11 @@ pub mod testutils {
     pub use crate::types::policy_canonical_encoding;
     pub use crate::types::{
         CheckResult, DataKey, Error, PolicyConfig, PolicyRuleId, ProtocolRule, RecipientCap,
-        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_AUTH_CONTEXTS,
-        MAX_DMS_GRACE_SECS, MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
+        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_ASSET_CAP_ENTRIES,
+        MAX_AUTH_CONTEXTS, MAX_DMS_GRACE_SECS, MAX_POLICY_ASSETS, MAX_POLICY_PROTOCOLS,
+        MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
     };
+    pub use crate::validate_config;
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};
     pub use soroban_sdk::{vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Val, Vec};

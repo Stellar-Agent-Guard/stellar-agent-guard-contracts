@@ -73,6 +73,23 @@ pub const MAX_WINDOW_SECS: u64 = 315_360_000; // 86_400 × 3_650
 /// Same upper bound as `MAX_WINDOW_SECS`, applied to the DMS grace.
 pub const MAX_DMS_GRACE_SECS: u64 = MAX_WINDOW_SECS;
 
+/// Upper bound on every cap magnitude in a policy: `per_tx_cap`, `window_cap`,
+/// `asset_caps[i].per_tx_cap`, and `recipient_window_caps[i].cap` (issue #321).
+///
+/// `10^24` smallest units is a deliberately generous ceiling that no realistic
+/// token supply can reach: at Stellar's usual 7 decimals it is `10^17` whole
+/// tokens, roughly two million times the entire XLM supply (~`5 × 10^10` XLM =
+/// `5 × 10^17` stroops). Above it a "cap" is indistinguishable from "unlimited"
+/// while still reading as policy, and the account still pays for a window
+/// ledger that nothing will ever prune.
+///
+/// The bound also keeps the saturating additions in `window.rs` / `engine.rs`
+/// belt-and-braces rather than load-bearing: even the pathological window
+/// (8192 entries, each at the ceiling) totals ~`8.2 × 10^27`, more than ten
+/// orders of magnitude below `i128::MAX` (`≈1.7 × 10^38`). `0` (disabled)
+/// remains legal, and the boundary value itself is accepted.
+pub const MAX_CAP_MAGNITUDE: i128 = 1_000_000_000_000_000_000_000_000;
+
 /// Which SPEC §8 validation rule rejected a policy (issue #35). `validate_policy`
 /// reports the **first** failing rule. Variants added after the original set
 /// preserve their established contract-type ordinals.
@@ -125,6 +142,9 @@ pub enum PolicyRuleId {
     /// Appended last so the previously documented variant ordinals stay
     /// wire-stable.
     AssetProtocolOverlap,
+    /// A cap field (`per_tx_cap`, `window_cap`, or an override cap) exceeds
+    /// `MAX_CAP_MAGNITUDE` (issue #321).
+    CapMagnitudeExceedsBound,
 }
 
 /// Result of the `validate_policy` read (issue #35): whether a candidate
