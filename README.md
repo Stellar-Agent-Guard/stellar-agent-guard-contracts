@@ -153,7 +153,7 @@ that keeps heartbeating. Full derivation and caveats:
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 276 tests, isolated (no network)
+cargo test                                      # 281 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -1122,11 +1122,11 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-276 tests (unit + integration) cover the policy decision engine — including the regression
+281 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `276 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green this session: `281 passed; 0 failed`.
 
 These are the commands CI runs, in the order the `ci` job runs them — the same
 block a contributor can copy (see also

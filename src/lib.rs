@@ -486,6 +486,30 @@ fn first_failing_asset_cap_rule(cfg: &PolicyConfig, self_addr: &Address) -> Opti
     None
 }
 
+/// Returns `true` when any cap field exceeds the documented ceiling
+/// `MAX_CAP_MAGNITUDE` (issue #321): the global `per_tx_cap`/`window_cap`
+/// and every override cap in `asset_caps` / `recipient_window_caps`.
+fn any_cap_exceeds_magnitude(cfg: &PolicyConfig) -> bool {
+    if cfg.per_tx_cap > MAX_CAP_MAGNITUDE || cfg.window_cap > MAX_CAP_MAGNITUDE {
+        return true;
+    }
+    for i in 0..cfg.asset_caps.len() {
+        if let Some(cap) = cfg.asset_caps.get(i) {
+            if cap.per_tx_cap > MAX_CAP_MAGNITUDE {
+                return true;
+            }
+        }
+    }
+    for i in 0..cfg.recipient_window_caps.len() {
+        if let Some(cap) = cfg.recipient_window_caps.get(i) {
+            if cap.cap > MAX_CAP_MAGNITUDE {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId> {
     // Reject excessive vectors before content checks and duplicate scans, so
     // both validation cost and the later authorization scans stay bounded.
@@ -512,19 +536,7 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     // reading as policy, and it makes the saturating window arithmetic
     // load-bearing. Override caps are bounded too: they are the effective
     // per-tx / per-recipient ceiling for the assets and recipients they name.
-    let mut cap_too_large =
-        cfg.per_tx_cap > MAX_CAP_MAGNITUDE || cfg.window_cap > MAX_CAP_MAGNITUDE;
-    for i in 0..cfg.asset_caps.len() {
-        if let Some(cap) = cfg.asset_caps.get(i) {
-            cap_too_large |= cap.per_tx_cap > MAX_CAP_MAGNITUDE;
-        }
-    }
-    for i in 0..cfg.recipient_window_caps.len() {
-        if let Some(cap) = cfg.recipient_window_caps.get(i) {
-            cap_too_large |= cap.cap > MAX_CAP_MAGNITUDE;
-        }
-    }
-    if cap_too_large {
+    if any_cap_exceeds_magnitude(cfg) {
         return Err(PolicyRuleId::CapMagnitudeExceedsBound);
     }
     if cfg.window_cap_enabled() && cfg.window_secs == 0 {
