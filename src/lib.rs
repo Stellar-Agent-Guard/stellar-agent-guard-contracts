@@ -613,7 +613,11 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
 /// single stable `InvalidConfig` error code — deliberately unchanged by
 /// issue #35 so the on-chain error surface (and every consumer matching on
 /// it) stays byte-compatible.
-pub(crate) fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
+///
+/// # Errors
+///
+/// Returns `Error::InvalidConfig` if any SPEC §8 validation rule fails.
+pub fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
     first_failing_rule(env, cfg).map_err(|_| Error::InvalidConfig)
 }
 
@@ -1754,9 +1758,11 @@ pub mod testutils {
     pub use crate::types::policy_canonical_encoding;
     pub use crate::types::{
         CheckResult, DataKey, Error, PolicyConfig, PolicyRuleId, ProtocolRule, RecipientCap,
-        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_AUTH_CONTEXTS,
-        MAX_DMS_GRACE_SECS, MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
+        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_ASSET_CAP_ENTRIES,
+        MAX_AUTH_CONTEXTS, MAX_DMS_GRACE_SECS, MAX_POLICY_ASSETS, MAX_POLICY_PROTOCOLS,
+        MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
     };
+    pub use crate::validate_config;
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};
     pub use soroban_sdk::{vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Val, Vec};
