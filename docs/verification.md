@@ -199,3 +199,148 @@ cd tools/agent-tx && cargo build --release      # submission helper
 3. Install the scenario policies (JSON in `--config`), then run the `agent-tx` invocations above. Use `--expect-blocked` for scenarios 2–5.
 
 The five blocked/emitted events above are the contract's own `event_auth_checked` topics — grep the enforced-simulation output for `blocked, <reason>` to confirm each.
+
+---
+
+## Reproducible release verification recipe
+
+This recipe lets you confirm that a published release WASM is **byte-for-byte
+identical** to what you get when you build from the same tag with the same
+pinned toolchain. It is the auditor's end-to-end check: source → build →
+hash → compare.
+
+### Prerequisites
+
+- **Rust toolchain** — `rustup` will install the pinned compiler automatically
+  from `rust-toolchain.toml` when you run `cargo build` inside the repository;
+  no manual version selection is needed.
+- **`wasm32v1-none` target** — installed on first build, or manually:
+  `rustup target add wasm32v1-none`.
+- `sha256sum` (Linux) or `shasum -a 256` (macOS) — available in any standard
+  shell environment.
+- A tagged release on GitHub with the four assets described below.
+
+### Step 1 — download and inspect the release artifacts
+
+Every `v*` tag publishes four assets. Download them from the **Releases** page
+(or via `gh release download <tag> -R Stellar-Agent-Guard/stellar-agent-guard-contracts`):
+
+| File | Purpose |
+|---|---|
+| `stellar_agent_guard_contracts.wasm` | The deployable contract build |
+| `stellar_agent_guard_contracts.wasm.sha256` | Its SHA-256 checksum |
+| `provenance.txt` | Git tag, commit SHA, exact build command, toolchain, and runner |
+| `sbom.cdx.json` | CycloneDX supply-chain inventory for the WASM |
+
+### Step 2 — verify the published checksum
+
+```bash
+sha256sum -c stellar_agent_guard_contracts.wasm.sha256
+# Expected: stellar_agent_guard_contracts.wasm: OK
+```
+
+A "FAILED" means the download is corrupt or tampered with — stop here and
+re-download. Do not deploy an artifact whose checksum does not match.
+
+### Step 3 — confirm provenance
+
+Open `provenance.txt` and check that:
+
+- The `tag:` line names the release you downloaded.
+- The `commit:` SHA matches `git rev-parse <tag>` in your local clone (or
+  the commit shown on GitHub for that tag).
+- The `toolchain:` line names a Rust version. Record it — you will verify
+  reproducibility with the same channel in step 4.
+- The `build_command:` is
+  `cargo build --release --locked --target wasm32v1-none` (the `--locked`
+  flag proves the exact dependency tree in `Cargo.lock` was used).
+
+### Step 4 — build from the same tag
+
+Clone the repository (or reuse an existing clone) and check out the exact tag:
+
+```bash
+git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
+cd stellar-agent-guard-contracts
+git checkout <tag>           # e.g. v0.1.3
+```
+
+Build with the locked dependency tree:
+
+```bash
+cargo build --release --locked --target wasm32v1-none
+```
+
+`rustup` reads `rust-toolchain.toml` and downloads the pinned compiler
+automatically. The build is deterministic when the toolchain, `Cargo.lock`,
+and source tree are identical to those the release used.
+
+### Step 5 — compare hashes
+
+```bash
+# Hash your local build:
+sha256sum target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
+
+# Hash the downloaded release artifact (should be identical to the .sha256 file):
+sha256sum stellar_agent_guard_contracts.wasm
+```
+
+The two digests must be identical. A match proves:
+
+- The downloaded WASM came from the same source tree and toolchain as your
+  local build.
+- No post-build modification was made to the released artifact.
+
+### Step 6 — confirm local build determinism with the CI script
+
+Before trusting the comparison above, verify that your local environment
+produces the same hash on two independent builds:
+
+```bash
+./scripts/check-wasm-reproducible.sh
+# Expected: build A and build B hashes match.
+# Exit 0 = your environment is deterministic.
+# Exit 1 = hashes differ (see § Common mismatch causes below).
+```
+
+The script builds twice into separate `CARGO_TARGET_DIR` directories so no
+artifact is shared between runs. It is the same check the `wasm-reproducible`
+CI job runs, so a local pass and a CI pass are the same statement.
+
+### Step 7 — verify the SBOM (optional but recommended for auditors)
+
+```bash
+# Regenerate the SBOM from the same tag and diff the component list:
+cargo install cargo-cyclonedx --locked
+cargo build --release --target wasm32v1-none
+cargo cyclonedx --format json --describe binaries --target wasm32v1-none
+# → stellar_agent_guard_contracts_lib-cdylib.cdx.json
+
+diff <(jq -r '.components[].name' sbom.cdx.json | sort) \
+     <(jq -r '.components[].name' stellar_agent_guard_contracts_lib-cdylib.cdx.json | sort)
+# A clean diff means the released SBOM inventory matches your local rebuild.
+```
+
+Then check those component versions against an advisory database:
+
+```bash
+cargo audit
+cargo deny check advisories
+```
+
+### Common mismatch causes
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Local build ≠ release artifact | Different Rust channel or `Cargo.lock` state | Confirm `rustc --version` matches `provenance.txt`; ensure you built from exactly the tagged commit with `--locked` |
+| `check-wasm-reproducible.sh` exits 1 | Non-deterministic build environment | Check for `SOURCE_DATE_EPOCH` overrides, unstable `codegen-units`, or a custom `RUSTFLAGS` that enables non-deterministic optimizations |
+| Hashes existed before toolchain pin (pre-pin releases) | The toolchain was `stable` (floating) when those releases were cut | Verify by checksum and `provenance.txt` only; reproducible rebuild is not possible without an exact toolchain record |
+| `sha256sum -c` prints "FAILED" | Download corrupt or truncated | Re-download over a fresh connection; check disk space |
+
+### Linking back to the audit pack
+
+Reproducible-build evidence (item 8 in
+[`docs/audit-pack.md`](audit-pack.md#inventory)) depends on this recipe and
+the CI `wasm-reproducible` job. The SBOM (item 18) is generated and attached by
+the same `release.yml` workflow. Run this recipe as part of an audit engagement
+before relying on the published checksum alone.
