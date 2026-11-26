@@ -1021,6 +1021,65 @@ mod policy_engine_type {
         }
 
         /// Removes the policy and window → immediate default-deny.
+        /// Targeted recipient allowlist patch (issue #303): adds `recipient`
+        /// to the stored policy's `recipients` without resending the full
+        /// `PolicyConfig`. The resulting full config is run through
+        /// `validate_config` before anything is written, so a duplicate,
+        /// self-addressed, or otherwise invalid result leaves the stored
+        /// policy (and the rolling window / DMS clock) untouched.
+        /// Admin-only; requires an installed policy (`NoPolicy` otherwise).
+        /// Preserves the rolling window and the dead-man-switch clock (like
+        /// any `set_policy` edit); bumps `PolicyRevision` and emits
+        /// `policy_set` on success.
+        pub fn add_recipient(env: Env, recipient: Address) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            // Push first so the full resulting config is validated; a
+            // duplicate / self-addressed entry is caught by validation below
+            // before any write happens.
+            cfg.recipients.push_back(recipient);
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_policy_set(&env, &admin);
+        }
+
+        /// Targeted recipient allowlist patch (issue #303): removes
+        /// `recipient` from the stored policy's `recipients`. The resulting
+        /// full config is validated before writing; an invalid result leaves
+        /// stored state untouched. Admin-only; requires an installed policy.
+        /// Preserves the rolling window and the dead-man-switch clock; bumps
+        /// `PolicyRevision` and emits `policy_set` only when the list actually
+        /// changes. A redundant removal (recipient not present) is a true
+        /// no-op: no write, no revision bump, no event.
+        pub fn remove_recipient(env: Env, recipient: Address) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            let mut next: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+            let mut changed = false;
+            for i in 0..cfg.recipients.len() {
+                if let Some(r) = cfg.recipients.get(i) {
+                    if r == recipient {
+                        changed = true;
+                    } else {
+                        next.push_back(r);
+                    }
+                }
+            }
+            if !changed {
+                return;
+            }
+            cfg.recipients = next;
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_policy_set(&env, &admin);
+        }
+
         pub fn revoke_policy(env: Env) {
             let admin = Self::admin_or_panic(&env);
             env.storage().persistent().remove(&DataKey::Policy);

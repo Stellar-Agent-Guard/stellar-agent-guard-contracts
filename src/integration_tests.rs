@@ -938,6 +938,29 @@ impl Harness {
         self.invocation(&self.guard, "revoke_policy", std::vec![])
     }
 
+    // ── Targeted patch entrypoints (issue #303) ─────────────────────
+
+    /// Adds `recipient` to the policy allowlist via targeted patch.
+    /// Validates the resulting full config before writing; a duplicate or
+    /// self-addressed recipient is rejected fail-closed (state unchanged).
+    fn add_recipient_invocation(&self, recipient: &Address) -> SorobanAuthorizedInvocation {
+        self.invocation(
+            &self.guard,
+            "add_recipient",
+            std::vec![recipient.clone().into_val(&self.env)],
+        )
+    }
+
+    /// Removes `recipient` from the policy allowlist via targeted patch.
+    /// A no-op (recipient not present) leaves storage, revision, and events untouched.
+    fn remove_recipient_invocation(&self, recipient: &Address) -> SorobanAuthorizedInvocation {
+        self.invocation(
+            &self.guard,
+            "remove_recipient",
+            std::vec![recipient.clone().into_val(&self.env)],
+        )
+    }
+
     fn rotate_agent_key_invocation(&self, new_pubkey: &BytesN<32>) -> SorobanAuthorizedInvocation {
         self.invocation(
             &self.guard,
@@ -7712,4 +7735,88 @@ fn empty_auth_contexts_approves_without_emitting_auth_checked() {
     assert_eq!(allowed_res, Ok(()));
     assert_eq!(event_count(&h.env, "event_auth_checked"), 0);
     assert_eq!(h.stored_window().unwrap().total, 40);
+}
+
+// --- Targeted policy patch entrypoints (issue #303) ---
+
+#[test]
+fn add_recipient_duplicate_is_rejected() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+
+    // Adding an already-listed recipient is rejected without changing state.
+    let root = h.add_recipient_invocation(&recv);
+    let entry = h.admin_entry(&root);
+    h.enforce(entry);
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.add_recipient(&recv);
+    }));
+    assert!(
+        result.is_err(),
+        "adding a duplicate recipient must fail closed"
+    );
+    assert_eq!(event_count(&h.env, "event_policy_set"), 0);
+    assert_eq!(client.policy().unwrap().recipients.len(), 1);
+    assert_eq!(h.status().policy_revision, 1);
+}
+
+#[test]
+fn remove_recipient_absent_is_noop() {
+    let mut h = Harness::new();
+    let other = h.other.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+
+    // Remove a recipient that is not in the list -> true no-op
+    let root = h.remove_recipient_invocation(&other);
+    let entry = h.admin_entry(&root);
+    h.enforce(entry);
+    PolicyEngineClient::new(&h.env, &h.guard).remove_recipient(&other);
+    // Storage, revision, and events must be unchanged
+    assert_eq!(event_count(&h.env, "event_policy_set"), 0);
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard)
+            .policy()
+            .unwrap()
+            .recipients
+            .len(),
+        1
+    );
+    assert_eq!(h.status().policy_revision, 1);
+}
+
+#[test]
+fn remove_recipient_present_removes() {
+    let mut h = Harness::new();
+    let recv = h.recv.clone();
+    let mut policy = h.base_policy();
+    policy.window_cap = 100;
+    h.set_time(1_000);
+    h.install_policy(&policy);
+
+    // Remove the present recipient
+    let root = h.remove_recipient_invocation(&recv);
+    let entry = h.admin_entry(&root);
+    h.enforce(entry);
+    PolicyEngineClient::new(&h.env, &h.guard).remove_recipient(&recv);
+    // Recipient removed, revision bumped, event emitted
+    assert_eq!(event_count(&h.env, "event_policy_set"), 1);
+    let event_revision = last_event_revision(&h.env, "event_policy_set");
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard)
+            .policy()
+            .unwrap()
+            .recipients
+            .len(),
+        0
+    );
+    assert_eq!(h.status().policy_revision, 2);
+    assert_eq!(event_revision, 2);
 }
