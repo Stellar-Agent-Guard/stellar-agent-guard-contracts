@@ -2,7 +2,7 @@
 //! `Context`s the host hands to `__check_auth` — no storage access — so the
 //! whole decision table is unit-testable.
 
-use crate::types::{Error, ParsedCall, PolicyConfig};
+use crate::types::{AssetCap, Error, ParsedCall, PolicyConfig};
 use crate::window::Ledger;
 use soroban_sdk::auth::{Context, ContractContext};
 use soroban_sdk::{Address, Env, Symbol, TryFromVal, Vec};
@@ -354,14 +354,18 @@ fn effective_window_cap(cfg: &PolicyConfig, recipient: &Address) -> Option<i128>
 /// applies.
 #[allow(clippy::must_use_candidate)]
 pub fn effective_per_tx_cap(cfg: &PolicyConfig, asset: &Address) -> Option<i128> {
-    for i in 0..cfg.asset_caps.len() {
-        if let Some(ac) = cfg.asset_caps.get(i) {
-            if &ac.asset == asset {
-                return (ac.per_tx_cap > 0).then_some(ac.per_tx_cap);
-            }
-        }
+    per_tx_cap_with_override(cfg, find_asset_cap(cfg, asset).as_ref())
+}
+
+fn find_asset_cap(cfg: &PolicyConfig, asset: &Address) -> Option<AssetCap> {
+    cfg.asset_caps.iter().find(|cap| &cap.asset == asset)
+}
+
+fn per_tx_cap_with_override(cfg: &PolicyConfig, asset_cap: Option<&AssetCap>) -> Option<i128> {
+    match asset_cap {
+        Some(cap) => (cap.per_tx_cap > 0).then_some(cap.per_tx_cap),
+        None => cfg.per_tx_cap_enabled().then_some(cfg.per_tx_cap),
     }
-    cfg.per_tx_cap_enabled().then_some(cfg.per_tx_cap)
 }
 
 // ── Context parsing (SPEC §6) ────────────────────────────────────────────
@@ -646,24 +650,25 @@ fn decide_inner(
             }
             ParsedCall::AssetOther { asset, .. } => {
                 trace_gate!(trace, DecisionGate::AssetFunction);
-                if matches!(cfg.asset_caps.iter().find(|cap| cap.asset == asset), Some(cap) if cap.paused)
-                {
+                if find_asset_cap(cfg, &asset).is_some_and(|cap| cap.paused) {
                     Decision::Blocked(Error::AssetNotAllowed)
                 } else {
                     Decision::Blocked(Error::AssetFnNotAllowed)
                 }
             }
             ParsedCall::AssetTransfer { asset, to, amount } => {
+                // Reuse the override for both asset gates.
+                let asset_cap = find_asset_cap(cfg, &asset);
                 let mut recip_cap = None;
                 let mut staged_recip: i128 = 0;
                 let mut staged_idx: Option<u32> = None;
                 let denial = ASSET_TRANSFER_DENIAL_PRECEDENCE.iter().find_map(|gate| {
                     trace_gate!(trace, DecisionGate::Transfer(*gate));
                     match gate {
-                        AssetTransferGate::AssetPaused => {
-                            matches!(cfg.asset_caps.iter().find(|cap| cap.asset == asset), Some(cap) if cap.paused)
-                                .then_some(Error::AssetNotAllowed)
-                        }
+                        AssetTransferGate::AssetPaused => asset_cap
+                            .as_ref()
+                            .is_some_and(|cap| cap.paused)
+                            .then_some(Error::AssetNotAllowed),
                         AssetTransferGate::PositiveAmount => {
                             (amount <= 0).then_some(Error::InvalidAmount)
                         }
@@ -671,13 +676,14 @@ fn decide_inner(
                             contains_addr(&cfg.blocked_recipients, &to)
                                 .then_some(Error::RecipientBlocked)
                         }
-                        AssetTransferGate::RecipientAllowed => {
-                            (!cfg.allow_any_recipient && !contains_addr(&cfg.recipients, &to))
-                                .then_some(Error::RecipientNotAllowed)
+                        AssetTransferGate::RecipientAllowed => (!cfg.allow_any_recipient
+                            && !contains_addr(&cfg.recipients, &to))
+                        .then_some(Error::RecipientNotAllowed),
+                        AssetTransferGate::PerTxCap => {
+                            per_tx_cap_with_override(cfg, asset_cap.as_ref())
+                                .is_some_and(|cap| amount > cap)
+                                .then_some(Error::PerTxCapExceeded)
                         }
-                        AssetTransferGate::PerTxCap => effective_per_tx_cap(cfg, &asset)
-                            .is_some_and(|cap| amount > cap)
-                            .then_some(Error::PerTxCapExceeded),
                         AssetTransferGate::WindowCap => {
                             // Window projections are read-only until the transfer
                             // passes all gates. Cumulative sums are overflow-checked.
