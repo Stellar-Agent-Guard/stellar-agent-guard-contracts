@@ -85,12 +85,26 @@ jobs:
         run: cargo test
 
       # Issue #128: enforcement-evidence fixtures may only reference reason
-      # symbols that exist in the current Error::reason() vocabulary, or in the
-      # recorded vocabulary for the historical contract_version they document.
+      # symbols that exist in the contract vocabulary that applies to that fixture
+      # (issue #128).
       # Runs after tests so a vocabulary failure is reported separately from a
       # contract-test failure.
       - name: Fixture reason vocabulary
         run: ./scripts/check-fixture-vocab.sh
+
+      # Issue #631: when the vocabulary (or any fixture/schema parity) check
+      # fails, point the contributor straight at the maintenance instructions
+      # instead of leaving them to reverse-engineer the failure from repo
+      # knowledge.
+      - name: Fixture reason vocabulary — remediation hint on failure
+        if: failure()
+        run: |
+          echo "::error::Fixture reason vocabulary drift. Remediation: keep tests/fixtures/index.json and tests/fixtures/README.md describing the same Phase-1 run (same transaction hashes and event topics); record historical vocabulary in tests/fixtures/reason-vocabulary.json when contract_version is historical. See CONTRIBUTING.md rule 6 (testnet proof plan) and SPEC §11."
+
+      - name: Policy/schema parity — remediation hint on failure
+        if: failure()
+        run: |
+          echo "::error::Policy/schema parity drift. Remediation: keep loadable presets (examples/policies/*.json), policy.schema.json, SPEC §3.2, and tests/policyconfig_scval_encoding.rs in sync; a PolicyConfig shape change touches all four in the same PR. See CONTRIBUTING.md commit discipline."
 
       - name: Public API documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
@@ -246,3 +260,63 @@ jobs:
       # own target directory (see scripts/check-wasm-reproducible.sh).
       - name: Build twice in clean target dirs, compare SHA-256
         run: ./scripts/check-wasm-reproducible.sh
+
+  # Issue #633: non-blocking, scheduled dependency risk report. Publishes advisories
+  # and affected packages without failing the run and without touching Cargo.lock or
+  # any release artifact.
+  dependency-risk-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    schedule:
+      # Weekly: fresh visibility into new advisories without blocking merges.
+      - cron: "0 2 * * 1"
+    workflow_dispatch: {}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^channel = "(.*)"$/\1/p' rust-toolchain.toml)"
+          if [[ -z "$channel" ]]; then
+            echo "rust-toolchain.toml declares no [toolchain] channel" >&2
+            exit 1
+          fi
+          echo "Pinned channel: $channel"
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-deny-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deny-
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+
+      - name: Run dependency risk report (non-blocking)
+        run: |
+          set +e
+          cargo deny check > "$RUNNER_TEMP/deny-report.txt" 2>&1 || true
+
+      - name: Publish dependency risk report to job summary
+        run: |
+          {
+            echo "## Dependency risk report (non-blocking)"
+            echo ""
+            echo "Scheduled report of outdated or advisory-affected dependencies. Advisory IDs "
+            "(RUSTSEC-...) link to https://rustsec.org/advisories/<ID>. This report "
+            "does not alter Cargo.lock or any release artifact."
+            echo ""
+            echo "### cargo-deny output"
+            echo ""
+            echo "\`\`\`"
+            cat "$RUNNER_TEMP/deny-report.txt"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -445,6 +445,11 @@ layer and must not silently diverge.
 3. Describe the *why* in the PR body: what was broken/wrong, what the fix does,
    and — for enforcement changes — how it was verified (tests, and testnet
    evidence where applicable).
+4. Release notes identify impact categories. When a PR prepares a release (or a
+   tag is pushed), the release notes template asks which impact categories the
+   release touches — policy, ABI, storage, events — so consumers can assess
+   upgrade risk without reading every commit. A filled-in example lives at
+   docs/operations/release-notes-sample.md.
 
 ## Required security review on the enforcement path
 

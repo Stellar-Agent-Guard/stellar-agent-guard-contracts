@@ -143,4 +143,29 @@ jobs:
             dist/stellar_agent_guard_contracts.wasm.sha256
             dist/provenance.txt
             dist/sbom.cdx.json
-          generate_release_notes: true
+          # Issue #635: every release notes must identify which impact categories it
+          # touches (policy, ABI, storage, events) so consumers can assess upgrade
+          # risk without reading every commit. A filled-in example lives at
+          # docs/operations/release-notes-sample.md.
+          body: |
+            # Release ${{ github.ref_name }}
+
+            ## Security-impacting changes
+            Indicate which categories this release touches (check all that apply):
+
+            - [ ] **Policy** — policy semantics, caps, allowlists, pause/freeze, dead-man switch,
+              or `__check_auth` admission.
+            - [ ] **ABI** — public function signatures, `PolicyConfig` shape or field order,
+              `Error` discriminants, or event topics.
+            - [ ] **Storage** — storage keys, types, footprint, or TTL management.
+            - [ ] **Events** — emitted events, event names, topics, or diagnostic payloads.
+
+            If any box is checked, review the [migration guide](docs/operations/migration-guide.md)
+            before upgrading and record the impact here so consumers can assess upgrade risk.
+
+            ## Changelog
+            <!-- Summarize user-facing changes here. -->
+
+            ## Verification
+            - Full CI gate green (format, clippy, tests, wasm build).
+            - SBOM and build provenance attached.

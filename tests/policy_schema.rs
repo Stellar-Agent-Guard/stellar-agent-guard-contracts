@@ -19,7 +19,14 @@ fn assert_valid(schema: &Validator, value: &Value, label: &str) {
             .map(|error| error.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        panic!("{label} does not match policy.schema.json:\n{details}");
+        panic!(
+            "{label} does not match policy.schema.json:\n{details}\n\
+             Remediation: update the preset file and policy.schema.json together so the \
+              loadable policy presets stay schema-valid; a PolicyConfig shape change also \
+              requires SPEC §3.2 and tests/policyconfig_scval_encoding.rs in the same PR. \
+              See CONTRIBUTING.md commit discipline (PolicyConfig changes update \
+              policy.schema.json)."
+        );
     }
 }
 

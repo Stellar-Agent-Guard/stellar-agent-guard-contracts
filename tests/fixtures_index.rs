@@ -140,7 +140,10 @@ fn readme_and_index_list_the_same_transaction_hashes() {
         "README.md and index.json disagree about transaction hashes.\n\
          In README.md but not index.json: {only_in_readme:?}\n\
          In index.json but not README.md: {only_in_index:?}\n\
-         Add the missing side (and its scenario/setup entry) so both files describe the same run."
+         Remediation: keep tests/fixtures/README.md and tests/fixtures/index.json describing \
+          the same Phase-1 run (same transaction hashes and event topics); add the missing \
+          side (and its scenario/setup entry) so both files agree. See CONTRIBUTING.md rule 6 \
+          (testnet proof plan) and SPEC §11."
     );
 }
 
@@ -159,7 +162,11 @@ fn readme_hash_prefixes_resolve_to_indexed_hashes() {
     for prefix in &prefixes {
         assert!(
             indexed.iter().any(|hash| hash.starts_with(prefix.as_str())),
-            "README.md truncates a hash to `{prefix}…` but index.json has no hash starting with it"
+            "README.md truncates a hash to `{prefix}…` but index.json has no hash starting \
+             with it\n\
+             Remediation: record the full transaction hash in tests/fixtures/index.json so the \
+              `…` prefix in tests/fixtures/README.md resolves; both files must describe the \
+              same run. See CONTRIBUTING.md rule 6 and SPEC §11."
         );
     }
 }
@@ -377,7 +384,10 @@ fn index_records_the_phase_one_setup_transactions() {
     assert_eq!(
         setup_rows,
         setup.len(),
-        "README.md setup table has {setup_rows} transaction rows but index.json lists {}",
+        "README.md setup table has {setup_rows} transaction rows but index.json lists {}\n\
+         Remediation: keep the README.md setup table and tests/fixtures/index.json setup \
+          transactions in lockstep (one row per indexed setup transaction). See CONTRIBUTING.md \
+          rule 6 and SPEC §11.",
         setup.len()
     );
 }

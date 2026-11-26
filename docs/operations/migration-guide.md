@@ -225,3 +225,6 @@ Notes on the exit policy:
   migrated agent.
 - [SPEC §1](../../SPEC.md#1-mechanism-and-non-custodial-guarantee) — the custody guarantee
   this guide transfers into.
+- [Release notes — security-impacting change categories](release-notes-sample.md) —
+  releases flagging policy, ABI, storage, or event changes may require re-verifying
+  migration steps before upgrading.
