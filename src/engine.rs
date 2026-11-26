@@ -2,7 +2,7 @@
 //! `Context`s the host hands to `__check_auth` — no storage access — so the
 //! whole decision table is unit-testable.
 
-use crate::types::{Error, ParsedCall, PolicyConfig};
+use crate::types::{AssetCap, Error, ParsedCall, PolicyConfig};
 use crate::window::Ledger;
 use soroban_sdk::auth::{Context, ContractContext};
 use soroban_sdk::{Address, Env, Symbol, TryFromVal, Vec};
@@ -22,6 +22,93 @@ pub enum Decision {
     Allowed,
     /// Failing reason.
     Blocked(Error),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The ordered denial gates for a SAC transfer.
+pub(crate) enum AssetTransferGate {
+    /// Asset-level pause.
+    AssetPaused,
+    /// Positive amount validation.
+    PositiveAmount,
+    /// Recipient denylist.
+    RecipientNotBlocked,
+    /// Recipient allowlist and escape hatch.
+    RecipientAllowed,
+    /// Effective per-transaction cap.
+    PerTxCap,
+    /// Global and per-recipient rolling caps.
+    WindowCap,
+}
+
+const ASSET_TRANSFER_DENIAL_PRECEDENCE: [AssetTransferGate; 6] = [
+    AssetTransferGate::AssetPaused,
+    AssetTransferGate::PositiveAmount,
+    AssetTransferGate::RecipientNotBlocked,
+    AssetTransferGate::RecipientAllowed,
+    AssetTransferGate::PerTxCap,
+    AssetTransferGate::WindowCap,
+];
+
+#[cfg(test)]
+/// Gate identities recorded by the test-only decision trace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecisionGate {
+    TooManyAuthContexts,
+    AdminFrozen,
+    PolicyPresent,
+    DeadManSwitch,
+    Paused,
+    ActiveWindow,
+    Classified,
+    SelfFunction,
+    CreateContract,
+    UnknownContract,
+    AssetFunction,
+    Transfer(AssetTransferGate),
+    ProtocolAllowed,
+    ProtocolFunctionAllowed,
+    ProtocolRateLimit,
+    Allowed,
+}
+
+#[cfg(test)]
+/// Per-context gates observed while running the production decision evaluator.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct DecisionTrace {
+    /// Ordered gate sequence for each evaluated context.
+    pub(crate) contexts: alloc::vec::Vec<alloc::vec::Vec<DecisionGate>>,
+}
+
+#[cfg(test)]
+impl DecisionTrace {
+    fn start_context(&mut self) {
+        self.contexts.push(alloc::vec::Vec::new());
+    }
+
+    fn push(&mut self, gate: DecisionGate) {
+        if let Some(context) = self.contexts.last_mut() {
+            context.push(gate);
+        }
+    }
+}
+
+macro_rules! trace_context {
+    ($trace:ident) => {
+        #[cfg(test)]
+        if let Some(trace) = $trace.as_deref_mut() {
+            trace.start_context();
+        }
+    };
+}
+
+macro_rules! trace_gate {
+    ($trace:ident, $gate:expr) => {
+        #[cfg(test)]
+        if let Some(trace) = $trace.as_deref_mut() {
+            trace.push($gate);
+        }
+    };
 }
 
 /// Return advisory cap metrics from an already-loaded ledger for a specific
@@ -125,6 +212,10 @@ fn contains_sym(list: &Vec<Symbol>, s: &Symbol) -> bool {
     false
 }
 
+fn protocol_function_allowed(fns: Option<&Vec<Symbol>>, fname: &Symbol) -> bool {
+    fns.is_none_or(|fns| contains_sym(fns, fname))
+}
+
 // ── Worst-case decision-path fixtures (issue #118) ───────────────────────
 //
 // The recipient checks in `decide` are the only place the engine does work
@@ -170,10 +261,10 @@ pub fn worst_case_addr(env: &Env, tag: u8, index: u8) -> Address {
 /// destination is deliberately in **none** of them:
 ///
 /// - `allow_any_recipient == false` — the expensive case. `decide` scans
-///   `blocked_recipients` (§6.2 rule 1), then `recipients` (rule 2), and
+///   `blocked_recipients` (§6.2 rule 2), then `recipients` (rule 3), and
 ///   misses on the *last* element of each: a full sweep of both lists, with no
 ///   early exit. This is what the escape hatch buys you.
-/// - `allow_any_recipient == true` — the cheap case. Rule 2 is skipped, so
+/// - `allow_any_recipient == true` — the cheap case. Rule 3 is skipped, so
 ///   only the denylist is swept before the caps and window are applied. This
 ///   is the case the escape hatch actually costs.
 ///
@@ -206,7 +297,7 @@ pub fn worst_case_transfer_policy(env: &Env, allow_any_recipient: bool) -> Polic
         per_tx_cap: 0,
         window_secs: 86_400,
         // A cap and a window are on, so the measured path also pays for the
-        // §6.2 rule-4 window evaluation the escape-on case must still run.
+        // §6.2 rule-5 window evaluation the escape-on case must still run.
         window_cap: 1_000,
         assets: {
             let mut assets = Vec::new(env);
@@ -263,14 +354,18 @@ fn effective_window_cap(cfg: &PolicyConfig, recipient: &Address) -> Option<i128>
 /// applies.
 #[allow(clippy::must_use_candidate)]
 pub fn effective_per_tx_cap(cfg: &PolicyConfig, asset: &Address) -> Option<i128> {
-    for i in 0..cfg.asset_caps.len() {
-        if let Some(ac) = cfg.asset_caps.get(i) {
-            if &ac.asset == asset {
-                return (ac.per_tx_cap > 0).then_some(ac.per_tx_cap);
-            }
-        }
+    per_tx_cap_with_override(cfg, find_asset_cap(cfg, asset).as_ref())
+}
+
+fn find_asset_cap(cfg: &PolicyConfig, asset: &Address) -> Option<AssetCap> {
+    cfg.asset_caps.iter().find(|cap| &cap.asset == asset)
+}
+
+fn per_tx_cap_with_override(cfg: &PolicyConfig, asset_cap: Option<&AssetCap>) -> Option<i128> {
+    match asset_cap {
+        Some(cap) => (cap.per_tx_cap > 0).then_some(cap.per_tx_cap),
+        None => cfg.per_tx_cap_enabled().then_some(cfg.per_tx_cap),
     }
-    cfg.per_tx_cap_enabled().then_some(cfg.per_tx_cap)
 }
 
 // ── Context parsing (SPEC §6) ────────────────────────────────────────────
@@ -393,6 +488,12 @@ fn parse_call_inner(
 
 // ── Decision ─────────────────────────────────────────────────────────────
 
+struct AccountGates<'a> {
+    policy: Option<&'a PolicyConfig>,
+    state: &'a AccountState,
+    now: u64,
+}
+
 /// Evaluates the SPEC §4 decision table over every auth context, returning one
 /// [`Decision`] per context. Oversized batches return one aggregate blocking
 /// decision before any context is evaluated. Window admissions are staged and
@@ -407,15 +508,63 @@ pub fn decide(
     now: u64,
     contexts: soroban_sdk::Vec<Context>,
 ) -> alloc::vec::Vec<Decision> {
+    decide_inner(
+        env,
+        self_addr,
+        AccountGates { policy, state, now },
+        ledger,
+        contexts,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[cfg(test)]
+/// Runs the production evaluator while collecting a test-only gate trace.
+pub(crate) fn decide_traced(
+    env: &Env,
+    self_addr: &Address,
+    policy: Option<&PolicyConfig>,
+    state: &AccountState,
+    ledger: &mut Ledger,
+    now: u64,
+    contexts: soroban_sdk::Vec<Context>,
+) -> (alloc::vec::Vec<Decision>, DecisionTrace) {
+    let mut trace = DecisionTrace::default();
+    let decisions = decide_inner(
+        env,
+        self_addr,
+        AccountGates { policy, state, now },
+        ledger,
+        contexts,
+        Some(&mut trace),
+    );
+    (decisions, trace)
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)] // by-value host Vec avoids slice/coercion limits
+fn decide_inner(
+    env: &Env,
+    self_addr: &Address,
+    gates: AccountGates<'_>,
+    ledger: &mut Ledger,
+    contexts: soroban_sdk::Vec<Context>,
+    #[cfg(test)] mut trace: Option<&mut DecisionTrace>,
+) -> alloc::vec::Vec<Decision> {
+    let AccountGates { policy, state, now } = gates;
     let mut verdicts = alloc::vec::Vec::new();
 
     if contexts.len() as usize > crate::types::MAX_AUTH_CONTEXTS {
+        trace_context!(trace);
+        trace_gate!(trace, DecisionGate::TooManyAuthContexts);
         verdicts.push(Decision::Blocked(Error::TooManyAuthContexts));
         return verdicts;
     }
 
     if state.admin_frozen {
         for _ in 0..contexts.len() {
+            trace_context!(trace);
+            trace_gate!(trace, DecisionGate::AdminFrozen);
             verdicts.push(Decision::Blocked(Error::AdminFrozen));
         }
         return verdicts;
@@ -423,6 +572,9 @@ pub fn decide(
 
     let Some(cfg) = policy else {
         for _ in 0..contexts.len() {
+            trace_context!(trace);
+            trace_gate!(trace, DecisionGate::AdminFrozen);
+            trace_gate!(trace, DecisionGate::PolicyPresent);
             verdicts.push(Decision::Blocked(Error::NoPolicy));
         }
         return verdicts;
@@ -445,6 +597,20 @@ pub fn decide(
 
     if let Some(e) = account_error {
         for _ in 0..contexts.len() {
+            trace_context!(trace);
+            trace_gate!(trace, DecisionGate::AdminFrozen);
+            trace_gate!(trace, DecisionGate::PolicyPresent);
+            if e == Error::HeartbeatExpired {
+                trace_gate!(trace, DecisionGate::DeadManSwitch);
+            } else {
+                trace_gate!(trace, DecisionGate::DeadManSwitch);
+                if e == Error::Paused {
+                    trace_gate!(trace, DecisionGate::Paused);
+                } else {
+                    trace_gate!(trace, DecisionGate::Paused);
+                    trace_gate!(trace, DecisionGate::ActiveWindow);
+                }
+            }
             verdicts.push(Decision::Blocked(e));
         }
         return verdicts;
@@ -472,6 +638,13 @@ pub fn decide(
     let mut all_passed = true;
 
     for ctx in contexts.iter() {
+        trace_context!(trace);
+        trace_gate!(trace, DecisionGate::AdminFrozen);
+        trace_gate!(trace, DecisionGate::PolicyPresent);
+        trace_gate!(trace, DecisionGate::DeadManSwitch);
+        trace_gate!(trace, DecisionGate::Paused);
+        trace_gate!(trace, DecisionGate::ActiveWindow);
+        trace_gate!(trace, DecisionGate::Classified);
         let call = parse_call(env, self_addr, &ctx, cfg);
         let ctx_decision = match call {
             ParsedCall::SelfCall { fname } => {
@@ -481,97 +654,118 @@ pub fn decide(
                 // stop itself, but the lock is reversible only by the admin.
                 if fname == Symbol::new(env, "heartbeat") || fname == Symbol::new(env, "self_lock")
                 {
+                    trace_gate!(trace, DecisionGate::Allowed);
                     Decision::Allowed
                 } else {
+                    trace_gate!(trace, DecisionGate::SelfFunction);
                     Decision::Blocked(Error::SelfFunctionNotAllowed)
                 }
             }
-            ParsedCall::CreateContract => Decision::Blocked(Error::CreateContractNotAllowed),
-            ParsedCall::Unknown { .. } => Decision::Blocked(Error::UnknownContract),
-            // A listed-ABI transfer on an unlisted asset (SPEC §6.2, issue #291).
-            ParsedCall::UnlistedAsset { .. } => Decision::Blocked(Error::AssetNotAllowed),
+            ParsedCall::CreateContract => {
+                trace_gate!(trace, DecisionGate::CreateContract);
+                Decision::Blocked(Error::CreateContractNotAllowed)
+            }
+            ParsedCall::Unknown { .. } => {
+                trace_gate!(trace, DecisionGate::UnknownContract);
+                Decision::Blocked(Error::UnknownContract)
+            }
             ParsedCall::AssetOther { asset, .. } => {
-                if matches!(cfg.asset_caps.iter().find(|cap| cap.asset == asset), Some(cap) if cap.paused)
-                {
+                trace_gate!(trace, DecisionGate::AssetFunction);
+                if find_asset_cap(cfg, &asset).is_some_and(|cap| cap.paused) {
                     Decision::Blocked(Error::AssetNotAllowed)
                 } else {
                     Decision::Blocked(Error::AssetFnNotAllowed)
                 }
             }
             ParsedCall::AssetTransfer { asset, to, amount } => {
-                if matches!(cfg.asset_caps.iter().find(|cap| cap.asset == asset), Some(cap) if cap.paused)
-                {
-                    Decision::Blocked(Error::AssetNotAllowed)
-                } else if amount <= 0 {
-                    Decision::Blocked(Error::InvalidAmount)
-                } else if contains_addr(&cfg.blocked_recipients, &to) {
-                    Decision::Blocked(Error::RecipientBlocked)
-                } else if !cfg.allow_any_recipient && !contains_addr(&cfg.recipients, &to) {
-                    Decision::Blocked(Error::RecipientNotAllowed)
-                } else if effective_per_tx_cap(cfg, &asset).is_some_and(|cap| amount > cap) {
-                    Decision::Blocked(Error::PerTxCapExceeded)
-                } else {
-                    // Window accounting: global cap plus an optional
-                    // per-recipient override keyed by the destination.
-                    // The rolling window aggregates every asset listed in
-                    // `cfg.assets` into a single shared total (`ledger.total`).
-                    // Projections are computed first; staging happens only
-                    // when this context clears both caps.
-                    let recip_cap = recipient_override_cap(cfg, &to);
-                    let mut staged_recip: i128 = 0;
-                    let mut staged_idx: Option<u32> = None;
-                    if recip_cap.is_some() {
-                        for i in 0..pending_recipients.len() {
-                            if let Some(r) = pending_recipients.get(i) {
-                                if r == to {
-                                    staged_idx = Some(i);
-                                    staged_recip = pending_recipient_amounts.get(i).unwrap_or(0);
-                                    break;
+                // Reuse the override for both asset gates.
+                let asset_cap = find_asset_cap(cfg, &asset);
+                let mut recip_cap = None;
+                let mut staged_recip: i128 = 0;
+                let mut staged_idx: Option<u32> = None;
+                let denial = ASSET_TRANSFER_DENIAL_PRECEDENCE.iter().find_map(|gate| {
+                    trace_gate!(trace, DecisionGate::Transfer(*gate));
+                    match gate {
+                        AssetTransferGate::AssetPaused => asset_cap
+                            .as_ref()
+                            .is_some_and(|cap| cap.paused)
+                            .then_some(Error::AssetNotAllowed),
+                        AssetTransferGate::PositiveAmount => {
+                            (amount <= 0).then_some(Error::InvalidAmount)
+                        }
+                        AssetTransferGate::RecipientNotBlocked => {
+                            contains_addr(&cfg.blocked_recipients, &to)
+                                .then_some(Error::RecipientBlocked)
+                        }
+                        AssetTransferGate::RecipientAllowed => (!cfg.allow_any_recipient
+                            && !contains_addr(&cfg.recipients, &to))
+                        .then_some(Error::RecipientNotAllowed),
+                        AssetTransferGate::PerTxCap => {
+                            per_tx_cap_with_override(cfg, asset_cap.as_ref())
+                                .is_some_and(|cap| amount > cap)
+                                .then_some(Error::PerTxCapExceeded)
+                        }
+                        AssetTransferGate::WindowCap => {
+                            // Window projections are read-only until the transfer
+                            // passes all gates. Cumulative sums are overflow-checked.
+                            recip_cap = recipient_override_cap(cfg, &to);
+                            if recip_cap.is_some() {
+                                for i in 0..pending_recipients.len() {
+                                    if let Some(r) = pending_recipients.get(i) {
+                                        if r == to {
+                                            staged_idx = Some(i);
+                                            staged_recip =
+                                                pending_recipient_amounts.get(i).unwrap_or(0);
+                                            break;
+                                        }
+                                    }
                                 }
                             }
+                            // Cumulative against the current windows: existing totals +
+                            // amounts staged earlier in this same request. The sums are
+                            // overflow-checked (`None` = would exceed `i128`).
+                            let global_projected =
+                                checked_window_projection(ledger.total, pending, amount);
+                            let recip_projected = checked_window_projection(
+                                ledger.recipient_total(&to),
+                                staged_recip,
+                                amount,
+                            );
+                            let global_over = cfg.window_cap_enabled()
+                                && match global_projected {
+                                    Some(projected) => projected > cfg.window_cap,
+                                    None => true,
+                                };
+                            let recip_over = match recip_cap {
+                                Some(cap) => match recip_projected {
+                                    Some(projected) => projected > cap,
+                                    None => true,
+                                },
+                                None => false,
+                            };
+                            (global_over || recip_over).then_some(Error::WindowCapExceeded)
                         }
                     }
-                    // Cumulative against the current windows: existing totals +
-                    // amounts staged earlier in this same request. The sums are
-                    // overflow-checked (`None` = would exceed `i128`), so a
-                    // near-`i128::MAX` amount or accumulated total is a
-                    // deliberate `WindowCapExceeded`, never an arithmetic trap.
-                    let global_projected = checked_window_projection(ledger.total, pending, amount);
-                    let recip_projected = checked_window_projection(
-                        ledger.recipient_total(&to),
-                        staged_recip,
-                        amount,
-                    );
-                    let global_over = cfg.window_cap_enabled()
-                        && match global_projected {
-                            Some(projected) => projected > cfg.window_cap,
-                            None => true,
-                        };
-                    let recip_over = match recip_cap {
-                        Some(cap) => match recip_projected {
-                            Some(projected) => projected > cap,
-                            None => true,
-                        },
-                        None => false,
-                    };
-                    if global_over || recip_over {
-                        Decision::Blocked(Error::WindowCapExceeded)
-                    } else {
-                        if cfg.window_cap_enabled() {
-                            pending = pending.saturating_add(amount);
-                            admission.push_back(crate::types::SpendEntry { ts: now, amount });
-                        }
-                        if recip_cap.is_some() {
-                            let next = staged_recip.saturating_add(amount);
-                            if let Some(idx) = staged_idx {
-                                pending_recipient_amounts.set(idx, next);
-                            } else {
-                                pending_recipients.push_back(to.clone());
-                                pending_recipient_amounts.push_back(next);
-                            }
-                        }
-                        Decision::Allowed
+                });
+                if let Some(error) = denial {
+                    Decision::Blocked(error)
+                } else {
+                    // Staging happens only after the ordered checks pass.
+                    if cfg.window_cap_enabled() {
+                        pending = pending.saturating_add(amount);
+                        admission.push_back(crate::types::SpendEntry { ts: now, amount });
                     }
+                    if recip_cap.is_some() {
+                        let next = staged_recip.saturating_add(amount);
+                        if let Some(idx) = staged_idx {
+                            pending_recipient_amounts.set(idx, next);
+                        } else {
+                            pending_recipients.push_back(to.clone());
+                            pending_recipient_amounts.push_back(next);
+                        }
+                    }
+                    trace_gate!(trace, DecisionGate::Allowed);
+                    Decision::Allowed
                 }
             }
             ParsedCall::Protocol { contract, fname } => {
@@ -583,19 +777,20 @@ pub fn decide(
                         if rule.contract == contract {
                             found = true;
                             paused = rule.paused;
-                            fn_ok = match &rule.fns {
-                                None => true,
-                                Some(fns) => contains_sym(fns, &fname),
-                            };
+                            fn_ok = protocol_function_allowed(rule.fns.as_ref(), &fname);
                             break;
                         }
                     }
                 }
+                trace_gate!(trace, DecisionGate::ProtocolAllowed);
                 if !found || paused {
                     Decision::Blocked(Error::ProtocolNotAllowed)
                 } else if !fn_ok {
+                    trace_gate!(trace, DecisionGate::ProtocolFunctionAllowed);
                     Decision::Blocked(Error::FunctionNotAllowed)
                 } else if cfg.protocol_calls_enabled() {
+                    trace_gate!(trace, DecisionGate::ProtocolFunctionAllowed);
+                    trace_gate!(trace, DecisionGate::ProtocolRateLimit);
                     // Protocol call rate limiting: check if admitting this call
                     // would exceed the per-window cap.
                     let projected_calls = ledger
@@ -606,9 +801,12 @@ pub fn decide(
                         Decision::Blocked(Error::ProtocolCallRateExceeded)
                     } else {
                         pending_protocol_calls = pending_protocol_calls.saturating_add(1);
+                        trace_gate!(trace, DecisionGate::Allowed);
                         Decision::Allowed
                     }
                 } else {
+                    trace_gate!(trace, DecisionGate::ProtocolFunctionAllowed);
+                    trace_gate!(trace, DecisionGate::Allowed);
                     Decision::Allowed
                 }
             }
@@ -1073,7 +1271,7 @@ mod tests {
         p.per_tx_cap = 50;
         let mut l = Ledger::empty(&env);
 
-        // amount == per_tx_cap (50): admitted (SPEC §6.2 rule 3: cap is inclusive).
+        // amount == per_tx_cap (50): admitted (SPEC §6.2 rule 4: cap is inclusive).
         let ctx_admit = vec![&env, transfer_ctx(&env, 1, 2, 50)];
         let d1 = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx_admit);
         assert_eq!(d1.first(), Some(&Decision::Allowed));
@@ -1107,6 +1305,52 @@ mod tests {
         let ctx2 = vec![&env, transfer_ctx(&env, 1, 99, 5)];
         let d2 = decide(&env, &sa, Some(&p2), &alive(), &mut l, 1000, ctx2.clone());
         assert!(matches!(d2.first().unwrap(), Decision::Allowed));
+    }
+
+    /// SPEC §6.2: the asset-transfer rules run in a fixed order and only the
+    /// **first** failure is reported. A transfer that violates the recipient
+    /// allowlist *and* the per-tx cap must report the allowlist, because the
+    /// cap is never reached for a disallowed destination. Reordering the checks
+    /// for readability would silently change every incident report for this
+    /// case, so the order is pinned here.
+    #[test]
+    fn transfer_violating_recipient_and_per_tx_cap_reports_recipient_first() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.per_tx_cap = 10;
+        p.window_cap = 100;
+        let mut l = Ledger::empty(&env);
+
+        // addr(99) is not in `recipients` (the base policy lists addr(2)) and
+        // 50 also exceeds the per-tx cap of 10: both rules fail at once.
+        let ctx = vec![&env, transfer_ctx(&env, 1, 99, 50)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, ctx);
+        assert_eq!(
+            d.first(),
+            Some(&Decision::Blocked(Error::RecipientNotAllowed)),
+            "the recipient allowlist is evaluated before the per-tx cap (SPEC §6.2)"
+        );
+    }
+
+    /// Amount validity is the first numbered rule, so a zero amount sent to a
+    /// disallowed destination reports `InvalidAmount`, not `RecipientNotAllowed`.
+    #[test]
+    fn transfer_violating_amount_and_recipient_reports_invalid_amount_first() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.per_tx_cap = 10;
+        p.window_cap = 100;
+        let mut l = Ledger::empty(&env);
+
+        let ctx = vec![&env, transfer_ctx(&env, 1, 99, 0)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, ctx);
+        assert_eq!(
+            d.first(),
+            Some(&Decision::Blocked(Error::InvalidAmount)),
+            "amount validity is evaluated before the recipient allowlist (SPEC §6.2)"
+        );
     }
 
     #[test]
@@ -1145,6 +1389,142 @@ mod tests {
         let ctx3 = vec![&env, transfer_ctx(&env, 1, 4, 5)];
         let d3 = decide(&env, &sa, Some(&p2), &alive(), &mut l, 1000, ctx3);
         assert!(matches!(d3.first().unwrap(), Decision::Allowed));
+    }
+
+    #[test]
+    fn asset_transfer_denial_precedence_matches_decision_table() {
+        let decision_table: serde_json::Value =
+            serde_json::from_str(include_str!("../decision-table.json"))
+                .expect("decision-table.json is valid JSON");
+        let documented_order = decision_table["asset_transfer_denial_precedence"]
+            .as_array()
+            .expect("decision table declares transfer precedence")
+            .iter()
+            .map(|gate| gate.as_str().expect("gate name is a string"))
+            .collect::<alloc::vec::Vec<_>>();
+        let engine_order = ASSET_TRANSFER_DENIAL_PRECEDENCE
+            .iter()
+            .map(|gate| match gate {
+                AssetTransferGate::AssetPaused => "asset_paused",
+                AssetTransferGate::PositiveAmount => "positive_amount",
+                AssetTransferGate::RecipientNotBlocked => "recipient_not_blocked",
+                AssetTransferGate::RecipientAllowed => "recipient_allowed",
+                AssetTransferGate::PerTxCap => "per_tx_cap",
+                AssetTransferGate::WindowCap => "window_cap",
+            })
+            .collect::<alloc::vec::Vec<_>>();
+        assert_eq!(documented_order, engine_order);
+        assert_eq!(
+            ASSET_TRANSFER_DENIAL_PRECEDENCE,
+            [
+                AssetTransferGate::AssetPaused,
+                AssetTransferGate::PositiveAmount,
+                AssetTransferGate::RecipientNotBlocked,
+                AssetTransferGate::RecipientAllowed,
+                AssetTransferGate::PerTxCap,
+                AssetTransferGate::WindowCap,
+            ]
+        );
+    }
+
+    #[test]
+    fn asset_transfer_denial_precedence_covers_every_adjacent_boundary() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.asset_caps = vec![
+            &env,
+            AssetCap {
+                asset: addr(&env, 1),
+                per_tx_cap: 0,
+                paused: true,
+            },
+        ];
+        let mut ledger = Ledger::empty(&env);
+        assert_eq!(
+            decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut ledger,
+                1_000,
+                vec![&env, transfer_ctx(&env, 1, 99, 0)],
+            )
+            .first(),
+            Some(&Decision::Blocked(Error::AssetNotAllowed)),
+            "asset pause precedes amount validation"
+        );
+
+        let mut p = base_policy(&env);
+        p.blocked_recipients = vec![&env, addr(&env, 3)];
+        assert_eq!(
+            decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut ledger,
+                1_000,
+                vec![&env, transfer_ctx(&env, 1, 3, 0)],
+            )
+            .first(),
+            Some(&Decision::Blocked(Error::InvalidAmount)),
+            "amount validation precedes the blocked-recipient check"
+        );
+
+        let mut p = base_policy(&env);
+        p.blocked_recipients = vec![&env, addr(&env, 3)];
+        assert_eq!(
+            decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut ledger,
+                1_000,
+                vec![&env, transfer_ctx(&env, 1, 3, 5)],
+            )
+            .first(),
+            Some(&Decision::Blocked(Error::RecipientBlocked)),
+            "blocked-recipient denial precedes the allowlist check"
+        );
+
+        let mut p = base_policy(&env);
+        p.per_tx_cap = 1;
+        assert_eq!(
+            decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut ledger,
+                1_000,
+                vec![&env, transfer_ctx(&env, 1, 99, 2)],
+            )
+            .first(),
+            Some(&Decision::Blocked(Error::RecipientNotAllowed)),
+            "recipient allowlist denial precedes the per-transaction cap"
+        );
+
+        let mut p = base_policy(&env);
+        p.per_tx_cap = 1;
+        p.window_cap = 1;
+        ledger.admit(1_000, 1);
+        assert_eq!(
+            decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut ledger,
+                1_000,
+                vec![&env, transfer_ctx(&env, 1, 2, 2)],
+            )
+            .first(),
+            Some(&Decision::Blocked(Error::PerTxCapExceeded)),
+            "per-transaction cap denial precedes the window cap"
+        );
     }
 
     #[test]
@@ -1609,6 +1989,20 @@ mod tests {
             .unwrap(),
             Decision::Allowed
         ));
+    }
+
+    #[test]
+    fn protocol_function_matching_handles_exact_wildcard_empty_and_near_match() {
+        let env = Env::default();
+        let symbol = Symbol::new(&env, "transfer");
+        let exact = vec![&env, Symbol::new(&env, "transfer")];
+        let near_match = vec![&env, Symbol::new(&env, "transfer_from")];
+        let empty = Vec::new(&env);
+
+        assert!(protocol_function_allowed(None, &symbol));
+        assert!(protocol_function_allowed(Some(&exact), &symbol));
+        assert!(!protocol_function_allowed(Some(&near_match), &symbol));
+        assert!(!protocol_function_allowed(Some(&empty), &symbol));
     }
 
     #[test]

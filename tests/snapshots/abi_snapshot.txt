@@ -36,6 +36,8 @@ pub fn reset_window(env: Env)
 pub fn increase_window_cap(env: Env, new_cap: i128)
 pub fn pause(env: Env)
 pub fn resume(env: Env)
+pub fn add_recipient(env: Env, recipient: Address)
+pub fn remove_recipient(env: Env, recipient: Address)
 pub fn revoke_policy(env: Env)
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
 pub fn propose_admin_rotation(env: Env, new_admin: Address)
@@ -83,6 +85,7 @@ enum PolicyRuleId
   AssetCapUnknownAsset
   DuplicateAssetCap
   AssetProtocolOverlap
+  CapMagnitudeExceedsBound
 enum ValidationOutcome
   Valid
   Invalid(PolicyRuleId)
