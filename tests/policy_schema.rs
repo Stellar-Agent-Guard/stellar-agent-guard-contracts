@@ -79,3 +79,67 @@ fn presets_and_scval_parity_vector_match_policy_schema() {
         "positive window cap requires a window"
     );
 }
+
+#[test]
+fn schema_rejects_duplicate_values_in_policy_lists() {
+    let root = root();
+    let schema_json: Value = serde_json::from_slice(
+        &fs::read(root.join("policy.schema.json")).expect("read policy schema"),
+    )
+    .expect("parse policy schema");
+    let schema = jsonschema::validator_for(&schema_json).expect("compile policy schema");
+    let policy: Value = serde_json::from_slice(
+        &fs::read(root.join("tests/fixtures/policy-config-parity.json"))
+            .expect("read PolicyConfig parity vector"),
+    )
+    .expect("parse PolicyConfig parity vector");
+    let asset = policy["assets"][0].clone();
+    let recipient = policy["recipients"][0].clone();
+
+    for field in ["assets", "recipients", "blocked_recipients"] {
+        let value = if field == "assets" {
+            asset.clone()
+        } else {
+            recipient.clone()
+        };
+        let mut candidate = policy.clone();
+        candidate[field] = serde_json::json!([value.clone(), value]);
+        assert!(
+            !schema.is_valid(&candidate),
+            "duplicate entries in `{field}` must fail schema validation"
+        );
+    }
+
+    let protocol = serde_json::json!({"contract": asset, "fns": ["swap"]});
+    let mut candidate = policy.clone();
+    candidate["protocols"] = serde_json::json!([protocol.clone(), protocol]);
+    assert!(
+        !schema.is_valid(&candidate),
+        "duplicate protocol rules must fail"
+    );
+
+    let recipient_cap = serde_json::json!({"recipient": recipient, "cap": "10"});
+    let mut candidate = policy.clone();
+    candidate["recipient_window_caps"] = serde_json::json!([recipient_cap.clone(), recipient_cap]);
+    assert!(
+        !schema.is_valid(&candidate),
+        "identical recipient cap entries must fail schema validation"
+    );
+
+    let asset = policy["assets"][0].clone();
+    let asset_cap = serde_json::json!({"asset": asset, "per_tx_cap": "10"});
+    let mut candidate = policy.clone();
+    candidate["asset_caps"] = serde_json::json!([asset_cap.clone(), asset_cap]);
+    assert!(
+        !schema.is_valid(&candidate),
+        "identical asset cap entries must fail schema validation"
+    );
+
+    let protocol = serde_json::json!({"contract": asset, "fns": ["swap", "swap"]});
+    let mut candidate = policy.clone();
+    candidate["protocols"] = serde_json::json!([protocol]);
+    assert!(
+        !schema.is_valid(&candidate),
+        "duplicate protocol function names must fail schema validation"
+    );
+}

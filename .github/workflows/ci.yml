@@ -67,12 +67,13 @@ jobs:
 
       # Guard deployable enforcement code. Test-only modules intentionally use
       # unwraps for fixture assertions; integration_tests.rs is also test-only.
+      # The engine has individually gated test helpers before the evaluator.
       - name: Guard enforcement code against unwrap and expect
         run: |
           pattern='\.(unwrap|expect)[[:space:]]*\('
           if grep -En "$pattern" src/lib.rs src/types.rs \
-            || sed '/^#\[cfg(test)\]$/,$d' src/engine.rs | grep -En "$pattern" \
-            || sed '/^#\[cfg(test)\]$/,$d' src/window.rs | grep -En "$pattern"; then
+            || sed '/^mod tests {$/,$d' src/engine.rs | grep -En "$pattern" \
+            || sed '/^mod tests {$/,$d' src/window.rs | grep -En "$pattern"; then
             echo 'Enforcement source must use checked handling, not unwrap()/expect().' >&2
             exit 1
           fi
