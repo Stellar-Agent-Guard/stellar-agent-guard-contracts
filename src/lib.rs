@@ -46,8 +46,8 @@ pub use types::{
 };
 use types::{
     CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_ASSET_CAP_ENTRIES,
-    MAX_DMS_GRACE_SECS, MAX_POLICY_ASSETS, MAX_POLICY_PROTOCOLS, MAX_RECIPIENT_ENTRIES,
-    MAX_WINDOW_SECS,
+    MAX_CAP_MAGNITUDE, MAX_DMS_GRACE_SECS, MAX_POLICY_ASSETS, MAX_POLICY_PROTOCOLS,
+    MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
 };
 use window::{Ledger, WindowMerge, WindowMergeKind};
 
@@ -101,17 +101,32 @@ mod event_types {
         pub(super) at: u64,
     }
 
-    /// Admin lifecycle events: data `by` (the admin address that acted).
+    /// Contract initialization: data `by` (the admin address that acted) plus
+    /// `agent_fingerprint` — the first 4 bytes of the registered Ed25519 public
+    /// key (SPEC §9). A correlation prefix, not the full key: the key is
+    /// already public in instance storage, so this leaks nothing new.
     #[contractevent]
     #[derive(Clone)]
     pub(super) struct EventInitialized {
         pub(super) by: Address,
+        pub(super) agent_fingerprint: BytesN<4>,
     }
 
     #[contractevent]
     #[derive(Clone)]
     pub(super) struct EventFrozen {
         pub(super) by: Address,
+    }
+
+    /// Agent-initiated self-lock: data `at` — the ledger time the lock was
+    /// taken — and `revision` — the `PolicyRevision` in force when it was
+    /// taken, so telemetry can attribute the halt to the exact policy
+    /// generation (issue #306, SPEC §9).
+    #[contractevent]
+    #[derive(Clone)]
+    pub(super) struct EventSelfLocked {
+        pub(super) at: u64,
+        pub(super) revision: u64,
     }
 
     /// Admin unfreeze: data `by` (the admin address that acted) plus
@@ -471,6 +486,30 @@ fn first_failing_asset_cap_rule(cfg: &PolicyConfig, self_addr: &Address) -> Opti
     None
 }
 
+/// Returns `true` when any cap field exceeds the documented ceiling
+/// `MAX_CAP_MAGNITUDE` (issue #321): the global `per_tx_cap`/`window_cap`
+/// and every override cap in `asset_caps` / `recipient_window_caps`.
+fn any_cap_exceeds_magnitude(cfg: &PolicyConfig) -> bool {
+    if cfg.per_tx_cap > MAX_CAP_MAGNITUDE || cfg.window_cap > MAX_CAP_MAGNITUDE {
+        return true;
+    }
+    for i in 0..cfg.asset_caps.len() {
+        if let Some(cap) = cfg.asset_caps.get(i) {
+            if cap.per_tx_cap > MAX_CAP_MAGNITUDE {
+                return true;
+            }
+        }
+    }
+    for i in 0..cfg.recipient_window_caps.len() {
+        if let Some(cap) = cfg.recipient_window_caps.get(i) {
+            if cap.cap > MAX_CAP_MAGNITUDE {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId> {
     // Reject excessive vectors before content checks and duplicate scans, so
     // both validation cost and the later authorization scans stay bounded.
@@ -491,6 +530,14 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
     }
     if cfg.per_tx_cap < 0 || cfg.window_cap < 0 {
         return Err(PolicyRuleId::AmountSign);
+    }
+    // No cap may exceed the documented ceiling (issue #321). An absurd cap is
+    // indistinguishable from "unlimited" to the decision path while still
+    // reading as policy, and it makes the saturating window arithmetic
+    // load-bearing. Override caps are bounded too: they are the effective
+    // per-tx / per-recipient ceiling for the assets and recipients they name.
+    if any_cap_exceeds_magnitude(cfg) {
+        return Err(PolicyRuleId::CapMagnitudeExceedsBound);
     }
     if cfg.window_cap_enabled() && cfg.window_secs == 0 {
         return Err(PolicyRuleId::WindowRequiresWidth);
@@ -548,21 +595,36 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
             }
         }
     }
-    let mut contracts: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(env);
+    // SPEC §8: the same contract must not appear in two protocol rules
+    // (`ProtocolContractDuplicate`). Comparing each rule against the rules
+    // already validated ahead of it is the rule itself, so no temporary
+    // collection is needed to remember what has been seen.
     for i in 0..cfg.protocols.len() {
-        if let Some(pr) = cfg.protocols.get(i) {
-            for j in 0..contracts.len() {
-                if let Some(existing) = contracts.get(j) {
-                    if existing == pr.contract {
-                        return Err(PolicyRuleId::ProtocolContractDuplicate);
-                    }
+        let Some(pr) = cfg.protocols.get(i) else {
+            continue;
+        };
+        for earlier in 0..i {
+            if let Some(existing) = cfg.protocols.get(earlier) {
+                if existing.contract == pr.contract {
+                    return Err(PolicyRuleId::ProtocolContractDuplicate);
                 }
             }
-            contracts.push_back(pr.contract.clone());
-            if let Some(fns) = &pr.fns {
-                if fns.is_empty() || has_dup(env, fns) {
-                    return Err(PolicyRuleId::ProtocolFnListInvalid);
-                }
+        }
+        if let Some(fns) = &pr.fns {
+            if fns.is_empty() || has_dup(env, fns) {
+                return Err(PolicyRuleId::ProtocolFnListInvalid);
+            }
+        }
+    }
+    // A contract cannot be both a SAC asset and an allowlisted protocol
+    // (issue #296): `parse_call` classifies such a contract as an asset every
+    // time, which would silently dead-letter its `ProtocolRule` (including any
+    // `fns` allowlist) while reporting a successful install. Rejecting the
+    // overlap keeps the classification unambiguous and fail-closed.
+    for i in 0..cfg.protocols.len() {
+        if let Some(pr) = cfg.protocols.get(i) {
+            if contains_addr(&cfg.assets, &pr.contract) {
+                return Err(PolicyRuleId::AssetProtocolOverlap);
             }
         }
     }
@@ -583,7 +645,11 @@ fn first_failing_rule(env: &Env, cfg: &PolicyConfig) -> Result<(), PolicyRuleId>
 /// single stable `InvalidConfig` error code — deliberately unchanged by
 /// issue #35 so the on-chain error surface (and every consumer matching on
 /// it) stays byte-compatible.
-pub(crate) fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
+///
+/// # Errors
+///
+/// Returns `Error::InvalidConfig` if any SPEC §8 validation rule fails.
+pub fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
     first_failing_rule(env, cfg).map_err(|_| Error::InvalidConfig)
 }
 
@@ -604,7 +670,10 @@ fn emit_auth(
     context_index: u32,
 ) {
     let res = if allowed { "allowed" } else { "blocked" };
-    let reason = reason.map_or("", |e| e.reason());
+    // An allowed decision has no `Error`, but topic[1] still carries a real
+    // symbol: `ok` keeps the event shape uniform so listeners can filter on a
+    // reason without special-casing a zero-length symbol (issue #300).
+    let reason = reason.map_or("ok", |e| e.reason());
     let (contract, fn_name) = match context {
         Some(Context::Contract(ContractContext {
             contract, fn_name, ..
@@ -631,11 +700,22 @@ fn emit_dms_auto_frozen(env: &Env, at: u64) {
     EventDmsAutoFrozen { at }.publish(env);
 }
 
-fn emit_initialized(env: &Env, by: &Address) {
-    EventInitialized { by: by.clone() }.publish(env);
+fn emit_initialized(env: &Env, by: &Address, agent_pubkey: &BytesN<32>) {
+    EventInitialized {
+        by: by.clone(),
+        agent_fingerprint: pubkey_prefix(env, agent_pubkey),
+    }
+    .publish(env);
 }
 fn emit_frozen(env: &Env, by: &Address) {
     EventFrozen { by: by.clone() }.publish(env);
+}
+fn emit_self_locked(env: &Env, at: u64) {
+    EventSelfLocked {
+        at,
+        revision: current_revision(env),
+    }
+    .publish(env);
 }
 fn emit_unfrozen(env: &Env, by: &Address, rearmed_dms: bool) {
     EventUnfrozen {
@@ -658,6 +738,18 @@ fn emit_policy_revoked(env: &Env, by: &Address) {
     }
     .publish(env);
 }
+/// First 4 bytes of the agent public key, published by `initialized` so setup
+/// is correlatable from telemetry alone (SPEC §9). This is a short prefix, not
+/// a security fingerprint: 32 bits collide by birthday around 77k keys, and the
+/// full key is already public in instance storage.
+fn pubkey_prefix(env: &Env, pubkey: &BytesN<32>) -> BytesN<4> {
+    let bytes = pubkey.to_array();
+    let mut prefix = [0u8; 4];
+    // `bytes` is fixed at 32 bytes, so this constant 0..4 range is in bounds.
+    prefix.copy_from_slice(&bytes[..4]);
+    BytesN::from_array(env, &prefix)
+}
+
 /// Compact key fingerprint: the first 8 bytes of `SHA-256(pubkey)`. Rendered
 /// as 16 lowercase hex characters off-chain (greppable, small event payload);
 /// deliberately truncating so events never carry a full pubkey.
@@ -818,7 +910,7 @@ mod policy_engine_type {
             env.storage().instance().set(&DataKey::Initialized, &true);
             persist_set(&env, &DataKey::AdminFrozen, &false);
             persist_set(&env, &DataKey::LastHeartbeat, &0u64);
-            emit_initialized(&env, &admin);
+            emit_initialized(&env, &admin, &agent_pubkey);
         }
 
         // ── Policy management (admin only) ───────────────────────────────────
@@ -961,6 +1053,65 @@ mod policy_engine_type {
         }
 
         /// Removes the policy and window → immediate default-deny.
+        /// Targeted recipient allowlist patch (issue #303): adds `recipient`
+        /// to the stored policy's `recipients` without resending the full
+        /// `PolicyConfig`. The resulting full config is run through
+        /// `validate_config` before anything is written, so a duplicate,
+        /// self-addressed, or otherwise invalid result leaves the stored
+        /// policy (and the rolling window / DMS clock) untouched.
+        /// Admin-only; requires an installed policy (`NoPolicy` otherwise).
+        /// Preserves the rolling window and the dead-man-switch clock (like
+        /// any `set_policy` edit); bumps `PolicyRevision` and emits
+        /// `policy_set` on success.
+        pub fn add_recipient(env: Env, recipient: Address) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            // Push first so the full resulting config is validated; a
+            // duplicate / self-addressed entry is caught by validation below
+            // before any write happens.
+            cfg.recipients.push_back(recipient);
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_policy_set(&env, &admin);
+        }
+
+        /// Targeted recipient allowlist patch (issue #303): removes
+        /// `recipient` from the stored policy's `recipients`. The resulting
+        /// full config is validated before writing; an invalid result leaves
+        /// stored state untouched. Admin-only; requires an installed policy.
+        /// Preserves the rolling window and the dead-man-switch clock; bumps
+        /// `PolicyRevision` and emits `policy_set` only when the list actually
+        /// changes. A redundant removal (recipient not present) is a true
+        /// no-op: no write, no revision bump, no event.
+        pub fn remove_recipient(env: Env, recipient: Address) {
+            let admin = Self::admin_or_panic(&env);
+            let Some(mut cfg) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                panic_with_error!(&env, Error::NoPolicy);
+            };
+            let mut next: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+            let mut changed = false;
+            for i in 0..cfg.recipients.len() {
+                if let Some(r) = cfg.recipients.get(i) {
+                    if r == recipient {
+                        changed = true;
+                    } else {
+                        next.push_back(r);
+                    }
+                }
+            }
+            if !changed {
+                return;
+            }
+            cfg.recipients = next;
+            validate_config(&env, &cfg).unwrap_or_else(|e| panic_with_error!(&env, e));
+            persist_set(&env, &DataKey::Policy, &cfg);
+            increment_revision(&env);
+            emit_policy_set(&env, &admin);
+        }
+
         pub fn revoke_policy(env: Env) {
             let admin = Self::admin_or_panic(&env);
             env.storage().persistent().remove(&DataKey::Policy);
@@ -1080,9 +1231,26 @@ mod policy_engine_type {
             emit_frozen(&env, &admin);
         }
 
+        /// Agent-initiated self-lock (issue #306): the registered agent stops
+        /// its own spending without the admin's key. Routes through
+        /// `__check_auth` (`require_auth` on the account itself), so the engine
+        /// first verifies the agent signature and evaluates the account gates,
+        /// then admits `self_lock` as a fixed §6.1 self-call.
+        ///
+        /// Sets `AdminFrozen = true` and emits a dedicated `self_locked` event.
+        /// It is strictly a capability *reduction*: no funds move, and the
+        /// agent cannot clear the flag — revival is the admin's `unfreeze`
+        /// (SPEC §5). Useful when the admin key is unavailable and a runaway
+        /// agent must be stopped from inside its own authorization path.
+        pub fn self_lock(env: Env) {
+            env.current_contract_address().require_auth();
+            persist_set(&env, &DataKey::AdminFrozen, &true);
+            emit_self_locked(&env, env.ledger().timestamp());
+        }
+
         /// Explicitly records and emits an event if the dead-man switch has expired.
         /// This is permissionless (no auth required) because it only records an
-        /// already-true fact (the account is already lazily frozen by rule #2).
+        /// already-true fact (the account is already lazily frozen by rule #3).
         /// If the account is not expired, or already recorded, this is a no-op.
         pub fn refresh_deadman(env: Env) {
             let now = env.ledger().timestamp();
@@ -1244,6 +1412,12 @@ mod policy_engine_type {
         /// may refresh persistent TTLs; simulation does not persist those rent
         /// bumps. Emits the same `auth_checked` event as an in-path decision.
         ///
+        /// Permissionless by design: the verdict is derived from the same public
+        /// policy and operational state exposed by `policy()`/`status()`, and it
+        /// cannot influence contract state — this path only reads a snapshot,
+        /// evaluates a local ledger copy, and emits an event. SPEC §7.5 records
+        /// the disclosure analysis and the alternatives considered (issue #343).
+        ///
         /// # Example
         ///
         /// Mirrors the live Phase-1 testnet invocation (permissionless read,
@@ -1271,7 +1445,8 @@ mod policy_engine_type {
         /// This path does not change spend accounting: it mutates a local ledger
         /// copy and emits exactly the same `auth_checked` event as `check`. A
         /// submitted call may refresh persistent TTLs; simulation does not persist
-        /// those rent bumps.
+        /// those rent bumps. Like `check`, it is a permissionless, write-free read
+        /// (SPEC §7.5).
         ///
         /// # Panics
         ///
@@ -1429,9 +1604,23 @@ mod policy_engine_type {
     }
 
     /// Build the auth `Context` of a SAC `transfer` call for pre-flight checks.
-    fn transfer_context(env: &Env, asset: &Address, to: &Address, amount: i128) -> Context {
+    ///
+    /// The synthetic context is a replica of the one the host hands
+    /// `__check_auth` for the real transfer, so it must have the SAC's exact
+    /// `transfer(from, to, amount)` shape with `from` = this guarded account
+    /// (`env.current_contract_address()`), never the token address (issue
+    /// #317). The decision table reads only `args[1]`/`args[2]` today; `args[0]`
+    /// is pinned so the `from`-is-the-guarded-account validation (issue #10)
+    /// can land without `check()` and `__check_auth` disagreeing.
+    pub(crate) fn transfer_context(
+        env: &Env,
+        asset: &Address,
+        to: &Address,
+        amount: i128,
+    ) -> Context {
         let mut args: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
-        args.push_back(asset.clone().into_val(env)); // from
+        // SAC `from`: the guarded account that would authorize this transfer.
+        args.push_back(env.current_contract_address().into_val(env));
         args.push_back(to.clone().into_val(env));
         args.push_back(amount.into_val(env));
         Context::Contract(ContractContext {
@@ -1509,6 +1698,13 @@ mod policy_engine_type {
             let now = env.ledger().timestamp();
             let self_addr = env.current_contract_address();
 
+            // Lazy pruning must be committed, not just computed in memory
+            // (issue #345). Prune once here so a protocol-only or otherwise
+            // non-spending authorization still reports whether expired entries
+            // were dropped. `decide` prunes again for its own decision path; the
+            // second pass is a no-op at the same `now`.
+            let pruned = ledger.prune(now, policy.window_secs);
+
             let verdicts = decide(
                 &env,
                 &self_addr,
@@ -1558,7 +1754,11 @@ mod policy_engine_type {
                     emit_window_merge(&env, merge);
                 }
                 let has_entries = ledger.len() > 0 || ledger_has_recipient_entries(&ledger);
-                if window_persisted || has_entries {
+                // Persist a pruning-only decision too: leaving expired entries in
+                // storage makes every later authorization re-load and re-sum them
+                // before pruning them again (issue #345). `save_ledger` is the
+                // single write path for the window and also owns its TTL bump.
+                if window_persisted || has_entries || pruned {
                     save_ledger(&env, &ledger);
                 }
                 Ok(())
@@ -1590,9 +1790,11 @@ pub mod testutils {
     pub use crate::types::policy_canonical_encoding;
     pub use crate::types::{
         CheckResult, DataKey, Error, PolicyConfig, PolicyRuleId, ProtocolRule, RecipientCap,
-        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_AUTH_CONTEXTS,
-        MAX_DMS_GRACE_SECS, MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
+        RecipientWindowState, Status, ValidationOutcome, WindowState, MAX_ASSET_CAP_ENTRIES,
+        MAX_AUTH_CONTEXTS, MAX_DMS_GRACE_SECS, MAX_POLICY_ASSETS, MAX_POLICY_PROTOCOLS,
+        MAX_RECIPIENT_ENTRIES, MAX_WINDOW_SECS,
     };
+    pub use crate::validate_config;
     pub use crate::window::Ledger;
     pub use soroban_sdk::auth::{Context, ContractContext};
     pub use soroban_sdk::{vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Val, Vec};

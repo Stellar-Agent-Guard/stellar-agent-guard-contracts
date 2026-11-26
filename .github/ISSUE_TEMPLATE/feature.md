@@ -2,10 +2,10 @@
 name: "Feature request"
 description: "Propose a new feature or enhancement"
 title: "[feat]: "
-labels: []
+labels: ["enhancement"]
 ---
 
-<!-- Maintainers: tag one `complexity: trivial|small|medium|large` label per CONTRIBUTING.md ("Issue backlog"). -->
+<!-- Maintainers: keep the template type label and add one `complexity: trivial|small|medium|large` label per CONTRIBUTING.md ("Triage labels and ownership"). -->
 
 ## Summary
 
