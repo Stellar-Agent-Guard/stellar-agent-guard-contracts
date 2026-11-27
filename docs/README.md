@@ -49,13 +49,14 @@ The table below maps every section and subsection of [`SPEC.md`](../SPEC.md) to 
 | [`§7.4. Policy format version — migration hook (issue #339)`](../SPEC.md#74-policy-format-version--migration-hook-issue-339) | [`functions/initialize.md`](functions/initialize.md) | SDK Developers, Operators, Indexers | **Normative in SPEC.** `policy_version()` read and the monotonic policy-model version policy for future `PolicyConfig` changes. |
 | [`§8. Config validation (set_policy)`](../SPEC.md#8-config-validation-set_policy) | [`functions/set-policy.md`](functions/set-policy.md), [`policy-templates.md`](policy-templates.md) | Operators, Tooling Authors | **Normative in SPEC.** GitBook pages are explanatory. Authoritative validation rules enforced during `set_policy`, including the accepted-but-inert shapes (empty `recipients`/`assets`) and the `policy_no_recipient` warning. |
 | [`§8.1. Identifying the failing rule: validate_policy (issue #35)`](../SPEC.md#81-identifying-the-failing-rule-validate_policy-issue-35) | [`functions/set-policy.md`](functions/set-policy.md) | SDK Developers, Dashboard Authors | **Normative in SPEC.** `functions/set-policy.md` is explanatory. Dry-run validation preflight returning `ValidationOutcome::Invalid(PolicyRuleId)`. |
-| [`§9. Events and telemetry`](../SPEC.md#9-events-and-telemetry) | [`architecture.md`](architecture.md#storage-model), [`reason-glossary.md`](reason-glossary.md) | Indexer Developers, Telemetry Engineers, Auditors | **Normative in SPEC.** GitBook pages are explanatory. Specifications of event topics, data payloads, and `PolicyRevision` join keys. |
+| [`§9. Events and telemetry`](../SPEC.md#9-events-and-telemetry) | [`architecture.md`](architecture.md#storage-model), [`reason-glossary.md`](reason-glossary.md) | Indexer Developers, Telemetry Engineers, Auditors | **Normative in SPEC.** GitBook pages are explanatory. Exact encoded event shapes (prepended name at `topic[0]`, declared topics in order, data map keys), worked examples per event family, the indexer stability commitment, and `PolicyRevision` join keys. |
 | [`§9.5. Persistent storage TTL liveness`](../SPEC.md#95-persistent-storage-ttl-liveness) | [`rent-and-ttl.md`](rent-and-ttl.md) | Operators, Infrastructure Engineers | **Normative in SPEC.** `rent-and-ttl.md` is explanatory. Defines write TTL extensions, thresholded read refresh, and restoration semantics. |
 | [`§10. Threat model (what this does and does not do)`](../SPEC.md#10-threat-model-what-this-does-and-does-not-do) | [`audit-pack.md`](audit-pack.md), [`faq.md`](faq.md) | Security Auditors, Risk Officers | **Normative in SPEC.** GitBook pages are explanatory. Security invariants: non-custodial custody, unbypassable signature checks, fail-closed design. |
 | [`§10.1. Signature binding`](../SPEC.md#101-signature-binding) | [`concepts/custom-account-enforcement.md`](concepts/custom-account-enforcement.md), [`audit-pack.md`](audit-pack.md) | Cryptographers, Security Auditors | **Normative in SPEC.** GitBook pages are explanatory. Cryptographic binding of signature payload to transactions and accounts. |
 | [`§10.2. Verification ordering guarantee`](../SPEC.md#102-verification-ordering-guarantee) | [`architecture.md`](architecture.md#1-signature-verification), [`audit-pack.md`](audit-pack.md) | Security Auditors, Protocol Engineers | **Normative in SPEC.** GitBook pages are explanatory. Invariant that signature verification precedes all state reads and policy evaluations. |
 | [`§10.3. Availability: a compromised agent key can grief-block its own transactions (issue #424)`](../SPEC.md#103-availability-a-compromised-agent-key-can-grief-block-its-own-transactions-issue-424) | [`audit-pack.md`](audit-pack.md), [`faq.md`](faq.md) | Threat Modelers, Security Auditors, Operators | **Normative in SPEC.** GitBook pages are explanatory. Analysis of agent key griefing vectors and admin mitigation. |
 | [`§11. Testnet proof plan (scenarios 1–8: five proven, three planned)`](../SPEC.md#11-testnet-proof-plan-scenarios-18-five-proven-three-planned) | [`verification.md`](verification.md), [`audit-pack.md`](audit-pack.md) | Auditors, Quality Engineers, Community | **Normative in SPEC.** GitBook pages are explanatory evidence records. Eight testnet scenarios and proof fixture links. |
+| [`Appendix A. Scoped session grants (research spike, issue #308)`](../SPEC.md#appendix-a--scoped-session-grants-research-spike-issue-308) | [`research/scoped-session-grants.md`](research/scoped-session-grants.md) | Protocol Engineers, Security Auditors, Operators | **Non-normative in SPEC** (explicitly not implemented in v1). The research note is the full ADR: representations, replay/expiry/revocation analysis, cap interaction, and the v2 decision. |
 
 ---
 
@@ -66,6 +67,8 @@ The following GitBook pages provide operational guides, setup procedures, preset
 | GitBook Page | Audience | Status / Notes |
 |---|---|---|
 | [`installation.md`](installation.md) | Developers, Operators | **Explanatory-only.** Environment setup, Rust 1.91+ toolchain, `wasm32v1-none` target, and Wasm build instructions. |
+| [`introduction.md`](introduction.md) | Operators, Integrators, Newcomers | **Explanatory-only.** Orientation tour, plus the glossary of Stellar/Soroban terms (SAC, SCVal, authorization entry, custom account, ledger sequence, TTL), each defined with a link to the governing SPEC section. |
+| [`adr/README.md`](adr/README.md) | Contributors, Auditors | **Explanatory-only.** Records the settled mechanism decisions (custom account abstraction, rolling window, single Ed25519 key, deny-by-default) with rejected alternatives and revisit conditions. Normative behavior remains in SPEC §1/§2/§3.1/§7. |
 | [`policy-templates.md`](policy-templates.md) | Operators, Integrators | **Explanatory-only.** Named starter configurations and presets (day-trader, payments bot, watch-only, max security). Config validation rules are normative in SPEC §8. |
 | [`key-rotation.md`](key-rotation.md) | Operators, Incident Responders | **Explanatory-only.** Operational runbook for agent key rotation and two-step admin handover. Rotation mechanics are normative in SPEC §6.6 and §7.2. |
 | [`audit-pack.md`](audit-pack.md) | Security Auditors, Protocol Reviewers | **Explanatory-only.** Audit readiness guide, security invariant synthesis, and testnet proof index. Invariants are normative across SPEC §1, §4, §6, and §10. |
@@ -220,6 +223,9 @@ preview or the GitBook editor.
   branch.
 - The repository's normal review rules apply to documentation like any other
   change: a green `ci` check and an approving review before merge.
+- Merging is not the end of a docs change: the maintainer who merges also owns
+  confirming GitBook picked the commit up. That handoff, step by step, is
+  ["Maintainer handoff" in `docs/contributing.md`](contributing.md#maintainer-handoff).
 
 ## Checklist for a documentation change
 

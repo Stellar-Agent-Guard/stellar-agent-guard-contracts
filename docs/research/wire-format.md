@@ -169,6 +169,11 @@ Pre-flight simulation of an SAC transfer decision. Returns an enum with two vari
 | `unknown_contract` | `UnknownContract` |
 | `self_function_not_allowed` | `SelfFunctionNotAllowed` |
 | `create_contract_not_allowed` | `CreateContractNotAllowed` |
+| `recipient_blocked` | `RecipientBlocked` |
+| `protocol_call_rate_exceeded` | `ProtocolCallRateExceeded` |
+| `decision_invariant_violation` | `DecisionInvariantViolation` |
+| `asset_fn_not_allowed` | `AssetFnNotAllowed` |
+| `too_many_auth_contexts` | `TooManyAuthContexts` |
 
 ---
 
