@@ -165,6 +165,21 @@ mod event_types {
         pub(super) revision: u64,
     }
 
+    /// The installed policy permits no recipient at all (issue #351): the
+    /// `recipients` allowlist is empty and `allow_any_recipient` is false, so
+    /// every SAC transfer the policy would otherwise admit is denied with
+    /// `recipient_not_allowed`. Installing it is legal — a paused watch-only
+    /// baseline is a legitimate posture — but it is inert for transfers, so
+    /// `set_policy` records that fact instead of leaving the operator to
+    /// discover it from denials. Data carries `by` and `revision`, so the
+    /// warning joins to the exact policy generation it describes (SPEC §9).
+    #[contractevent]
+    #[derive(Clone)]
+    pub(super) struct EventPolicyNoRecipient {
+        pub(super) by: Address,
+        pub(super) revision: u64,
+    }
+
     /// Admin policy pause: data `by` (the admin address that acted) plus
     /// `revision` — the `PolicyRevision` this call produced. The counter is
     /// incremented only when the call actually flips `paused`, so `revision`
@@ -653,6 +668,18 @@ pub fn validate_config(env: &Env, cfg: &PolicyConfig) -> Result<(), Error> {
     first_failing_rule(env, cfg).map_err(|_| Error::InvalidConfig)
 }
 
+/// The `ValidationOutcome` view of [`first_failing_rule`], shared by the two
+/// preflight reads (`validate_policy`, issue #35, and `dry_run_set_policy`,
+/// issue #352). One implementation on purpose: the dry run must never be able
+/// to disagree with `set_policy`'s `validate_config` gate, and a second copy
+/// of the rule walk is exactly how such a drift starts.
+fn validation_outcome(env: &Env, cfg: &PolicyConfig) -> ValidationOutcome {
+    match first_failing_rule(env, cfg) {
+        Ok(()) => ValidationOutcome::Valid,
+        Err(rule) => ValidationOutcome::Invalid(rule),
+    }
+}
+
 // ── Event emission ───────────────────────────────────────────────────────
 
 /// Reads the current `PolicyRevision` counter (0 before the first policy
@@ -738,6 +765,14 @@ fn emit_policy_revoked(env: &Env, by: &Address) {
     }
     .publish(env);
 }
+fn emit_policy_no_recipient(env: &Env, by: &Address) {
+    EventPolicyNoRecipient {
+        by: by.clone(),
+        revision: current_revision(env),
+    }
+    .publish(env);
+}
+
 /// First 4 bytes of the agent public key, published by `initialized` so setup
 /// is correlatable from telemetry alone (SPEC §9). This is a short prefix, not
 /// a security fingerprint: 32 bits collide by birthday around 77k keys, and the
@@ -952,6 +987,15 @@ mod policy_engine_type {
                 persist_set(&env, &DataKey::LastHeartbeat, &now);
             }
             emit_policy_set(&env, &admin);
+            // Inert-recipient policy (issue #351): an empty allowlist with the
+            // `allow_any_recipient` escape hatch off can never admit a transfer,
+            // so record it on the audit trail (SPEC §8/§9). Accepted rather
+            // than rejected — the paused watch-only baseline in
+            // docs/policy-templates.md is built on exactly this combination —
+            // but never left silent.
+            if config.recipients.is_empty() && !config.allow_any_recipient {
+                emit_policy_no_recipient(&env, &admin);
+            }
         }
 
         /// Explicitly zeroes the rolling spend window (issue #289). Admin-only.
@@ -1344,12 +1388,37 @@ mod policy_engine_type {
         /// Evaluates the *candidate* argument — never the installed policy — and,
         /// like `set_policy`, is only meaningful post-`initialize` (the self-list
         /// rules compare against the contract's own address).
+        ///
+        /// This is the same read as [`PolicyEngine::dry_run_set_policy`] (issue
+        /// #352), which names the operator-facing framing; `validate_policy` is
+        /// the name the ABI shipped with and stays for existing consumers.
         #[allow(clippy::must_use_candidate)] // public read surface
         pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome {
-            match first_failing_rule(&env, &config) {
-                Ok(()) => ValidationOutcome::Valid,
-                Err(rule) => ValidationOutcome::Invalid(rule),
-            }
+            validation_outcome(&env, &config)
+        }
+
+        /// Dry-runs `set_policy` against a candidate policy without writing it
+        /// (issue #352): `Valid` when `set_policy` would install it, otherwise
+        /// `Invalid(rule)` naming the first failing SPEC §8 rule in evaluation
+        /// order.
+        ///
+        /// Byte-for-byte the same read as [`PolicyEngine::validate_policy`]
+        /// (issue #35) — both call the shared `validation_outcome`, which walks
+        /// `first_failing_rule`, the function `set_policy`'s `validate_config`
+        /// gate is built on. There is one rule set, not two: the dry run cannot
+        /// disagree with the write it preflights, and it reports the rule where
+        /// `set_policy` reports only the stable `InvalidConfig` code.
+        ///
+        /// Read-only and permissionless: no auth, no events, no writes beyond
+        /// the §9.5 TTL refresh a read may perform; the installed policy and
+        /// `PolicyRevision` are untouched. Like `set_policy` it is only
+        /// meaningful post-`initialize`, because the self-address rules compare
+        /// against the contract's own address. The cost trade-off (validation is
+        /// pure, so this discloses nothing, but the entry point's cost is public)
+        /// is recorded in SPEC §7/§8.
+        #[allow(clippy::must_use_candidate)] // public read surface
+        pub fn dry_run_set_policy(env: Env, config: PolicyConfig) -> ValidationOutcome {
+            validation_outcome(&env, &config)
         }
 
         /// Evaluates dead-man switch health (`Ok`, `Warn` at ≥80% elapsed, or `Expired`).
