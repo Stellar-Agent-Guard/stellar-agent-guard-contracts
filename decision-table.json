@@ -244,8 +244,10 @@
         },
         {
           "error": "ProtocolNotAllowed",
-          "tests": [],
-          "note": "Unreachable defensive arm: parse_call only yields ParsedCall::Protocol after confirming membership in cfg.protocols, so `!found` inside decide()'s protocol arm cannot fire. SPEC §6.3 lists it as an outcome — see docs/scenario-matrix.md finding F-2."
+          "tests": [
+            "paused_protocol_rule_is_protocol_not_allowed"
+          ],
+          "note": "A paused protocol rule (`paused: true`) is denied as ProtocolNotAllowed. Since issue #297 parse_call returns the matched rule index, so the only other arm — an index that no longer resolves — is an unreachable defensive deny rather than the `!found` rescan described in docs/scenario-matrix.md finding F-2."
         }
       ],
       "note": "The `result` cell is SPEC's own wording and is deliberately left untouched: it lists `Reason::AssetNotAllowed`, which the v1 engine never emits (an unlisted SAC is parsed as `Unknown` and denied with `unknown_contract`), and omits `CreateContractNotAllowed`, `SelfFunctionNotAllowed`, `RecipientBlocked`, `InvalidAmount`, and `ProtocolCallRateExceeded`, which the engine does emit. Both directions are audit findings F-2 and F-3 in docs/scenario-matrix.md; correcting the SPEC cell is a semantics call for a maintainer, so this file records the engine truth in `reasons` and leaves the prose alone."

@@ -402,7 +402,6 @@ fn parse_call_inner(
                 };
             }
             let is_asset = contains_addr(&cfg.assets, contract);
-            let is_protocol = cfg.protocols.iter().any(|r| r.contract == *contract);
             let fn_transfer = Symbol::new(env, "transfer");
             let fn_transfer_from = Symbol::new(env, "transfer_from");
 
@@ -448,10 +447,24 @@ fn parse_call_inner(
                     fname: fn_name.clone(),
                 };
             }
-            if is_protocol {
+            // Classify as a protocol call and hand `decide` the matched rule's
+            // index in the same pass: the index is what the decision needs, so
+            // no second scan over `cfg.protocols` happens downstream (issue
+            // #297). The scan runs only after the asset branches decline.
+            if let Some(index) = cfg.protocols.iter().position(|r| r.contract == *contract) {
+                let Ok(rule_index) = u32::try_from(index) else {
+                    // Unreachable: `protocols` is bounded by
+                    // `MAX_POLICY_PROTOCOLS` (256), far below `u32::MAX`. Deny
+                    // rather than panic if that bound ever stops holding.
+                    return ParsedCall::Unknown {
+                        contract: contract.clone(),
+                        fname: fn_name.clone(),
+                    };
+                };
                 return ParsedCall::Protocol {
                     contract: contract.clone(),
                     fname: fn_name.clone(),
+                    rule_index,
                 };
             }
             ParsedCall::Unknown {
@@ -788,7 +801,7 @@ fn decide_inner(
                     trace_gate!(trace, DecisionGate::Allowed);
                     Decision::Allowed
                 }
-            }
+            },
         };
 
         if let Decision::Blocked(_) = &ctx_decision {
@@ -1945,6 +1958,70 @@ mod tests {
             .first()
             .unwrap(),
             Decision::Allowed
+        ));
+    }
+
+    /// Issue #297: `parse_call` classifies a protocol call and returns the
+    /// matched rule's index in the same pass, so `decide` never rescans
+    /// `cfg.protocols`.
+    #[test]
+    fn parse_call_returns_the_matched_protocol_rule_index() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 5),
+                fns: None,
+                paused: false,
+            },
+            ProtocolRule {
+                contract: addr(&env, 6),
+                fns: None,
+                paused: false,
+            },
+        ];
+
+        // The second rule matches: the index must be its position, not 0.
+        let parsed = parse_call(&env, &sa, &proto_ctx(&env, 6, "swap"), &p);
+        assert!(
+            matches!(parsed, ParsedCall::Protocol { rule_index: 1, .. }),
+            "protocol classification must carry the matched rule index: {parsed:?}"
+        );
+        let parsed_first = parse_call(&env, &sa, &proto_ctx(&env, 5, "swap"), &p);
+        assert!(matches!(
+            parsed_first,
+            ParsedCall::Protocol { rule_index: 0, .. }
+        ));
+    }
+
+    /// The rule read through that index is the one the decision applies: a
+    /// paused protocol rule is denied as `ProtocolNotAllowed`.
+    #[test]
+    fn paused_protocol_rule_is_protocol_not_allowed() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 5),
+                fns: None,
+                paused: false,
+            },
+            ProtocolRule {
+                contract: addr(&env, 6),
+                fns: None,
+                paused: true,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, proto_ctx(&env, 6, "swap")];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, ctx);
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::ProtocolNotAllowed)
         ));
     }
 

@@ -417,7 +417,14 @@ pub enum ParsedCall {
     /// (e.g. `mint`, `burn`) — never allowed for the account as authorizer.
     AssetOther { asset: Address, fname: Symbol },
     /// A call on an allowlisted protocol contract.
-    Protocol { contract: Address, fname: Symbol },
+    Protocol {
+        contract: Address,
+        fname: Symbol,
+        /// Index of the `PolicyConfig::protocols` entry `parse_call` matched,
+        /// so `decide` reads that rule directly instead of rescanning the
+        /// whole vector on the authorization hot path (issue #297).
+        rule_index: u32,
+    },
     /// A call to this account's own functions (e.g. `heartbeat`).
     SelfCall { fname: Symbol },
     /// A host-function contract creation authorized by the account — denied in
