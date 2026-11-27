@@ -571,6 +571,22 @@ and sentinel are pinned in [SPEC §7.3](SPEC.md#73-policy-hash--cheap-drift-dete
 and locked by `tests/policy_hash_encoding.rs`; off-chain, reproduce the hash by SHA-256-ing
 the XDR bytes of the same policy value your SDK builds for `set_policy`.
 
+### `validate_policy` / `dry_run_set_policy` (read)
+```rust
+pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+pub fn dry_run_set_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+```
+No auth, no events, no state writes. Both names are one read ([issue #352](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/352)):
+they validate the **candidate** `config` against the same SPEC §8 rules, in the same order,
+that `set_policy` enforces, and return `Valid` or `Invalid(rule)` naming the **first** failing
+rule. Nothing is installed, so an SDK or dashboard can preflight a policy — and point at the
+offending field — before asking the admin to sign the `set_policy` transaction, instead of
+deducing the cause from `set_policy`'s single opaque `InvalidConfig` code. The rule →
+`PolicyRuleId` mapping is in [SPEC §8](SPEC.md#8-config-validation-set_policy); the equality
+between the two names and the write they preflight is asserted for every rule in the test
+suite. Like `set_policy`, both are only meaningful after `initialize` (the self-address rules
+compare against the contract's own address).
+
 ### `status` (read)
 ```rust
 pub fn status(env: Env) -> Status
@@ -1000,6 +1016,10 @@ maximum TTL on writes and refreshed to maximum when a read finds less than half 
 TTL remaining (`persist_get`; SPEC §9.5). The `Window` ledger is bounded at
 `MAX_WINDOW_ENTRIES = 8192` — beyond that, the two oldest entries merge *forward*
 (conservative over-count), so the `window_cap` ceiling is never exceeded (SPEC §3.1).
+Because the ledger holds at most one entry per second, accounting is exact for any
+`window_secs <= 8192` (2 h 16 min 32 s); a wider window (`window_secs = 604800`, say) stays
+exact for a sparse spender but falls back to the conservative merge once spending sustains
+1 Hz for 8192 s, and that merge can only make enforcement stricter, never looser (SPEC §3.1).
 Each successful admission that triggers the merge emits `event_window_merged` with the ledger
 kind, retained timestamp, and merged spend amount or protocol call count (SPEC §9).
 See [Storage rent and TTL cost model](docs/rent-and-ttl.md) for approximate XLM costs,
