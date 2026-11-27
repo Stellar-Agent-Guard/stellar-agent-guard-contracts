@@ -1,6 +1,7 @@
 # stellar-agent-guard-contracts — Architecture Specification (Phase 1)
 
 Status: **implemented against this spec; testnet proofs recorded in `tests/fixtures/README.md`.**
+Specification revision: **r1 — unreleased** (see [Specification revisions](#specification-revisions)).
 Mechanism is settled: **Soroban native Custom Account Abstraction.** This document specifies the
 smart-wallet policy contract, every public signature with auth-placement reasoning, the policy
 model (per-transaction cap, genuinely rolling window cap, recipient + protocol/function
@@ -13,6 +14,38 @@ site, see the [SPEC ↔ GitBook Cross-Reference Map](docs/README.md#spec--gitboo
 Sibling context: this project builds on the research and reasoning of `agent-spend-policy` (a
 related but distinct project). Mechanism conclusions are shared; code, policy math (rolling, not
 fixed-bucket), and the product split (contracts / SDK / dashboard) are this project's own.
+
+### Specification revisions
+
+This document is versioned separately from the crate so an auditor can answer one
+question from a deployed artifact: *which revision of the specification does this
+release implement?* (issue #146).
+
+- **Identifier.** Revisions are labelled `r1`, `r2`, … — monotonic, never reused.
+  The label is not the crate version: `Cargo.toml` may move for build-only
+  reasons while the normative text is unchanged, and a normative change may land
+  before any release is cut.
+- **Current revision.** The line directly under the status header always names the
+  revision of the text you are reading, plus one of two states: `unreleased`
+  (on `main`/a branch, not in any tagged release) or the contract release tag it
+  shipped in (`vX.Y.Z`).
+- **Relation to releases and Git.** A revision names a contract release only after
+  that release exists. The link is then `SPEC revision → release tag → commit`:
+  the tag is authoritative for the artifact, `provenance.txt` on the release pins
+  the tag to a commit, and this section pins the revision to both. A revision
+  that is not named by any release is explicitly `unreleased` — that state is not
+  a claim that it was released.
+- **When it changes.** Any normative change to this document (behavior, storage,
+  error variants, event vocabulary, enforcement scope) bumps the revision in the
+  same PR as the change. Editorial fixes that leave the normative meaning intact
+  do not.
+- **Release step.** [`docs/release-checklist.md`](docs/release-checklist.md#1-version-and-spec-revision)
+  requires the revision line and its table row to be updated while preparing a
+  release, so a tag is never published with a stale `unreleased` marker.
+
+| Revision | Contract release | Git revision | Scope |
+|---|---|---|---|
+| `r1` | none yet — no `v*` tag has been cut (crate `0.1.0`) | `main`, from the commit that introduced this section | Initial revision: Phase 1 specification as implemented in `src/`, with the Phase 1 testnet evidence in `tests/fixtures/README.md` and the re-verification contract in [`docs/fixture-verification.md`](docs/fixture-verification.md). |
 
 ---
 
@@ -384,7 +417,23 @@ Implementation (exact, lazy, bounded):
   should), which can only make enforcement stricter than policy — it can never admit spend that
   policy would reject. The exact guarantee ("window_cap is a hard ceiling over any
   `window_secs` span") is preserved in all cases; in the pathological region of ≥8192 distinct
-  spend seconds within one window the engine is conservative until density drops. This is
+  spend seconds within one window the engine is conservative until density drops.
+- **Derived bound: exactness holds while `window_secs <= MAX_WINDOW_ENTRIES` (8192 s).** The
+  ledger keeps at most one entry per second, because `SpendEntry.ts` is a whole unix second and
+  spends that share a second coalesce into the trailing entry (previous bullet). A window can
+  therefore never hold more distinct entries than `window_secs`, so any `window_secs` up to the
+  bound is accounted exactly at every spend density. Past it, a spender sustaining one admission
+  per second fills all 8192 slots after 8192 s — 2 h 16 min 32 s — and each further admission
+  merges the two oldest entries forward. The consequence is concrete: a policy with
+  `window_secs = 604800` (7 days) stays exact for a sparse spender and, for a sustained ≥1 Hz
+  one, switches to conservative accounting (spend counted for longer than it truly occurred)
+  for the remainder of the window. The degradation direction is **stricter, never looser**: the
+  merged entry over-counts, so enforcement can deny spend the raw ledger would have admitted,
+  and never the reverse. The bound is applied independently to each ledger — the global spend
+  window, every tracked per-recipient window, and the protocol-call ledger each merge at their
+  own 8192-entry ceiling (`admit_to_ledger` / `admit_to_protocol_call_ledger` in
+  `src/window.rs`). Measured worst-case prune cost for the pathological fill is in the
+  *Measured worst case* bullet below.
 - **Merge telemetry:** each successful admission that triggers this backstop emits one
   `event_window_merged` event. Topic 1 identifies `global_spend`, `recipient_spend`, or
   `protocol_calls`; data is the compact tuple `(merged_ts, merged_value)`, where `merged_ts`
@@ -1277,6 +1326,53 @@ before any policy state is read, so an unverifiable signature never reaches the 
 below. The single-key choice and the rejected multi-sig / delegated-signer alternatives are
 recorded in [ADR-0003](docs/adr/0003-ed25519-single-key-over-multisig-v1.md).
 
+### 7.0 Canonical public-ABI table (issue #354)
+
+One row per public entry point: the authority it names, the `DataKey` set it touches (§3), the
+events it emits (§9), and how it fails. This table is the reviewer's checklist for the
+security-critical property above — *the authority that can change a thing is the authority named
+by the change* — and the one place an SDK author can read the whole surface at once. The prose
+signature block below, the README per-function sections, and the GitBook function pages remain
+the long form; each row cross-references them instead of restating them, and every row was
+verified against `src/lib.rs` in the PR that added this table.
+
+"Read" includes a read that decides whether to write (e.g. `has(&Policy)`); "written" lists
+**state** writes only — a permissionless read may still refresh a persistent entry's TTL (§9.5),
+and that rent-bearing effect is not a policy change. `A` = instance storage, `P` = persistent.
+
+| Entry point | Auth required | Keys read | Keys written | Events emitted | Failure on rejection | README | GitBook |
+|---|---|---|---|---|---|---|---|
+| `initialize(admin, agent_pubkey)` | `admin` | A: `Initialized` | A: `Admin`, `AgentPubkey`, `PolicyVersion`, `Initialized`; P: `AdminFrozen`, `LastHeartbeat` | `initialized` | `AlreadyInitialized` (#2); a bad/missing admin auth is a `require_auth` host trap, not a contract error | [§initialize](README.md#initialize) | [initialize](docs/functions/initialize.md) |
+| `set_policy(config)` | `Admin` | A: `Admin`; P: `Policy`, `PolicyRevision` | P: `Policy`, `PolicyRevision`; on first install also `Window` (empty) and `LastHeartbeat` | `policy_set`; plus `policy_no_recipient` when the installed policy permits no recipient (§8) | `NotInitialized` (#3) pre-init; `InvalidConfig` (#4) on any §8 rule, policy left unchanged | [§set_policy](README.md#set_policy) | [set_policy](docs/functions/set-policy.md) |
+| `reset_window()` | `Admin` | A: `Admin` | P: `Window` (removed) | `window_reset` | `NotInitialized` (#3); idempotent otherwise | [§reset_window](README.md#reset_window) | [set_policy §reset_window](docs/functions/set-policy.md#reset_window--the-explicit-reset) |
+| `increase_window_cap(new_cap)` | `Admin` | A: `Admin`; P: `Policy`, `Window`, `PolicyRevision` | P: `Policy`, `PolicyRevision` | `window_cap_increased` | `NotInitialized` (#3), `NoPolicy` (#12) with no policy installed, `InvalidConfig` (#4) when not an increase, below the live total, or §8-invalid | [§increase_window_cap](README.md#increase_window_cap) | — (SPEC §3.1 is the reference; no GitBook page yet) |
+| `add_recipient(recipient)` | `Admin` | A: `Admin`; P: `Policy`, `PolicyRevision` | P: `Policy`, `PolicyRevision` | `policy_set` | `NotInitialized` (#3), `NoPolicy` (#12), `InvalidConfig` (#4) on any §8 rule, policy left unchanged | — (SPEC §7 is the reference) | [set_policy](docs/functions/set-policy.md) |
+| `remove_recipient(recipient)` | `Admin` | A: `Admin`; P: `Policy`, `PolicyRevision` | P: `Policy`, `PolicyRevision` (only when present) | `policy_set` (only when removed) | `NotInitialized` (#3), `NoPolicy` (#12), `InvalidConfig` (#4) on any §8 rule, policy left unchanged | — (SPEC §7 is the reference) | [set_policy](docs/functions/set-policy.md) |
+| `revoke_policy()` | `Admin` | A: `Admin`; P: `PolicyRevision` | P: `Policy`, `Window` (removed), `PolicyRevision` | `policy_revoked` | `NotInitialized` (#3) | [§revoke_policy](README.md#revoke_policy) | [set_policy](docs/functions/set-policy.md) |
+| `rotate_agent_key(new_pubkey)` | `Admin` | A: `Admin`, `AgentPubkey` | A: `AgentPubkey` | `agent_rotated` | `NotInitialized` (#3) | [§rotate_agent_key](README.md#rotate_agent_key) | [key rotation](docs/key-rotation.md) |
+| `propose_admin_rotation(new_admin)` | `Admin` | A: `Admin` | A: `PendingAdmin` | `admin_rotation_proposed` | `NotInitialized` (#3); `InvalidConfig` (#4) when proposing the current admin | [§propose_admin_rotation](README.md#propose_admin_rotation--confirm_admin_rotation--cancel_admin_rotation) | [admin rotation](docs/functions/admin-rotation.md) |
+| `confirm_admin_rotation()` | `PendingAdmin` (the proposed address) | A: `Admin`, `PendingAdmin` | A: `Admin`, `PendingAdmin` (removed) | `admin_rotated` | `NotInitialized` (#3), `NoPendingAdmin` (#6) | [§confirm_admin_rotation](README.md#propose_admin_rotation--confirm_admin_rotation--cancel_admin_rotation) | [admin rotation](docs/functions/admin-rotation.md) |
+| `cancel_admin_rotation()` | `Admin` | A: `Admin`, `PendingAdmin` | A: `PendingAdmin` (removed) | `admin_rotation_cancelled` | `NotInitialized` (#3), `NoPendingAdmin` (#6) | [§cancel_admin_rotation](README.md#propose_admin_rotation--confirm_admin_rotation--cancel_admin_rotation) | [admin rotation](docs/functions/admin-rotation.md) |
+| `pause()` | `Admin` | A: `Admin`; P: `Policy`, `PolicyRevision` | P: `Policy`, `PolicyRevision` (only when the flag flips) | `paused` | `NotInitialized` (#3), `NoPolicy` (#12) | [§pause](README.md#pause--resume) | [pause / resume](docs/functions/freeze-unfreeze.md#pause--resume--the-policy-level-lever) |
+| `resume()` | `Admin` | A: `Admin`; P: `Policy`, `PolicyRevision` | P: `Policy`, `PolicyRevision` (only when the flag flips) | `resumed` | `NotInitialized` (#3), `NoPolicy` (#12) | [§resume](README.md#pause--resume) | [pause / resume](docs/functions/freeze-unfreeze.md#pause--resume--the-policy-level-lever) |
+| `heartbeat()` | the contract's own address — routed through `__check_auth`, so the registered agent key | A: `AgentPubkey` (inside `__check_auth`); P: `Policy`, `AdminFrozen`, `LastHeartbeat`, `Window` | P: `LastHeartbeat` (skipped when it already equals `now`); `Window` only if `__check_auth` admits the call | `auth_checked` (from the `__check_auth` evaluation), `heartbeat` | `NotInitialized` (#3), `NoPolicy` (#12), `AdminFrozen` (#10), `HeartbeatExpired` (#11), `Paused` (#13), `OutsideActiveWindow` (#14), `SelfFunctionNotAllowed` (#27) | [§heartbeat](README.md#heartbeat) | [heartbeat](docs/functions/heartbeat.md) |
+| `freeze()` | `Admin` | A: `Admin` | P: `AdminFrozen` | `frozen` | `NotInitialized` (#3) | [§freeze](README.md#freeze--unfreeze) | [freeze / unfreeze](docs/functions/freeze-unfreeze.md) |
+| `self_lock()` | the contract's own address — routed through `__check_auth`, so the registered agent key | A: `AgentPubkey` (inside `__check_auth`); P: `Policy`, `PolicyRevision`, `AdminFrozen`, `LastHeartbeat`, `Window` | P: `AdminFrozen` | `auth_checked` (from the `__check_auth` evaluation), `self_locked` | `NotInitialized` (#3), `NoPolicy` (#12), `AdminFrozen` (#10), `HeartbeatExpired` (#11), `Paused` (#13), `OutsideActiveWindow` (#14), `SelfFunctionNotAllowed` (#27) | [§self_lock](README.md#self_lock-agent) | [freeze / unfreeze](docs/functions/freeze-unfreeze.md) |
+| `unfreeze()` | `Admin` | A: `Admin`; P: `LastHeartbeat` | P: `AdminFrozen`, `LastHeartbeat` | `unfrozen` | `NotInitialized` (#3) | [§unfreeze](README.md#freeze--unfreeze) | [freeze / unfreeze](docs/functions/freeze-unfreeze.md) |
+| `refresh_deadman()` | none (permissionless) | P: `Policy`, `LastHeartbeat`, `AutoFrozenAt` | P: `AutoFrozenAt`, and only when the grace has elapsed and it is unrecorded | `dms_auto_frozen` | none — never traps; a no-op when not expired or already recorded | [§refresh_deadman](README.md#public-functions) | [incident playbook](docs/operations/incident-playbook-admin-key-lost.md) |
+| `policy()` | none | P: `Policy` | — | — | none — returns `None` (default-deny) | [§policy](README.md#policy-read) | — (SPEC §7 is the reference) |
+| `policy_version()` | none | A: `PolicyVersion` | — | — | none — returns `0` before `initialize` | [§policy_version](README.md#policy_version-read) | — (SPEC §7.4 is the reference) |
+| `policy_hash()` | none | P: `Policy` | — | — | none — returns `NO_POLICY_DIGEST` with no policy installed | [§policy_hash](README.md#policy_hash-read--cheap-drift-detection) | [policy attestation](docs/research/policy-attestation.md) |
+| `validate_policy(config)` | none | — (pure; compares against `current_contract_address()` only) | — | — | none — reports `ValidationOutcome::Invalid(rule)` instead of trapping | [§validate_policy](README.md#validate_policy--dry_run_set_policy-read) | — (SPEC §8.1 is the reference) |
+| `dry_run_set_policy(config)` | none | — (same read as `validate_policy`, issue #352) | — | — | none — reports `ValidationOutcome::Invalid(rule)` instead of trapping | [§dry_run_set_policy](README.md#validate_policy--dry_run_set_policy-read) | — (SPEC §8.1 is the reference) |
+| `dms_health()` | none | P: `Policy`, `LastHeartbeat` | — | — | none — `Ok` with no policy installed (switch disabled) | [§public functions](README.md#public-functions) | [dead-man switch](docs/concepts/dead-man-switch.md) |
+| `status()` | none | P: `Policy`, `PolicyRevision`, `AdminFrozen`, `LastHeartbeat`, `Window` | — | — | none — snapshot only, never traps | [§status](README.md#status-read) | — (SPEC §7 is the reference) |
+| `status_at(as_of)` | none | same as `status()` | — | — | none — `as_of` is caller-supplied, no clock dependency | [§status_at](README.md#status-read) | — (SPEC §7 is the reference) |
+| `check(asset, to, amount)` | none | P: `Policy`, `AdminFrozen`, `LastHeartbeat`, `Window` | — (prunes a local ledger copy only) | `auth_checked` | none returned as a trap — the verdict is `CheckResult::Blocked(reason)`; `DecisionInvariantViolation` (#31) only if the engine yields no verdict | [§check](README.md#check--preflight--simulate-a-transfer-read-permissionless) | [check_auth](docs/functions/check-auth.md) |
+| `check_detailed(asset, to, amount)` | none | same as `check()` | — (local ledger copy only) | `auth_checked` | same as `check()` | [§check_detailed](README.md#check--preflight--simulate-a-transfer-read-permissionless) | [check_auth](docs/functions/check-auth.md) |
+| `check_batch(asset, transfers)` | none | same as `check()` | — (staged admissions are discarded) | one `auth_checked` per evaluated context | none returned as a trap — per-item `CheckResult::Blocked(reason)` with `admissible: false` | [§check_batch](README.md#check--preflight--simulate-a-transfer-read-permissionless) | [check_auth](docs/functions/check-auth.md) |
+| `__check_auth(payload, signature, contexts)` | host-invoked; the agent's Ed25519 signature over the payload, verified before any policy read (§10.2) | A: `AgentPubkey`; P: `Policy`, `AdminFrozen`, `LastHeartbeat`, `Window` | P: `Window` — only when every context passed and entries exist or the window was already persisted | `auth_checked` per context; `window_merged` per 8192-entry merge | `NotInitialized` (#3), `NoPolicy` (#12), the §4 account gates (#10/#11/#13/#14), per-call codes (#20–#30, #32), `TooManyAuthContexts` (#33); a bad signature is a host crypto trap, never a contract error | [§__check_auth](README.md#__check_auth-host-invoked--not-callable-by-anyone) | [check_auth](docs/functions/check-auth.md) |
+
 ```rust
 // ── Lifecycle ─────────────────────────────────────────────────────────────
 pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
@@ -1431,6 +1527,14 @@ pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
     // the offending field before submission; the on-chain rejection path is
     // unchanged (`set_policy` still fails with the single `InvalidConfig`
     // code).
+pub fn dry_run_set_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+    // Dry-run of set_policy under its operator-facing name (issue #352):
+    // byte-for-byte the same read as validate_policy above — both call the
+    // shared validation_outcome, which walks the same rule set set_policy's
+    // validate_config gate uses, so the preflight cannot disagree with the
+    // write. No auth, no events, no state writes (read-path TTL effects in
+    // §9.5 still apply); validation is pure, so nothing is disclosed, but the
+    // entry point's cost is public (§8.1).
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // Preflight / simulate a transfer (doc alias; ABI frozen as `check`):
     // pure pre-flight replica of the §6.2 decision path: it does not change
@@ -1840,7 +1944,7 @@ entire validation surface at a glance (issue #353).
 | Non-empty intersection between `assets` and `protocols[i].contract` (issue #296) | **Rejected** — `InvalidConfig` / `AssetProtocolOverlap`; asset-first classification must never silently shadow a `ProtocolRule` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_asset_protocol_overlap` (`src/integration_tests.rs`) |
 | `window_secs > MAX_WINDOW_SECS` or `dms_grace_secs > MAX_DMS_GRACE_SECS` (`315_360_000` s ≈ 10 years; issue #34) | **Rejected** — `InvalidConfig` / `DurationExceedsBound`; `0` (disabled) and `MAX_*` boundary are **Accepted** | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_duration_exceeds_bound`, `window_and_dms_upper_bounds_rejected`, `window_and_dms_upper_bounds_accept_boundary` (`src/integration_tests.rs`) |
 | Empty `assets` (`assets.is_empty()`) | **Accepted (inert for SAC transfers)** — no SAC token is allowlisted, so every SAC `transfer`/`transfer_from` classifies as `UnknownContract` and is never allowed (useful for watch-only / heartbeat-only accounts) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`parse_call_inner`) | `empty_assets_policy_blocks_sac_transfers_but_allows_protocol_calls`, `empty_assets_policy_is_recoverable_by_adding_an_asset` (`src/integration_tests.rs`); `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset); `audit_event_payloads_and_topics` (`src/event_audit_tests.rs`) |
-| Empty `recipients` with `allow_any_recipient == false` | **Accepted (inert for SAC transfers)** — no destination is allowlisted and the escape hatch is off, so every SAC transfer is blocked with `RecipientNotAllowed`. Accepted in v1 unless changed by companion [issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`decide`) | `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset); companion policy-rejection decision tracked in [issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) |
+| Empty `recipients` with `allow_any_recipient == false` | **Accepted + warned (inert for SAC transfers)** — no destination is allowlisted and the escape hatch is off, so every SAC transfer is blocked with `RecipientNotAllowed`. `set_policy` still installs it, and emits `policy_no_recipient` (`by`, `revision`) so the inert state is visible in telemetry instead of only in denials ([issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) chose warning over rejection; see the rationale below) | `src/lib.rs` (`first_failing_rule` — no non-empty check; `set_policy` emits the warning); `src/engine.rs` (`decide`) | `empty_recipients_without_escape_hatch_is_accepted_but_inert_for_transfers` (`src/integration_tests.rs`), `inert_recipient_policy_emits_one_warning_event` (`src/event_audit_tests.rs`), `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset) |
 | Empty `recipients` with `allow_any_recipient == true` | **Accepted** — recipient allowlist is skipped by the escape hatch; `blocked_recipients`, `per_tx_cap`, and `window_cap` still apply | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`decide`) | `allow_any_recipient_with_empty_list_still_enforces_both_caps` (`src/integration_tests.rs`) |
 | Empty `protocols` (`protocols.is_empty()`) | **Accepted (inert for protocol calls)** — no non-asset external protocol is allowlisted; every non-asset, non-self call is blocked with `UnknownContract` | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`parse_call_inner`) | `validate_policy_accepts_valid_config_and_ignores_installed_policy` (`src/integration_tests.rs`), `unlisted_asset_is_unknown_contract` (`src/engine.rs`) |
 | `protocols[i].fns == None` | **Accepted** — wildcard: any function on that allowlisted protocol contract is allowed (contrasts with `Some([])`, which is rejected as `ProtocolFnListInvalid`) | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`decide`) | `protocol_allowlist_is_enforced_through_real_host_authorization` (`src/integration_tests.rs`) |
@@ -1854,6 +1958,15 @@ entire validation surface at a glance (issue #353).
 - **Duration upper bounds (issue #34):** `window_secs` and `dms_grace_secs` are `u64`, so a seconds/milliseconds mix-up (e.g. a 90-day window passed as `7_776_000_000` ms) or `u64::MAX` would silently disable pruning (unbounded storage growth) or disable the dead-man switch (§5). Capping both at `315_360_000` s (86_400 × 3_650 ≈ 10 years) catches accidental units while affecting no realistic policy; `0` remains legal (feature disabled).
 - **Self-address rejection:** `env.current_contract_address()` is known at deployment (pre-`initialize`), and `set_policy` only runs post-initialize. Self-calls are governed by the fixed §6.1 rule rather than `assets`/`protocols`, a self-recipient is a no-op loop signaling a mis-pasted address, and self-entries in `recipient_window_caps`/`asset_caps` cannot be meaningful overrides.
 - **Cardinality bounds:** list bounds (`256` entries each) are checked before content and duplicate scans so validation work, authorization scans, and per-recipient storage stay strictly bounded.
+- **Empty `recipients` without the escape hatch — warn, do not reject (issue #351):** an empty
+  allowlist with `allow_any_recipient == false` can never admit a transfer, which is safe but
+  almost certainly unintended. Rejecting it was the alternative, and was not chosen: the
+  [watch-only baseline](docs/policy-templates.md) is *deliberately* configured this way (paused,
+  no assets, no destinations) as the posture to audit an agent from, so a hard rejection would
+  make a legitimate, safer-than-default configuration uninstallable. Instead `set_policy` emits
+  the dedicated `policy_no_recipient` event (§9) on every install of that combination,
+  making the inert state explicit in the audit trail; the empty-`assets` case is the symmetric
+  row above and is likewise accepted, with its own documented consequence.
 - **Cap magnitude ceiling (issue #321):** `MAX_CAP_MAGNITUDE = 10^24` smallest units is above any realistic token supply (at Stellar's usual 7 decimals, `10^17` whole tokens — roughly two million times the entire XLM supply) and far below `i128::MAX` (`≈1.7 × 10^38`). An unbounded cap is indistinguishable from "disabled" to the decision path while still charging the account for a window ledger nothing will prune; the ceiling keeps the saturating additions in `window.rs`/`engine.rs` belt-and-braces rather than load-bearing, and gives the SDK/dashboard a finite value to preflight against. Override caps are bounded too, because they are the effective per-tx / per-recipient ceiling for the assets and recipients they name.
 
 Invalid config → `InvalidConfig`, policy unchanged (fail-closed, never partially applied).
@@ -1903,6 +2016,24 @@ TTL effects in §9.5 still apply). The `InvalidConfig` code itself is
 unchanged — every decoder matching on it keeps working; surfacing
 `ValidationOutcome` in the SDK/dashboard is a cross-repo follow-up tracked in
 those repositories.
+
+**`dry_run_set_policy` — the same read under its operator-facing name (issue
+#352).** `pub fn dry_run_set_policy(env: Env, config: PolicyConfig) ->
+ValidationOutcome` returns exactly what `validate_policy` returns: both call one
+private `validation_outcome`, which walks `first_failing_rule`, the function
+`set_policy`'s `validate_config` gate is built on. Nothing about the rules is
+reimplemented, so there is no second rule set to drift, and the test suite
+asserts the equality on every §8 rule rather than trusting it
+(`assert_rejects_with` in `src/integration_tests.rs` compares the two reads
+before asserting the expected rule). The alias exists because "validate this
+before I sign the `set_policy`" is how SDKs and dashboards frame the call, while
+`validate_policy` is the name the ABI already shipped and stays for existing
+consumers. As a read it adds no authority — validation is pure, so it discloses
+nothing — but its cost is public, which is the trade-off of any permissionless
+entry point.
+
+The rule order this read reports is the order in §8's table: the first failing
+rule wins, and no rule reports more than one `PolicyRuleId`.
 
 ---
 
@@ -1958,6 +2089,7 @@ read them by key regardless.
 | `self_locked` | (none) | `at: u64`, `revision: u64` — lock timestamp and the `PolicyRevision` in force | agent `self_lock` |
 | `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
 | `policy_set` / `policy_revoked` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced | admin policy changes |
+| `policy_no_recipient` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this install produced | `set_policy` installs a policy with an empty `recipients` list and `allow_any_recipient == false`, i.e. one that can never admit a SAC transfer (issue #351; §8). Emitted once per such install, alongside `policy_set` |
 | `paused` / `resumed` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced; the counter advances only when the call actually flips `paused`, so a redundant double-pause emits the event with an unchanged revision | admin `pause()` / `resume()` (issues #289/#290) |
 | `window_reset` | (none) | `by: Address` — the admin that explicitly zeroed the rolling window (`set_policy` preserves it across edits, issue #289) | admin `reset_window()` (issue #289) |
 | `window_cap_increased` | (none) | `by: Address`, `old_cap: i128`, `new_cap: i128`, `revision: u64` — the admin that raised `window_cap` in place without resetting the ledger, plus the incremented `PolicyRevision` | admin `increase_window_cap(new_cap)` (issue #349) |

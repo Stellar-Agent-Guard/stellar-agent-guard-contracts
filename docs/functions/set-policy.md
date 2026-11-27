@@ -63,6 +63,19 @@ The following rules are checked before anything is written. Invalid config retur
 - Self-address may not appear in `assets`, `protocols`, **or `recipients`** — the account
   paying itself is a no-op loop that almost certainly signals a mis-pasted address
 
+To check a candidate config *without* writing it — same rules, same order, reported as the
+first failing rule instead of one opaque `InvalidConfig` — call `validate_policy` or its alias
+`dry_run_set_policy` (SPEC §8.1).
+
+**Accepted, not rejected — and warned:** an empty `recipients` list with
+`allow_any_recipient == false` installs cleanly, but no destination can ever pass the
+allowlist, so every SAC transfer will be denied with `recipient_not_allowed`. That posture is
+legitimate (the paused watch-only template in [Policy Templates](../policy-templates.md) is
+exactly this shape), so it is not an error — but `set_policy` records
+`EventPolicyNoRecipient` (`policy_no_recipient`, data `by` + `revision`) on
+every install of the combination, so the inert state is visible in telemetry instead of only
+in denials (issue #351; SPEC §8).
+
 ## Example
 
 ```bash
@@ -131,3 +144,5 @@ admin-attested zeroing `set_policy` no longer performs implicitly (issue #289). 
 
 - [initialize](initialize.md) — must be called first
 - [Enforcement Scope](../enforcement-scope.md) — what the policy can and cannot enforce
+- [SPEC §7.0](../../SPEC.md#70-canonical-public-abi-table-issue-354) — canonical ABI table
+  (auth, storage keys, events per entry point)

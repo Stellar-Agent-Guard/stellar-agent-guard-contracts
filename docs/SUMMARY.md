@@ -35,6 +35,8 @@
   * [ADR-0003 — Single Ed25519 Key](adr/0003-ed25519-single-key-over-multisig-v1.md)
   * [ADR-0004 — Deny by Default](adr/0004-deny-by-default-classification.md)
 * [Testnet Verification](verification.md)
+* [Fixture Re-verification Contract](fixture-verification.md)
+* [Release Checklist](release-checklist.md)
 * [Enforcement Scope](enforcement-scope.md)
 * [Scenario Matrix](scenario-matrix.md)
 * [Reason Glossary](reason-glossary.md)
