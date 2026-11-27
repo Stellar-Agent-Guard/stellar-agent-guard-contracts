@@ -1572,6 +1572,60 @@ impl Harness {
             .try_invoke_contract_check_auth::<GuardError>(guard, &payload, signature, &contexts)
     }
 
+    /// Build a raw SAC `transfer` auth context with an explicit `from` party.
+    fn transfer_context(&self, from: &Address, to: &Address, amount: i128) -> Context {
+        let args = vec![
+            &self.env,
+            from.clone().into_val(&self.env),
+            to.clone().into_val(&self.env),
+            amount.into_val(&self.env),
+        ];
+        Context::Contract(ContractContext {
+            contract: self.asset.clone(),
+            fn_name: Symbol::new(&self.env, "transfer"),
+            args,
+        })
+    }
+
+    /// Build a raw SAC `transfer_from` auth context with explicit parties.
+    fn transfer_from_context(
+        &self,
+        from: &Address,
+        spender: &Address,
+        to: &Address,
+        amount: i128,
+    ) -> Context {
+        let args = vec![
+            &self.env,
+            from.clone().into_val(&self.env),
+            spender.clone().into_val(&self.env),
+            to.clone().into_val(&self.env),
+            amount.into_val(&self.env),
+        ];
+        Context::Contract(ContractContext {
+            contract: self.asset.clone(),
+            fn_name: Symbol::new(&self.env, "transfer_from"),
+            args,
+        })
+    }
+
+    /// Sign a host-computed invocation and invoke `__check_auth` over exactly
+    /// the supplied contexts. Used for call shapes the mock asset cannot route
+    /// itself (a non-guard `from`, or `transfer_from`).
+    fn invoke_check_auth_context(
+        &mut self,
+        root: &SorobanAuthorizedInvocation,
+        context: Context,
+    ) -> Result<(), Result<GuardError, InvokeError>> {
+        let nonce = self.guard_nonce;
+        self.guard_nonce += 1;
+        let payload = self.payload(nonce, root);
+        let sig = self.agent.sign(&payload).to_bytes();
+        let contexts = vec![&self.env, context];
+        let guard = self.guard.clone();
+        self.invoke_check_auth_raw(&guard, &payload, &sig, &contexts)
+    }
+
     /// Invoke `__check_auth` with explicit raw payload and raw signature bytes.
     fn invoke_check_auth_raw(
         &self,
