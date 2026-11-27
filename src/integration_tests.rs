@@ -2848,6 +2848,40 @@ fn allow_any_recipient_with_empty_list_still_enforces_both_caps() {
     h.transfer_expect_blocked(&other, 1);
 }
 
+/// Issue #351 decision: an empty `recipients` list with `allow_any_recipient`
+/// **false** stays *accepted* — the paused watch-only baseline is exactly this
+/// shape — but it is inert, so `set_policy` records the dedicated
+/// `event_policy_no_recipient` warning (pinned in
+/// `src/event_audit_tests.rs`) instead of leaving the state silent. The dry run
+/// agrees with the write: this is a valid, installable policy.
+#[test]
+fn empty_recipients_without_escape_hatch_is_accepted_but_inert_for_transfers() {
+    let mut h = Harness::new();
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::Vec::new(&h.env);
+    p.allow_any_recipient = false;
+    p.paused = false;
+
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(
+        client.dry_run_set_policy(&p),
+        ValidationOutcome::Valid,
+        "the inert combination is accepted, not rejected (issue #351)"
+    );
+    h.install_policy(&p);
+    assert!(client.policy().is_some(), "the policy must install cleanly");
+
+    // Inert for transfers: no destination can ever pass the allowlist, so the
+    // account is blocked at the recipient gate on every SAC transfer.
+    h.set_time(1_000);
+    let recv = h.recv.clone();
+    assert_eq!(
+        client.check(&h.asset, &recv, &10),
+        CheckResult::Blocked(Symbol::new(&h.env, "recipient_not_allowed"))
+    );
+    h.transfer_expect_blocked(&recv, 10);
+}
+
 /// Issue #317: `check()`'s synthetic context must be a faithful replica of the
 /// context the host hands `__check_auth` for the real transfer — SAC
 /// `transfer(from, to, amount)` with `from` = the guarded account, not the
@@ -6156,10 +6190,20 @@ fn heartbeat_event_uses_grace_current_at_emission_not_a_stale_one() {
 /// Dry-run names the exact rule, and `set_policy` still rejects fail-closed.
 fn assert_rejects_with(h: &Harness, cfg: &PolicyConfig, want: &PolicyRuleId) {
     let client = PolicyEngineClient::new(&h.env, &h.guard);
+    // The two preflight names are one read (issue #352): assert they agree on
+    // every §8 rule before asserting the rule itself, so the dry run can never
+    // drift from `validate_policy` — and both from `set_policy`'s gate, which
+    // the rejection below exercises.
+    let dry_run = client.dry_run_set_policy(cfg);
     assert_eq!(
+        dry_run,
         client.validate_policy(cfg),
+        "dry_run_set_policy must return exactly what validate_policy returns"
+    );
+    assert_eq!(
+        dry_run,
         ValidationOutcome::Invalid(want.clone()),
-        "validate_policy must identify the failing rule"
+        "the dry run must identify the failing rule"
     );
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.set_policy(cfg);
@@ -6182,6 +6226,47 @@ fn validate_policy_reports_amount_sign() {
     let mut p = h.base_policy();
     p.window_cap = -1;
     assert_rejects_with(&h, &p, &PolicyRuleId::AmountSign);
+}
+
+/// Issue #352: `dry_run_set_policy` is a permissionless, event-free, write-free
+/// read, and a config it calls `Valid` is exactly one `set_policy` installs.
+#[test]
+fn dry_run_set_policy_is_permissionless_and_writes_nothing() {
+    // Enforcing harness: no blanket `mock_all_auths`, so a read that called
+    // `require_auth` anywhere would fail here rather than pass by accident.
+    let mut h = Harness::new_enforced_auth();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let candidate = h.base_policy();
+
+    assert_eq!(
+        client.dry_run_set_policy(&candidate),
+        ValidationOutcome::Valid
+    );
+    assert!(
+        h.env.events().all().events().is_empty(),
+        "the dry run must not emit events"
+    );
+    assert!(
+        client.policy().is_none(),
+        "the dry run must not install the candidate policy"
+    );
+    assert_eq!(
+        client.status().policy_revision,
+        0,
+        "the dry run must not advance PolicyRevision"
+    );
+
+    // The write it preflights accepts exactly the config the dry run accepted:
+    // the real admin-authorized `set_policy`, with the same candidate.
+    let root = h.invocation(
+        &h.guard,
+        "set_policy",
+        std::vec![candidate.clone().into_val(&h.env)],
+    );
+    let entry = h.admin_entry(&root);
+    h.env.set_auths(&[entry]);
+    PolicyEngineClient::new(&h.env, &h.guard).set_policy(&candidate);
+    assert!(client.policy().is_some());
 }
 
 #[test]

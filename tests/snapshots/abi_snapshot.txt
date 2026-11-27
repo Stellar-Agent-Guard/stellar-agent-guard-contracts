@@ -52,6 +52,7 @@ pub fn policy(env: Env) -> Option<PolicyConfig>
 pub fn policy_version(env: Env) -> u32
 pub fn policy_hash(env: Env) -> BytesN<32>
 pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+pub fn dry_run_set_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
 pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus
 pub fn status(env: Env) -> Status
 pub fn status_at(env: Env, as_of: u64) -> Status
