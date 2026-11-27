@@ -48,9 +48,12 @@ cargo build --release --target wasm32v1-none
 # 7. Check the release WASM for panic/unwrap strings
 bash scripts/check-wasm-panic-strings.sh
 
-# 8. Audit README claims and verify docs reachability
+# 8. Audit README claims, verify docs reachability, and check that the
+#    enforcement-scope statement matches across SPEC §2, README, and
+#    docs/enforcement-scope.md.
 scripts/verify-readme.sh
 scripts/verify-docs-reachability.sh
+scripts/check-enforcement-scope.sh
 
 # 9. tools/agent-tx is a separate cargo project (its own Cargo.toml and
 #    Cargo.lock — not a workspace member), so steps 1-8 never see it. CI gates
@@ -137,6 +140,43 @@ Install cargo-fuzz with cargo install cargo-fuzz --locked, then run locally:
 
 The corpus is stored under fuzz/corpus/policy_config_deserialization; minimized failures are written under fuzz/artifacts/policy_config_deserialization.
 
+## Performance regression threshold (issue #612)
+
+Changes to the decision engine (`src/engine.rs`), the rolling window (`src/window.rs`), or any hot-path called from `__check_auth` require a performance review when they increase the worst-case CPU instruction count beyond the documented baseline.
+
+### Baselines
+
+| Scenario | Baseline (instructions) | Source |
+|---|---|---|
+| Worst-case decision path (escape off, 2×256 recipient sweep) | ≤ 100 000 000 | `DECISION_PATH_CPU_BUDGET` in `benches/worst_case_decision_path.rs` |
+| Worst-case decision path (escape on, 1×256 sweep + window) | documented in bench output | same benchmark |
+| Maximum-bounds `validate_config` | documented in bench output | `benches/policy_deserialization.rs` |
+
+The `engine::tests::worst_case_decision_path_measured_cost` unit test asserts the escape-off path stays under `DECISION_PATH_CPU_BUDGET`; CI fails it automatically. Policy-deserialization cost has no unit-test assertion today — the bench is the documented reference.
+
+### Review trigger
+
+A PR that **increases** the instruction count of any benchmarked scenario by more than **10 %** above its baseline must include:
+
+1. The new bench output in the PR body.
+2. A written justification (new feature, security fix, or external dependency bump).
+3. An updated baseline constant or comment in the bench file when the new figure becomes the new floor.
+
+### How to run the benchmarks
+
+```bash
+# Decision-path worst case (the one CI's unit test gates)
+cargo run --manifest-path benches/Cargo.toml --bin worst_case_decision_path
+
+# Policy deserialization at minimum / typical / maximum bounds
+cargo run --manifest-path benches/Cargo.toml --bin policy_deserialization
+
+# Denial-path gas at each gate
+cargo run --manifest-path benches/Cargo.toml --bin denial_path_gas
+```
+
+Instruction counts come from the Soroban test environment's cost estimator. On-chain costs include host overhead not measured here; the budgets and thresholds are conservative enough to absorb that overhead while still surfacing significant regressions.
+
 ## Clean Build Artifacts
 
 ```bash
@@ -164,10 +204,11 @@ This removes all `target/` directories and `*.wasm` artifacts. The `.gitignore` 
    decision table (SPEC §4/§6) and the enforcement-scope statement (SPEC §2)
    must stay word-for-word consistent with the code; that consistency is
    a review requirement, not a nicety. Scope *wording* itself is single-sourced:
-   edit the canonical paragraph in SPEC §2 only — the README and
-   `docs/enforcement-scope.md` carry short excerpts plus a
-   `full statement: SPEC §2` link that auto-follows (re-sync an excerpt only if
-   the quoted sentence itself changes). Copies in sibling repositories
+   edit the canonical paragraph in SPEC §2, then paste the identical paragraph
+   into the README and `docs/enforcement-scope.md` (each keeps its
+   `full statement: SPEC §2` link). `scripts/check-enforcement-scope.sh` runs in
+   the `ci` job and fails on any divergence, so the three copies are mechanically
+   word-for-word, not by convention. Copies in sibling repositories
    (`stellar-agent-guard-sdk`, `stellar-agent-guard-dashboard`) are out of scope
    here; they are tracked in their own issue trackers.
 
@@ -302,6 +343,30 @@ Host exposure of both contract-creation context variants is exercised by
 `contract_creation_denied_through_real_host_path` in
 [`src/integration_tests.rs`](src/integration_tests.rs).
 
+## Architecture decision records (ADRs)
+
+[`docs/adr/`](docs/adr/README.md) records the mechanism decisions that took real
+reasoning, including the alternatives rejected and the observable conditions that
+would reopen them. Read the [ADR index](docs/adr/README.md) before proposing a
+change to the mechanism; if you are re-litigating a settled decision, cite the ADR
+and say which revisit condition has changed.
+
+The settled decisions recorded so far:
+
+1. [ADR-0001](docs/adr/0001-custom-account-abstraction-over-wrapper-contract.md) —
+   Soroban Custom Account Abstraction rather than a wrapper contract.
+2. [ADR-0002](docs/adr/0002-rolling-window-over-fixed-bucket.md) — a genuinely
+   rolling spend window rather than a fixed bucket.
+3. [ADR-0003](docs/adr/0003-ed25519-single-key-over-multisig-v1.md) — one
+   registered Ed25519 key in v1 rather than multi-sig.
+4. [ADR-0004](docs/adr/0004-deny-by-default-classification.md) — deny-by-default
+   classification of auth contexts.
+
+When a change introduces a new settled decision, copy the template from the ADR
+index into `docs/adr/NNNN-short-title.md` and add it to the index. Never rewrite an
+accepted ADR to change its decision: add a new ADR and mark the old one
+`Superseded by ADR-NNNN`.
+
 ## How to add a new Error variant end-to-end
 
 Adding a new denial reason touches at least five places across the repository: the enum, the `reason()` mapping, the decision site & `decision-table.json`, the `SPEC.md` §4/§6/§7 tables, and the consumer event vocabulary. Forgetting any one of these breaks CI.
@@ -337,7 +402,7 @@ Adding a new denial reason touches at least five places across the repository: t
    - Add host-routed integration test in `src/integration_tests.rs` asserting the exact reason string.
 
 ### Verification Commands
-- **Deny-list CI check**: `./scripts/check-spec-coverage.sh` (validates coverage in SPEC §4/§6 and §7 enum).
+- **Deny-list CI check**: `./scripts/check-spec-coverage.sh` (validates coverage in SPEC §4/§6, the §7 enum, and the §7.1 mapping table's codes and reason symbols).
 - **Decision-table drift check**: `cargo test --test decision_table` (ensures `decision-table.json`, SPEC §4, and engine agree).
 - **Auth-checked vocabulary check**: `cargo test --test auth_checked_vocabulary` (verifies `auth-checked-vocabulary.json` coverage).
 - **Discriminant stability check**: `cargo test error_code_discriminant_stability_spec_7`.
@@ -436,8 +501,97 @@ SPEC.md              # Architecture specification (mechanism is settled)
 
 Scoped issues with Summary / Acceptance Criteria / Tech Stack live in the
 [issue tracker](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues);
-each carries one `complexity: trivial|small|medium|large` label. Good first
+each carries exactly one type label (`bug`, `enhancement`, `documentation`, or
+`question`) and one `complexity: trivial|small|medium|large` label. Good first
 tasks for the Drips Stellar Wave contributor sprints.
+
+### Triage labels and ownership
+
+Triage is public for normal defects, features, documentation, and questions. It
+is deliberately **not** public for vulnerabilities: see [Security reports are
+never triaged publicly](#security-reports-are-never-triaged-publicly) before
+asking for reproduction details.
+
+The type label comes from the issue template, so a reporter does not need to
+know the taxonomy in advance:
+
+| Label | Use for | Template | Triage outcome |
+|---|---|---|---|
+| `bug` | Something in the repository is broken or behaves differently from SPEC/README | [Bug report](.github/ISSUE_TEMPLATE/bug.md) | Confirm reproduction, then add one complexity label |
+| `enhancement` | A new feature, API, workflow, or behavior change | [Feature request](.github/ISSUE_TEMPLATE/feature.md) | Confirm the proposed scope and acceptance criteria, then add one complexity label |
+| `documentation` | A docs-only correction or addition; the change does not alter contract behavior | Bug or feature template (the reporter may not know it is docs-only) | Add one complexity label; link the affected page and SUMMARY entry |
+| `question` | Usage, policy-design, or contributing questions that are not a defect or a committed feature | [Question](.github/ISSUE_TEMPLATE/question.md) | Answer or point to the owning doc; close when answered, or convert to `bug`/`enhancement` if it exposes work |
+
+Complexity is always exactly one of `complexity: trivial`, `complexity: small`,
+`complexity: medium`, or `complexity: large` (the labels include the space after
+the colon). Maintainers may also add `good first issue`, `help wanted`, or
+`Stellar Wave` when the issue is suitable for a contributor sprint; those are
+routing aids, not a substitute for the type and complexity labels.
+
+Ownership follows [`.github/CODEOWNERS`](.github/CODEOWNERS), not the labels.
+The enforcement path (`src/`, `.github/workflows/`, and `SECURITY.md`) is owned
+by the maintainer and requires a security-literate approving review even when
+the issue is labelled `complexity: trivial`; a label never lowers that review
+bar. Maintainers own triage: apply the labels, ask for the missing reproduction
+or acceptance criteria, and route security reports away from public discussion.
+
+#### Security reports are never triaged publicly
+
+Do **not** open a public issue for a suspected vulnerability and do not add a
+public label to one. Follow [SECURITY.md](SECURITY.md#reporting-a-vulnerability)
+and use the private GitHub security advisory:
+
+<https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/security/advisories/new>
+
+If a report that contains vulnerability details lands in the public tracker,
+maintainers should not ask for exploit details there. Move the discussion to a
+private advisory, redact or close the public issue with a neutral note, and keep
+the advisory as the only record. The issue-template picker also surfaces the
+private route (see [`.github/ISSUE_TEMPLATE/config.yml`](.github/ISSUE_TEMPLATE/config.yml)).
+
+### Complexity labels
+
+Complexity describes the **implementation and review burden** of an issue, not
+the number of lines in its diff. A ten-line change to the authorization path can
+be more demanding than a 300-line documentation edit, because it needs deeper
+reasoning, more tests, and a more careful reviewer. When self-selecting work,
+weigh both expected effort **and** the risk of getting it wrong.
+
+| Label | Expected effort | Scope and risk |
+|---|---|---|
+| `complexity: trivial` | ≤ 0.5 day | Very small, isolated changes with minimal risk |
+| `complexity: small` | Approximately 1 day | Limited changes with straightforward validation |
+| `complexity: medium` | 2–3 days | Multiple files or components requiring meaningful testing and review |
+| `complexity: large` | Multi-day | Broad, risky, architectural, or security-sensitive changes |
+
+What the labels mean in practice:
+
+- **`complexity: trivial`** — a typo, a broken link, a narrow script fix, or a
+  documentation clarification. One area of the repository, no behavior change,
+  and a reviewer can verify it by reading the diff. Example: #116 (document
+  this complexity taxonomy).
+- **`complexity: small`** — a contained change with an obvious test story, such
+  as moving documented configuration into standalone files or tightening one
+  CI message. You touch a few files, but no enforcement semantics move.
+  Example: #150 (extract the policy presets into loadable JSON files).
+- **`complexity: medium`** — several files or components, a new CI gate, or a
+  change that needs fixtures plus reviewer judgment about edge cases. Example:
+  #68 (WASM size budget) and #128 (version-aware fixture reason vocabulary).
+- **`complexity: large`** — broad or security-sensitive work: changes to
+  `__check_auth`, the decision table, policy semantics, signature handling, or
+  cross-cutting release/reproducibility guarantees. It needs design review,
+  adversarial tests, and often SPEC updates. Examples: the reproducible-build
+  ratchet (#67) and policy-window semantics changes such as #289.
+
+Rules of thumb for self-selection:
+
+- If you cannot yet explain how the change will be verified, treat it as one
+  level harder than it first looks.
+- If the issue touches fund movement, authorization, or policy validation, the
+  risk level — not the diff size — decides the label.
+- If you are unsure between two labels, pick the smaller one and ask in the
+  issue; maintainers can widen the scope, but an underestimated `large` task is
+  hard to finish well.
 
 ## Dependency drift check
 

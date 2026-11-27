@@ -1,11 +1,12 @@
-//! Keeps the policy presets in `docs/policy-templates.md` installable.
+//! Keeps the policy presets in `examples/policies/` installable.
 //!
-//! The doc is the single source of truth: every fenced `json` block is
-//! extracted, deserialized into a `PolicyConfig`, installed via `set_policy`
-//! against the real contract in the Soroban test environment (which runs the
-//! production `validate_config` path, SPEC §8), and read back to assert a
-//! faithful round-trip. A preset that stops deserializing, stops validating,
-//! or stops round-tripping fails `cargo test` — doc rot cannot ship silently.
+//! The directory is the single source of truth: every `*.json` file there is
+//! deserialized into a `PolicyConfig`, installed via `set_policy` against the
+//! real contract in the Soroban test environment (which runs the production
+//! `validate_config` path, SPEC §8), and read back to assert a faithful
+//! round-trip. Discovery is dynamic, so adding a preset file without a test
+//! cannot silently pass. A preset that stops deserializing, stops validating,
+//! or stops round-tripping fails `cargo test` — preset rot cannot ship silently.
 
 use crate::types::{PolicyConfig, ProtocolRule, RecipientCap};
 use crate::{PolicyEngine, PolicyEngineClient};
@@ -17,6 +18,7 @@ use std::fs;
 use std::string::String;
 
 const DOC: &str = "docs/policy-templates.md";
+const PRESET_DIR: &str = "examples/policies";
 const MIN_PRESETS: usize = 4;
 const PRESET_NAMES: [&str; 4] = [
     "Day-trader agent",
@@ -55,31 +57,42 @@ fn doc_text() -> String {
     fs::read_to_string(&path).unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()))
 }
 
-/// Every fenced `json` block in the doc, in order of appearance.
-fn json_blocks(doc: &str) -> std::vec::Vec<String> {
-    let mut blocks = std::vec::Vec::new();
-    let mut current: Option<String> = None;
-    for line in doc.lines() {
-        let trimmed = line.trim();
-        match current.as_mut() {
-            None => {
-                if trimmed == "```json" {
-                    current = Some(String::new());
-                }
-            }
-            Some(block) => {
-                if trimmed == "```" {
-                    blocks.push(std::mem::take(block));
-                    current = None;
-                } else {
-                    block.push_str(line);
-                    block.push('\n');
-                }
-            }
-        }
-    }
-    assert!(current.is_none(), "unclosed ```json block in {DOC}");
-    blocks
+/// Every `*.json` preset file in `examples/policies/`, sorted by filename.
+///
+/// The directory is discovered at test time on purpose: adding a preset file
+/// without validation is impossible, because the test finds it automatically.
+fn preset_files() -> std::vec::Vec<(String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(PRESET_DIR);
+    let mut paths: std::vec::Vec<_> = fs::read_dir(&dir)
+        .unwrap_or_else(|err| panic!("cannot read {}: {err}", dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|err| panic!("cannot read an entry in {}: {err}", dir.display()))
+                .path()
+        })
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    paths.sort();
+
+    assert!(
+        paths.len() >= MIN_PRESETS,
+        "{PRESET_DIR} contains {} preset file(s); at least {MIN_PRESETS} required",
+        paths.len()
+    );
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .unwrap_or_else(|| panic!("preset path has no filename: {}", path.display()))
+                .to_string_lossy()
+                .into_owned();
+            let raw = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+            (name, raw)
+        })
+        .collect()
 }
 
 fn required_field<'a>(block: &'a JsonValue, field: &str, index: usize) -> &'a JsonValue {
@@ -231,24 +244,19 @@ fn doc_documents_at_least_four_named_presets() {
             "{DOC} no longer documents the `{name}` preset — update the doc or this test"
         );
     }
+    assert!(
+        doc.contains("examples/policies"),
+        "{DOC} must link to the preset files under {PRESET_DIR}"
+    );
 }
 
 #[test]
-fn every_documented_preset_installs_and_round_trips() {
-    let doc = doc_text();
-    let blocks = json_blocks(&doc);
-    assert!(
-        blocks.len() >= MIN_PRESETS,
-        "{DOC} documents {} ```json preset(s); at least {MIN_PRESETS} required",
-        blocks.len()
-    );
-
+fn every_preset_file_installs_and_round_trips() {
     let PresetEnv { env, guard } = preset_env();
-    for (index, block) in blocks.iter().enumerate() {
-        let number = index + 1;
-        let value: JsonValue = serde_json::from_str(block)
-            .unwrap_or_else(|err| panic!("preset #{number} is not valid JSON: {err}"));
-        let expected = policy_config_from_json(&env, &value, number);
+    for (index, (name, raw)) in preset_files().into_iter().enumerate() {
+        let value: JsonValue = serde_json::from_str(&raw)
+            .unwrap_or_else(|err| panic!("{PRESET_DIR}/{name} is not valid JSON: {err}"));
+        let expected = policy_config_from_json(&env, &value, index + 1);
 
         // Installing runs the production validate_config path (SPEC §8): an
         // invalid preset panics the contract with InvalidConfig here.
@@ -257,10 +265,10 @@ fn every_documented_preset_installs_and_round_trips() {
 
         let installed = client
             .policy()
-            .unwrap_or_else(|| panic!("preset #{number} did not install"));
+            .unwrap_or_else(|| panic!("{PRESET_DIR}/{name} did not install"));
         assert_eq!(
             installed, expected,
-            "preset #{number} round-trip mismatch: the doc's JSON does not deserialize \
+            "{PRESET_DIR}/{name} round-trip mismatch: the file does not deserialize \
              to the config the contract stores",
         );
     }

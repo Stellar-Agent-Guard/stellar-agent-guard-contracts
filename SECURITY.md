@@ -10,6 +10,51 @@ the loss of the funds held by a deployed instance of this contract.
 independently audited.** Testnet use only until then. This is a security
 contract; assume the worst about the current code.
 
+## Security-reporting decision tree
+
+Use this tree to pick the right path before you write a report. The rule of
+thumb: *if funds could move, or policy could be bypassed, go private first.*
+
+```
+What kind of finding is this?
+│
+├─► VULNERABILITY — could allow funds to move, bypass __check_auth,
+│   exceed a cap, walk an allowlist, or forge an admin action?
+│   └─► 🔒 PRIVATE route only
+│       1. GitHub private advisory (preferred):
+│          https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/security/advisories/new
+│       2. Email fallback: aigbagbobila@users.noreply.github.com
+│       ⚠ Do NOT post to Telegram, Discord, public issues, or PRs.
+│
+├─► BUG / HARDENING — wrong output, panic, misleading error, or a
+│   defence-in-depth suggestion that is NOT an active exploit path?
+│   └─► 🌐 Public GitHub issue
+│       https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/new
+│       Include: affected version/commit, reproduction steps, and
+│       the reason symbol from the guard's diagnostic event if relevant.
+│
+├─► QUESTION — how to use the contract, policy tuning, or deployment help?
+│   └─► 💬 Community channels (non-sensitive only)
+│       Telegram: https://t.me/+EzSusj-2vVhhNmI0
+│       Discord:  https://discord.gg/Z766vsgjg
+│       Note: neither channel is verified as maintainer-owned; do not
+│       paste vulnerability details there.
+│
+└─► DEPLOYED INSTANCE behaving wrong (policy misconfigured, not a code bug)?
+    └─► 📧 That instance's operator — out of scope for this repository.
+        See SECURITY.md § Scope for the distinction.
+```
+
+**Borderline cases:** when in doubt, use the private advisory — a false positive
+costs one acknowledgement, while a public disclosure of a real vulnerability
+cannot be undone. The maintainer will redirect a report that turns out to be
+out-of-scope rather than leaving you without an answer.
+
+**Sibling repositories** (`stellar-agent-guard-sdk`,
+`stellar-agent-guard-dashboard`) have their own `SECURITY.md` and disclosure
+process — route reports there, not here. See
+[SUPPORT.md](SUPPORT.md) for the cross-repo routing table.
+
 ## Reporting a Vulnerability
 
 **Primary — GitHub private vulnerability reporting.** Open a draft security
@@ -315,6 +360,14 @@ Before deploying a released artifact:
   Adding a protocol is an explicit policy act.
 - Contract creation by the account is denied in v1.
 - Read functions are public (no DoS on reads); policy writes are admin-only.
+- `check`, `check_detailed`, and `check_batch` are deliberately permissionless.
+  They disclose the installed policy and live headroom already available through
+  `policy()`/`status()`, plus a verdict for a caller-supplied hypothetical transfer —
+  no secret or private state is involved. They are read-only: the only on-ledger effect
+  of a submitted read is the §9.5 TTL refresh, which RPC simulation does not persist.
+  The full disclosure analysis, alternatives (auth gate, shared secret, allowlist,
+  on-chain rate limiting), and the read-only proof are in SPEC §7.5 (issue #343);
+  callers needing to throttle probes should do so at their RPC/gateway layer.
 - This contract is **unaudited**. An audit is a prerequisite for mainnet use;
   track it via the issue backlog.
 

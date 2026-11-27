@@ -36,6 +36,8 @@ pub fn reset_window(env: Env)
 pub fn increase_window_cap(env: Env, new_cap: i128)
 pub fn pause(env: Env)
 pub fn resume(env: Env)
+pub fn add_recipient(env: Env, recipient: Address)
+pub fn remove_recipient(env: Env, recipient: Address)
 pub fn revoke_policy(env: Env)
 pub fn rotate_agent_key(env: Env, new_pubkey: BytesN<32>)
 pub fn propose_admin_rotation(env: Env, new_admin: Address)
@@ -43,12 +45,14 @@ pub fn confirm_admin_rotation(env: Env)
 pub fn cancel_admin_rotation(env: Env)
 pub fn heartbeat(env: Env)
 pub fn freeze(env: Env)
+pub fn self_lock(env: Env)
 pub fn refresh_deadman(env: Env)
 pub fn unfreeze(env: Env)
 pub fn policy(env: Env) -> Option<PolicyConfig>
 pub fn policy_version(env: Env) -> u32
 pub fn policy_hash(env: Env) -> BytesN<32>
 pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+pub fn dry_run_set_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
 pub fn dms_health(env: Env) -> crate::types::DmsHealthStatus
 pub fn status(env: Env) -> Status
 pub fn status_at(env: Env, as_of: u64) -> Status
@@ -81,6 +85,8 @@ enum PolicyRuleId
   AssetCapListTooLong
   AssetCapUnknownAsset
   DuplicateAssetCap
+  AssetProtocolOverlap
+  CapMagnitudeExceedsBound
 enum ValidationOutcome
   Valid
   Invalid(PolicyRuleId)

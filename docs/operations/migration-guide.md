@@ -217,6 +217,8 @@ Notes on the exit policy:
 
 - [Deployment runbook](deployment-runbook.md) — the ordered deploy sequence.
 - [Incident playbook — DMS-frozen, admin key unavailable](incident-playbook-admin-key-lost.md).
+- [Upgrade compatibility matrix](../upgrade-compatibility.md) — the SDK, Rust, WASM, schema,
+  and storage versions to keep consistent when a migration also bumps a dependency.
 - [`docs/key-rotation.md`](../key-rotation.md) — rotating the agent key, including after a
   suspected leak.
 - [`examples/agent-loop.md`](../../examples/agent-loop.md) — the steady-state loop for the
