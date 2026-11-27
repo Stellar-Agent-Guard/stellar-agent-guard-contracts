@@ -407,10 +407,11 @@ fn parse_call_inner(
             let fn_transfer_from = Symbol::new(env, "transfer_from");
 
             if is_asset && (fn_name == &fn_transfer || fn_name == &fn_transfer_from) {
-                let (to_idx, amt_idx) = if fn_name == &fn_transfer {
-                    (1u32, 2u32)
-                } else {
+                let is_transfer_from = fn_name == &fn_transfer_from;
+                let (to_idx, amt_idx) = if is_transfer_from {
                     (2u32, 3u32)
+                } else {
+                    (1u32, 2u32)
                 };
                 // Exact arity required: transfer = 3 args, transfer_from = 4 args.
                 // Extra trailing args or short arg lists are rejected -- we do not
@@ -423,6 +424,31 @@ fn parse_call_inner(
                         fname: fn_name.clone(),
                     };
                 }
+                // `transfer_from(from, spender, to, amount)` — read the spender
+                // slot too (issue #293). The policy does not restrict it (SPEC
+                // §6.2), but it is part of the call's shape: a spender value
+                // that is not an address makes the call malformed, which takes
+                // the same default-deny path as a short or oversized arg list
+                // rather than being silently unread.
+                let spender = if is_transfer_from {
+                    let Some(spender_val) = args.get(1) else {
+                        return ParsedCall::Unknown {
+                            contract: contract.clone(),
+                            fname: fn_name.clone(),
+                        };
+                    };
+                    match Address::try_from_val(env, &spender_val) {
+                        Ok(spender) => Some(spender),
+                        Err(_) => {
+                            return ParsedCall::Unknown {
+                                contract: contract.clone(),
+                                fname: fn_name.clone(),
+                            };
+                        }
+                    }
+                } else {
+                    None
+                };
                 let to_val = args.get(to_idx);
                 let amt_val = args.get(amt_idx);
                 if let (Some(to_val), Some(amt_val)) = (to_val, amt_val) {
@@ -433,6 +459,7 @@ fn parse_call_inner(
                             asset: contract.clone(),
                             to,
                             amount,
+                            spender,
                         };
                     }
                 }
@@ -968,7 +995,8 @@ mod tests {
     }
 
     /// `transfer_from` context per SPEC §6.2: `(from, spender, to, amount)`.
-    /// The `spender` occupies args[1] and must never be read as the recipient;
+    /// The `spender` occupies args[1] — it is parsed into
+    /// `ParsedCall::AssetTransfer::spender` but never read as the recipient;
     /// the recipient is args[2] and the amount is args[3].
     fn transfer_from_ctx(
         env: &Env,
@@ -1194,6 +1222,103 @@ mod tests {
             d.first().unwrap(),
             Decision::Blocked(Error::PerTxCapExceeded)
         ));
+    }
+
+    /// Issue #293: the spender at args[1] is parsed, not left as an unread
+    /// slot. The value recorded is the one at that position, and a plain
+    /// `transfer` carries no spender.
+    #[test]
+    fn transfer_from_carries_the_spender_from_args_1() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.allow_any_recipient = true;
+
+        let parsed = parse_call(&env, &sa, &transfer_from_ctx(&env, 1, 9, 7, 2, 5), &p);
+        assert!(
+            matches!(&parsed, ParsedCall::AssetTransfer { spender: Some(s), .. } if s == &addr(&env, 7)),
+            "the recorded spender must be args[1] (addr(7)): {parsed:?}"
+        );
+
+        let plain = parse_call(&env, &sa, &transfer_ctx(&env, 1, 2, 5), &p);
+        assert!(
+            matches!(plain, ParsedCall::AssetTransfer { spender: None, .. }),
+            "a plain transfer has no spender slot: {plain:?}"
+        );
+    }
+
+    /// The documented outcome for an unexpected spender (SPEC §6.2): explicitly
+    /// permitted. The policy governs the destination and amount of the move;
+    /// the guarded account's signature is what authorizes the context, so a
+    /// spender outside every policy list is not a denial.
+    #[test]
+    fn transfer_from_with_unexpected_spender_is_permitted_by_the_documented_semantic() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        // Recipient allowlist is [addr(2)]; the spender addr(8) is in no list.
+        let mut p = base_policy(&env);
+        p.window_cap = 100;
+        let mut l = Ledger::empty(&env);
+
+        let ctx = vec![&env, transfer_from_ctx(&env, 1, 9, 8, 2, 5)];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, ctx);
+        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_eq!(l.total, 5, "the documented move is still accounted");
+    }
+
+    /// A malformed `transfer_from` — too few arguments, or a spender slot that
+    /// is not an address — still takes the existing malformed-args default-deny
+    /// path. The spender read never lets the engine partially understand a
+    /// call.
+    #[test]
+    fn transfer_from_with_malformed_arguments_stays_default_deny() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+
+        // Three args: the amount (args[3]) is missing.
+        let mut short: Vec<Val> = Vec::new(&env);
+        short.push_back(addr(&env, 9).into_val(&env));
+        short.push_back(addr(&env, 7).into_val(&env));
+        short.push_back(addr(&env, 2).into_val(&env));
+        let short_ctx = Context::Contract(ContractContext {
+            contract: addr(&env, 1),
+            fn_name: Symbol::new(&env, "transfer_from"),
+            args: short,
+        });
+
+        // Four args, but args[1] (the spender) is an integer, not an address.
+        let mut wrong_spender: Vec<Val> = Vec::new(&env);
+        wrong_spender.push_back(addr(&env, 9).into_val(&env));
+        wrong_spender.push_back(5i128.into_val(&env));
+        wrong_spender.push_back(addr(&env, 2).into_val(&env));
+        wrong_spender.push_back(5i128.into_val(&env));
+        let wrong_spender_ctx = Context::Contract(ContractContext {
+            contract: addr(&env, 1),
+            fn_name: Symbol::new(&env, "transfer_from"),
+            args: wrong_spender,
+        });
+
+        for ctx in [short_ctx, wrong_spender_ctx] {
+            assert!(
+                matches!(parse_call(&env, &sa, &ctx, &p), ParsedCall::Unknown { .. }),
+                "malformed transfer_from args must parse as Unknown"
+            );
+            let mut l = Ledger::empty(&env);
+            let d = decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut l,
+                1_000,
+                vec![&env, ctx],
+            );
+            assert!(matches!(
+                d.first().unwrap(),
+                Decision::Blocked(Error::UnknownContract)
+            ));
+        }
     }
 
     #[test]

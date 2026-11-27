@@ -1145,8 +1145,24 @@ no funds, which is why it is safe to admit inside the policy engine at all.
 `contract ∈ policy.assets` **and** `fn_name ∈ { "transfer", "transfer_from" }`. These are the
 calls whose semantics and arguments are known:
 
-- `transfer` args: `(from, to, amount)` — the account is `from`; recipient = args[1], amount = args[2].
-- `transfer_from` args: `(from, spender, to, amount)` — the account is `from`; recipient = args[2], amount = args[3].
+| Function | Argument list | Recipient | Amount | Spender |
+|---|---|---|---|---|
+| `transfer` | `(from, to, amount)` | args[1] | args[2] | — |
+| `transfer_from` | `(from, spender, to, amount)` | args[2] | args[3] | args[1] |
+
+In both shapes the account is `from`.
+
+**The spender slot is parsed, not restricted (issue #293).** For `transfer_from`,
+`parse_call` decodes `args[1]` and carries it as `ParsedCall::AssetTransfer::spender`
+(`None` for a plain `transfer`). The policy does not constrain the spender, and the documented
+outcome for an unexpected spender is therefore **explicitly permitted**: the authorization this
+account signs is the move described by `to` and `amount` — those are what the recipient allowlist,
+the denylist, and the caps are about — while the spender's own allowance is the authority that lets
+it execute the transfer. A policy that tried to restrict the spender would be asserting something
+about a different principal's allowance, which this contract does not hold or observe. What the
+parse buys is that the slot is no longer silently unread: a `transfer_from` whose `args[1]` does not
+decode as an `Address` is malformed and takes the default-deny path below, exactly like a short or
+oversized argument list.
 
 **Asset identity is load-bearing for the per-tx cap.** The classified asset is what resolves the
 effective per-tx cap in rule 3 below (a matching `asset_caps` entry, otherwise the global
