@@ -9,13 +9,52 @@ on:
       - "Cargo.toml"
 
 jobs:
+  # Bounded smoke run for `check_auth_full_path`.
+  # Companion target `policy_config_deserialization` runs in `.github/workflows/ci.yml`
+  # and uploads crash reproducers to `fuzz/artifacts/policy_config_deserialization/`.
+  # See `fuzz/README.md` for the full corpus triage, minimization, and retention policy.
   check-auth-full-path:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+
       - uses: dtolnay/rust-toolchain@nightly
+
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+
       - name: Run bounded check-auth smoke test
         run: cargo +nightly fuzz run check_auth_full_path --fuzz-dir fuzz -- -max_total_time=60
+
+      # Artifact path: fuzz/artifacts/check_auth_full_path/
+      # Reproduce locally:
+      #   cargo +nightly fuzz run check_auth_full_path --fuzz-dir fuzz fuzz/artifacts/check_auth_full_path/<artifact>
+      # Minimize before triaging:
+      #   cargo +nightly fuzz tmin check_auth_full_path --fuzz-dir fuzz fuzz/artifacts/check_auth_full_path/<artifact>
+      - name: Report fuzz artifact path and reproduction command
+        if: failure()
+        run: |
+          echo "Crash/timeout artifacts (if produced) are saved under: fuzz/artifacts/check_auth_full_path/"
+          echo "Reproduce locally:"
+          echo "  cargo +nightly fuzz run check_auth_full_path --fuzz-dir fuzz fuzz/artifacts/check_auth_full_path/<artifact>"
+          echo "Minimize before promoting to a regression test:"
+          echo "  cargo +nightly fuzz tmin check_auth_full_path --fuzz-dir fuzz fuzz/artifacts/check_auth_full_path/<artifact>"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+## Fuzz smoke failure (`check_auth_full_path`)
+
+- Artifact path: `fuzz/artifacts/check_auth_full_path/` (uploaded as `check-auth-fuzz-artifacts`)
+- Reproduce: `cargo +nightly fuzz run check_auth_full_path --fuzz-dir fuzz fuzz/artifacts/check_auth_full_path/<artifact>`
+- Minimize: `cargo +nightly fuzz tmin check_auth_full_path --fuzz-dir fuzz fuzz/artifacts/check_auth_full_path/<artifact>`
+- Policy: see `fuzz/README.md` for triage, fixture promotion, and corpus retention rules.
+EOF
+          fi
+
+      - name: Preserve fuzz crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: check-auth-fuzz-artifacts
+          path: fuzz/artifacts/check_auth_full_path/
+          if-no-files-found: ignore

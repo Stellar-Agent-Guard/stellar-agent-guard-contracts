@@ -1,5 +1,13 @@
 # WASM size budget for the deployable contract artifact (issue #68).
 #
+# `scripts/check-wasm-size.sh` checks total artifact size against this budget
+# and prints a deterministic per-section breakdown (header, standard WASM
+# sections such as `code` / `data` / `type` / `export`, and named `custom`
+# sections such as `contractspecv0` / `contractenvmetav0`) to both stdout and
+# `GITHUB_STEP_SUMMARY` (issue #610). See
+# `docs/verification.md#wasm-size-budget--investigating-growth` for how to
+# diagnose growth per section.
+#
 # Artifact measured when this budget was committed:
 #   target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
 # built with the repository's real release command:
@@ -11,7 +19,8 @@
 #
 # To increase the budget deliberately:
 #   1. Rebuild the WASM with `cargo build --release --target wasm32v1-none`.
-#   2. Measure the new artifact (`wc -c < target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm`).
+#   2. Inspect the section breakdown (`./scripts/check-wasm-size.sh`) to confirm
+#      which section grew and why.
 #   3. Update `bytes` below to the new size plus the intended headroom.
 #   4. Explain the size increase and its rationale in the PR.
 # Never raise this number just to make CI green.
