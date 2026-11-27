@@ -42,7 +42,7 @@ pub use types::NO_POLICY_DIGEST;
 pub use types::POLICY_FORMAT_VERSION;
 pub use types::{
     AssetCap, BatchCheckResult, BatchTransfer, CheckDetail, Error, PolicyConfig, ProtocolRule,
-    RecipientCap, RecipientWindowState, ValidationOutcome,
+    RecipientCap, RecipientWindowState, ValidationOutcome, WindowConsumption,
 };
 use types::{
     CheckResult, DataKey, PolicyRuleId, Status, WindowState, MAX_ASSET_CAP_ENTRIES,
@@ -1467,6 +1467,33 @@ mod policy_engine_type {
         #[allow(clippy::must_use_candidate)] // public read surface
         pub fn status_at(env: Env, as_of: u64) -> Status {
             status_snapshot(&env, as_of)
+        }
+
+        /// Rolling-window consumption (`window_consumption`): live global
+        /// window total and entry count, without a `check` simulation
+        /// (issue #348).
+        ///
+        /// No auth, event-free. The ledger is loaded and pruned at the current
+        /// ledger timestamp, so expired entries never count. With no policy
+        /// installed it returns `{ total: 0, entries: 0 }` and never traps.
+        ///
+        /// Like every persistent read, a submitted call may refresh TTLs and
+        /// incur rent (SPEC §9.5); simulation does not persist them.
+        #[allow(clippy::must_use_candidate)] // public read surface
+        pub fn window_consumption(env: Env) -> WindowConsumption {
+            let Some(policy) = persist_get::<PolicyConfig>(&env, &DataKey::Policy) else {
+                return WindowConsumption {
+                    total: 0,
+                    entries: 0,
+                };
+            };
+            let now = env.ledger().timestamp();
+            let (mut ledger, _) = load_window(&env);
+            ledger.prune(now, policy.window_secs);
+            WindowConsumption {
+                total: ledger.total,
+                entries: ledger.len(),
+            }
         }
 
         /// Preflight / simulate a transfer (`check`): permissionless pre-flight

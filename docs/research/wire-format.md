@@ -121,6 +121,27 @@ Example projection for `last_heartbeat = 1000` and `dms_grace_secs = 60`:
 
 ---
 
+## `window_consumption()` → `WindowConsumption`
+
+Live rolling-window consumption without a `check()` simulation (issue #348).
+No auth.
+
+```json
+{
+  "total": "80",
+  "entries": 1
+}
+```
+
+- `total` — the pruned global rolling total (`i128`, serialized as a string).
+- `entries` — the number of live global spend entries. Same-second spends
+  coalesce, so this is an entry count, not a transaction count.
+
+With no policy installed the read returns
+`{"total":"0","entries":0}`.
+
+---
+
 ## `check()` → `CheckResult`
 
 Pre-flight simulation of an SAC transfer decision. Returns an enum with two variants.

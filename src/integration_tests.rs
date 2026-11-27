@@ -2129,6 +2129,72 @@ fn detailed_check_reports_none_for_disabled_caps() {
     assert_eq!(detail.effective_window_cap, None);
 }
 
+/// Issue #348: the consumption read is defined (zeroed, never trapping) with
+/// no policy installed — the default-deny state has no window to report.
+#[test]
+fn window_consumption_is_empty_without_a_policy() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let wc = client.window_consumption();
+    assert_eq!(wc.total, 0);
+    assert_eq!(wc.entries, 0);
+}
+
+/// Issue #348: the read reports live consumption after zero, partial and full
+/// use of the rolling window, and prunes expired entries on a rollover.
+#[test]
+fn window_consumption_tracks_spend_and_rolls_over() {
+    let mut h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.per_tx_cap = 100;
+    policy.window_cap = 100;
+    policy.window_secs = 60;
+    h.install_policy(&policy);
+    let recv = h.recv.clone();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    // Zero consumption: policy installed, nothing spent.
+    h.set_time(1_000);
+    let wc = client.window_consumption();
+    assert_eq!((wc.total, wc.entries), (0, 0));
+
+    // Partial consumption: one entry, expiring at 1000 + 60.
+    h.transfer(&recv, 60);
+    let wc = client.window_consumption();
+    assert_eq!(wc.total, 60);
+    assert_eq!(wc.entries, 1);
+
+    // Full consumption: a second entry fills the cap.
+    h.set_time(1_010);
+    h.transfer(&recv, 40);
+    let wc = client.window_consumption();
+    assert_eq!(wc.total, 100);
+    assert_eq!(wc.entries, 2);
+
+    // Rollover: at 1060 the first entry is exactly expired, at 1070 the second
+    // is too — the read prunes rather than replaying the cached total.
+    h.set_time(1_060);
+    let wc = client.window_consumption();
+    assert_eq!((wc.total, wc.entries), (40, 1));
+
+    h.set_time(1_070);
+    let wc = client.window_consumption();
+    assert_eq!((wc.total, wc.entries), (0, 0));
+}
+
+/// Issue #348: with the rolling window disabled, the read remains
+/// well-defined and reports zero consumption.
+#[test]
+fn window_consumption_is_empty_when_window_disabled() {
+    let h = Harness::new();
+    let mut policy = h.base_policy();
+    policy.window_secs = 0;
+    h.install_policy(&policy);
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let wc = client.window_consumption();
+    assert_eq!((wc.total, wc.entries), (0, 0));
+}
+
 #[test]
 fn blocked_detailed_check_reports_headroom_without_writing_window() {
     let mut h = Harness::new();
