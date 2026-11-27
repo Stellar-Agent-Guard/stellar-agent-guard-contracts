@@ -289,14 +289,12 @@ code 5 and the glossary documents it — but no test ever passes a zero or negat
 
 ### Not gaps (documented so they are not re-reported as such)
 
-- **`protocol_not_allowed` (code 24) has no test and cannot have one.** `parse_call` only
-  emits `Protocol` when the contract is already in `cfg.protocols`, so the `!found` branch
-  inside `decide()`'s protocol arm is unreachable defensive code. SPEC §6.3 and SPEC §4
-  rule 7 both list `ProtocolNotAllowed` as an outcome, but on the current parse-then-decide
-  structure it cannot fire. See [finding F-2](#f-2-asset_not_allowed-and-protocol_not_allowed-are-unreachable-in-decide).
-- **`asset_not_allowed` (code 20) has no test and cannot have one either.** An unlisted SAC
-  is parsed as `Unknown`, not `AssetTransfer`, so it is blocked with `unknown_contract`
-  (pinned by `E-5`), never `asset_not_allowed`. SPEC §6.2 states the latter. See
+- **`protocol_not_allowed` (code 24) and `asset_not_allowed` (code 20) are reachable since
+  issue #291.** A protocol rule marked `paused` is denied with `protocol_not_allowed`
+  (`paused_protocol_rule_is_protocol_not_allowed`), and a SAC `transfer`/`transfer_from` on a
+  contract that is in neither `assets` nor `protocols` is parsed as `UnlistedAsset` and denied
+  with `asset_not_allowed` (`unlisted_sac_transfer_is_asset_not_allowed`, which replaces the
+  old `E-5` behaviour). See the resolution note in
   [finding F-2](#f-2-asset_not_allowed-and-protocol_not_allowed-are-unreachable-in-decide).
 - **`benches/denial_path_gas.rs` is not coverage.** It exercises all seven gates including
   the untested `Paused` and `OutsideActiveWindow` paths, but `measure_decide` only prints
@@ -316,7 +314,7 @@ Ed25519 signatures through the Soroban host auth flow). `W` = `src/window.rs` (l
 | `E-2` | `allowed_transfer_admits_to_window` | [`src/engine.rs:363`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L363) | unit |
 | `E-3` | `per_tx_cap_enforced` | [`src/engine.rs:376`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L376) | unit |
 | `E-4` | `recipient_allowlist_enforced_and_escaped` | [`src/engine.rs:389`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L389) | unit |
-| `E-5` | `unlisted_asset_is_unknown_contract` | [`src/engine.rs:405`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L405) | unit |
+| `E-5` | `unlisted_sac_transfer_is_asset_not_allowed` (was `unlisted_asset_is_unknown_contract` before #291) | [`src/engine.rs:405`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L405) | unit |
 | `E-6` | `window_cap_blocks_across_transactions_and_rolls_over` | [`src/engine.rs:416`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L416) | unit |
 | `E-7` | `window_checks_all_contexts_before_commit` | [`src/engine.rs:455`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L455) | unit |
 | `E-8` | `protocol_and_function_allowlists` | [`src/engine.rs:472`](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/src/engine.rs#L472) | unit |
@@ -386,7 +384,7 @@ The combination is now pinned end-to-end by
 policy-less account and asserts the block reason is `no_policy`.
 
 <a id="f-2-asset_not_allowed-and-protocol_not_allowed-are-unreachable-in-decide"></a>
-### F-2 — `asset_not_allowed` and `protocol_not_allowed` are unreachable in `decide()`
+### F-2 — `asset_not_allowed` and `protocol_not_allowed` are unreachable in `decide()` (RESOLVED in #291)
 
 `parse_call` maps an unlisted SAC to `ParsedCall::Unknown` and a protocol call to
 `ParsedCall::Protocol` *only after* confirming membership in `cfg.protocols`. So
@@ -399,6 +397,13 @@ Consumers (the SDK, the dashboard) mapping reason 20 and 24 will never see them 
 This is the same class of drift already tracked for `CreateContractNotAllowed` in
 `docs/reason-glossary.md` (issue #132) and the reason
 `scripts/check-spec-coverage.sh` reports `CreateContractNotAllowed` as an orphan variant.
+
+**Resolution (issue #291).** The engine now emits both codes. `parse_call` classifies a
+SAC-ABI call on a contract that is in neither `assets` nor `protocols` as `UnlistedAsset`, and
+`decide` blocks it with `AssetNotAllowed` — the outcome SPEC §6.2 already promised. A protocol
+rule marked `paused` is blocked with `ProtocolNotAllowed`. The only remaining unreachable arm
+is the defensive "rule index does not resolve" denial in the protocol arm, which is documented
+as such where it lives.
 
 <a id="f-3-rule-7-omits-createcontractnotallowed-from-its-reason-list"></a>
 ### F-3 — SPEC §4 rule 7's reason list omits `CreateContractNotAllowed`

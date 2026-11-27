@@ -56,6 +56,7 @@ Each `Context` in `auth_contexts` is classified independently by `parse_call`:
 | `AssetTransfer` | Fully enforceable (recipient + amount parsed from args) |
 | `AssetOther` (e.g., `mint`, `burn`) | Blocked (`FunctionNotAllowed`) |
 | `Protocol` | Contract + function allowlist check |
+| `UnlistedAsset` (SAC `transfer`/`transfer_from` on a contract in neither `assets` nor `protocols`) | Blocked (`AssetNotAllowed`, issue #291) |
 | `Unknown` | Blocked (`UnknownContract`) — default-deny |
 
 ### 5. Per-kind enforcement

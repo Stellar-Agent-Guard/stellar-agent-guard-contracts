@@ -172,8 +172,10 @@
       "reasons": [
         {
           "error": "AssetNotAllowed",
-          "tests": [],
-          "note": "A paused asset cap short-circuits the per-asset decision before allowlist or cap checks, so the targeted pause is reported as an asset denial rather than a generic protocol or recipient outcome."
+          "tests": [
+            "unlisted_sac_transfer_is_asset_not_allowed"
+          ],
+          "note": "Two paths emit it: a SAC transfer on a contract missing from `assets` (an unlisted asset, issue #291), and a paused `asset_caps` entry, which short-circuits the per-asset decision before allowlist or cap checks so the targeted pause is reported as an asset denial rather than a generic protocol or recipient outcome."
         },
         {
           "error": "InvalidAmount",
@@ -225,7 +227,7 @@
         {
           "error": "UnknownContract",
           "tests": [
-            "unlisted_asset_is_unknown_contract",
+            "contract_in_neither_list_is_unknown_contract",
             "unlisted_sac_abuse_functions_stay_unknown_contract",
             "protocol_unknown_contract_denied",
             "arity_guard_transfer_4_args_is_denied"
@@ -244,11 +246,13 @@
         },
         {
           "error": "ProtocolNotAllowed",
-          "tests": [],
-          "note": "Unreachable defensive arm: parse_call only yields ParsedCall::Protocol after confirming membership in cfg.protocols, so `!found` inside decide()'s protocol arm cannot fire. SPEC §6.3 lists it as an outcome — see docs/scenario-matrix.md finding F-2."
+          "tests": [
+            "paused_protocol_rule_is_protocol_not_allowed"
+          ],
+          "note": "A protocol rule marked `paused` is denied with ProtocolNotAllowed (issue #291). The `!found` arm inside decide()'s protocol branch remains unreachable defensive code, since parse_call only yields ParsedCall::Protocol after confirming membership in cfg.protocols."
         }
       ],
-      "note": "The `result` cell is SPEC's own wording and is deliberately left untouched: it lists `Reason::AssetNotAllowed`, which the v1 engine never emits (an unlisted SAC is parsed as `Unknown` and denied with `unknown_contract`), and omits `CreateContractNotAllowed`, `SelfFunctionNotAllowed`, `RecipientBlocked`, `InvalidAmount`, and `ProtocolCallRateExceeded`, which the engine does emit. Both directions are audit findings F-2 and F-3 in docs/scenario-matrix.md; correcting the SPEC cell is a semantics call for a maintainer, so this file records the engine truth in `reasons` and leaves the prose alone."
+      "note": "Since issue #291 every reason the `result` cell lists is reachable: an unlisted SAC transfer is parsed as `UnlistedAsset` and denied `AssetNotAllowed` (SPEC §6.2), and a paused protocol rule is `ProtocolNotAllowed`. The cell still omits `CreateContractNotAllowed`, `SelfFunctionNotAllowed`, `RecipientBlocked`, `InvalidAmount`, and `ProtocolCallRateExceeded`, which the engine also emits — audit finding F-3 in docs/scenario-matrix.md. `reasons` below records the engine truth."
     }
   ]
 }

@@ -454,6 +454,27 @@ fn parse_call_inner(
                     fname: fn_name.clone(),
                 };
             }
+            // The standard SAC transfer ABI on a contract that is neither an
+            // allowlisted asset nor an allowlisted protocol: that is an
+            // *unlisted asset*, not an opaque unknown contract (issue #291).
+            // SPEC §6.2 promises `AssetNotAllowed` for exactly this case, and
+            // this arm is what makes the variant reachable from the auth path.
+            // Protocol membership is checked first, so an allowlisted protocol
+            // that happens to expose a `transfer`-shaped function is still
+            // governed by its protocol rule.
+            let sac_arity = if fn_name == &fn_transfer {
+                Some(3u32)
+            } else if fn_name == &fn_transfer_from {
+                Some(4u32)
+            } else {
+                None
+            };
+            if sac_arity == Some(args.len()) {
+                return ParsedCall::UnlistedAsset {
+                    contract: contract.clone(),
+                    fname: fn_name.clone(),
+                };
+            }
             ParsedCall::Unknown {
                 contract: contract.clone(),
                 fname: fn_name.clone(),
@@ -1517,18 +1538,86 @@ mod tests {
         assert!(matches!(d.first().unwrap(), Decision::Allowed));
     }
 
+    /// SPEC §6.2 / issue #291: a contract that is in neither `assets` nor
+    /// `protocols` but is invoked through the SAC transfer ABI is an *unlisted
+    /// asset* and is denied with the documented `AssetNotAllowed` (code 20) —
+    /// the variant is reachable from the auth path, not merely from a paused
+    /// asset cap.
     #[test]
-    fn unlisted_asset_is_unknown_contract() {
+    fn unlisted_sac_transfer_is_asset_not_allowed() {
         let env = Env::default();
         let sa = self_addr(&env);
-        let p = Some(base_policy(&env));
+        let p = base_policy(&env);
+        let ctx = transfer_ctx(&env, 7, 2, 5); // asset 7 is listed nowhere
+
+        assert!(
+            matches!(
+                parse_call(&env, &sa, &ctx, &p),
+                ParsedCall::UnlistedAsset { .. }
+            ),
+            "a SAC-ABI call on an unlisted contract must classify as UnlistedAsset"
+        );
+
         let mut l = Ledger::empty(&env);
-        let ctx = vec![&env, transfer_ctx(&env, 7, 2, 5)];
-        let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx.clone());
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, vec![&env, ctx]);
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::AssetNotAllowed)
+        ));
+        assert_eq!(Error::AssetNotAllowed as u32, 20);
+    }
+
+    /// The other side of the same boundary: a contract in neither list invoked
+    /// with a function that is not the SAC transfer ABI is a wholly unknown
+    /// contract, denied `UnknownContract` (code 26).
+    #[test]
+    fn contract_in_neither_list_is_unknown_contract() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let p = base_policy(&env);
+        // Contract 7 is listed nowhere; `swap` is not a SAC transfer function.
+        let ctx = proto_ctx(&env, 7, "swap");
+
+        assert!(matches!(
+            parse_call(&env, &sa, &ctx, &p),
+            ParsedCall::Unknown { .. }
+        ));
+        let mut l = Ledger::empty(&env);
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, vec![&env, ctx]);
         assert!(matches!(
             d.first().unwrap(),
             Decision::Blocked(Error::UnknownContract)
         ));
+        assert_eq!(Error::UnknownContract as u32, 26);
+    }
+
+    /// An allowlisted protocol that happens to expose a `transfer`-shaped
+    /// function stays governed by its protocol rule: protocol membership is
+    /// checked before the unlisted-asset fallback.
+    #[test]
+    fn protocol_transfer_shaped_fn_stays_a_protocol_call() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 4),
+                fns: None,
+                paused: false,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+        let d = decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, transfer_ctx(&env, 4, 2, 5)],
+        );
+        assert!(matches!(d.first().unwrap(), Decision::Allowed));
     }
 
     /// SPEC §6.2: a listed asset invoked with anything other than
@@ -1946,6 +2035,31 @@ mod tests {
             .unwrap(),
             Decision::Allowed
         ));
+    }
+
+    /// Issue #291: `ProtocolNotAllowed` (code 24) is a live outcome, not a dead
+    /// variant — a protocol rule marked `paused` is denied with it.
+    #[test]
+    fn paused_protocol_rule_is_protocol_not_allowed() {
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 6),
+                fns: None,
+                paused: true,
+            },
+        ];
+        let mut l = Ledger::empty(&env);
+        let ctx = vec![&env, proto_ctx(&env, 6, "swap")];
+        let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx);
+        assert!(matches!(
+            d.first().unwrap(),
+            Decision::Blocked(Error::ProtocolNotAllowed)
+        ));
+        assert_eq!(Error::ProtocolNotAllowed as u32, 24);
     }
 
     #[test]
