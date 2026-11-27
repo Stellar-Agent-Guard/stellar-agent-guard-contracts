@@ -344,3 +344,53 @@ Reproducible-build evidence (item 8 in
 the CI `wasm-reproducible` job. The SBOM (item 18) is generated and attached by
 the same `release.yml` workflow. Run this recipe as part of an audit engagement
 before relying on the published checksum alone.
+
+---
+
+## WASM size budget & investigating growth
+
+CI enforces a hard ceiling on the compiled release artifact
+(`target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm`) against the
+budget committed in [`scripts/wasm-size-budget.txt`](../scripts/wasm-size-budget.txt).
+On every CI run — pass or fail — [`scripts/check-wasm-size.sh`](../scripts/check-wasm-size.sh)
+parses the WASM binary directly and prints a deterministic per-section report
+sorted by byte size (with section name tie-breaking), both to stdout and to the
+GitHub Actions job summary:
+
+- `code` — compiled WebAssembly function bodies (typically the largest section)
+- `data` — static byte literals and initialized linear-memory segments
+- `custom (<name>)` — Soroban metadata and ABI spec sections such as
+  `contractspecv0`, `contractenvmetav0`, and `contractmetav0`
+- `type`, `import`, `function`, `table`, `memory`, `global`, `export`, `element`, `data_count`, and the 8-byte `header`
+
+### Run the section report locally
+
+```bash
+cargo build --release --target wasm32v1-none
+./scripts/check-wasm-size.sh
+```
+
+### How to investigate section growth
+
+1. **Compare against `main` first.** Run `./scripts/check-wasm-size.sh` on both
+   `main` and your branch to see which exact section absorbed the delta.
+2. **If `code` grew:**
+   - Look for duplicated generic or `soroban_sdk::Vec` helpers, newly monomorphized
+     paths, or large inline functions in `src/lib.rs`, `src/engine.rs`, and `src/window.rs`.
+   - Profile symbol-level bloat with `twiggy` (`twiggy top -n 30 <wasm>` /
+     `twiggy paths <wasm>`) or `cargo bloat --release --target wasm32v1-none --crates`
+     (note: `release` profile in `Cargo.toml` strips symbols unless inspecting an
+     unstripped/debug build with `twiggy`).
+3. **If `data` grew:**
+   - Check for new static byte tables, error/diagnostic strings, or unexpected panic
+     strings — run `bash scripts/check-wasm-panic-strings.sh` to catch new panic
+     sites or format strings pulled into `.rodata`.
+4. **If `custom (contractspecv0)` or other `custom` sections grew:**
+   - New `#[contractimpl]` entry points, `#[contracttype]` structs/enums, or verbose
+     docstrings on exported types/functions are serialized into Soroban's `contractspecv0`
+     custom section. Trim redundant spec prose or verify that every new exported item
+     belongs on the public ABI.
+5. **Updating the budget:** Only raise `bytes=` in
+   [`scripts/wasm-size-budget.txt`](../scripts/wasm-size-budget.txt) when the growth
+   is intentional and justified (following the steps in that file and explaining the
+   section-level delta in the PR body). Never bump the budget solely to turn CI green.
