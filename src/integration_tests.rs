@@ -2268,7 +2268,7 @@ fn per_tx_cap_violation_blocked_without_window_effect() {
     .expect_block(GuardError::WindowCapExceeded, &recv, 1); // ledger genuinely full
 }
 
-/// SPEC §6.2 rule 3: `per_tx_cap` comparison is exclusive-of-blocking (inclusive cap):
+/// SPEC §6.2 rule 4: `per_tx_cap` comparison is exclusive-of-blocking (inclusive cap):
 /// a transfer with `amount == per_tx_cap` is admitted; `amount == per_tx_cap + 1` is
 /// blocked with `per_tx_cap_exceeded`.
 #[test]
@@ -2671,6 +2671,103 @@ fn blocked_recipient_wins_over_escape_hatch() {
 }
 
 #[test]
+fn test_only_decision_trace_covers_allow_deny_and_malformed_paths() {
+    use crate::engine::{decide_traced, AccountState, AssetTransferGate, Decision, DecisionGate};
+    use crate::window::Ledger;
+
+    let h = Harness::new();
+    let recv = h.recv.clone();
+    let other = h.other.clone();
+    let policy = h.base_policy();
+    let transfer_context = |recipient: &Address| {
+        h.env.as_contract(&h.guard, || {
+            crate::policy_engine_type::transfer_context(&h.env, &h.asset, recipient, 5)
+        })
+    };
+    let state = AccountState {
+        admin_frozen: false,
+        last_heartbeat: 0,
+    };
+    let prefix = [
+        DecisionGate::AdminFrozen,
+        DecisionGate::PolicyPresent,
+        DecisionGate::DeadManSwitch,
+        DecisionGate::Paused,
+        DecisionGate::ActiveWindow,
+        DecisionGate::Classified,
+    ];
+
+    let mut ledger = Ledger::empty(&h.env);
+    let (verdicts, trace) = decide_traced(
+        &h.env,
+        &h.guard,
+        Some(&policy),
+        &state,
+        &mut ledger,
+        1_000,
+        soroban_sdk::vec![&h.env, transfer_context(&recv)],
+    );
+    assert_eq!(verdicts, std::vec![Decision::Allowed]);
+    let mut expected = prefix.to_vec();
+    expected.extend([
+        DecisionGate::Transfer(AssetTransferGate::AssetPaused),
+        DecisionGate::Transfer(AssetTransferGate::PositiveAmount),
+        DecisionGate::Transfer(AssetTransferGate::RecipientNotBlocked),
+        DecisionGate::Transfer(AssetTransferGate::RecipientAllowed),
+        DecisionGate::Transfer(AssetTransferGate::PerTxCap),
+        DecisionGate::Transfer(AssetTransferGate::WindowCap),
+        DecisionGate::Allowed,
+    ]);
+    assert_eq!(trace.contexts, std::vec![expected]);
+
+    let mut ledger = Ledger::empty(&h.env);
+    let (verdicts, trace) = decide_traced(
+        &h.env,
+        &h.guard,
+        Some(&policy),
+        &state,
+        &mut ledger,
+        1_000,
+        soroban_sdk::vec![&h.env, transfer_context(&other)],
+    );
+    assert_eq!(
+        verdicts,
+        std::vec![Decision::Blocked(GuardError::RecipientNotAllowed)]
+    );
+    let mut expected = prefix.to_vec();
+    expected.extend([
+        DecisionGate::Transfer(AssetTransferGate::AssetPaused),
+        DecisionGate::Transfer(AssetTransferGate::PositiveAmount),
+        DecisionGate::Transfer(AssetTransferGate::RecipientNotBlocked),
+        DecisionGate::Transfer(AssetTransferGate::RecipientAllowed),
+    ]);
+    assert_eq!(trace.contexts, std::vec![expected]);
+
+    let malformed = Context::Contract(ContractContext {
+        contract: h.asset.clone(),
+        fn_name: Symbol::new(&h.env, "transfer"),
+        args: soroban_sdk::Vec::new(&h.env),
+    });
+    let mut ledger = Ledger::empty(&h.env);
+    let (verdicts, trace) = decide_traced(
+        &h.env,
+        &h.guard,
+        Some(&policy),
+        &state,
+        &mut ledger,
+        1_000,
+        soroban_sdk::vec![&h.env, malformed],
+    );
+    assert_eq!(
+        verdicts,
+        std::vec![Decision::Blocked(GuardError::UnknownContract)]
+    );
+    let mut expected = prefix.to_vec();
+    expected.push(DecisionGate::UnknownContract);
+    assert_eq!(trace.contexts, std::vec![expected]);
+}
+
+#[test]
 fn blocked_recipients_contradiction_rejected_at_set_policy() {
     let h = Harness::new();
     let client = PolicyEngineClient::new(&h.env, &h.guard);
@@ -2749,6 +2846,40 @@ fn allow_any_recipient_with_empty_list_still_enforces_both_caps() {
         CheckResult::Blocked(Symbol::new(&h.env, "window_cap_exceeded"))
     );
     h.transfer_expect_blocked(&other, 1);
+}
+
+/// Issue #351 decision: an empty `recipients` list with `allow_any_recipient`
+/// **false** stays *accepted* — the paused watch-only baseline is exactly this
+/// shape — but it is inert, so `set_policy` records the dedicated
+/// `event_policy_no_recipient` warning (pinned in
+/// `src/event_audit_tests.rs`) instead of leaving the state silent. The dry run
+/// agrees with the write: this is a valid, installable policy.
+#[test]
+fn empty_recipients_without_escape_hatch_is_accepted_but_inert_for_transfers() {
+    let mut h = Harness::new();
+    let mut p = h.base_policy();
+    p.recipients = soroban_sdk::Vec::new(&h.env);
+    p.allow_any_recipient = false;
+    p.paused = false;
+
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    assert_eq!(
+        client.dry_run_set_policy(&p),
+        ValidationOutcome::Valid,
+        "the inert combination is accepted, not rejected (issue #351)"
+    );
+    h.install_policy(&p);
+    assert!(client.policy().is_some(), "the policy must install cleanly");
+
+    // Inert for transfers: no destination can ever pass the allowlist, so the
+    // account is blocked at the recipient gate on every SAC transfer.
+    h.set_time(1_000);
+    let recv = h.recv.clone();
+    assert_eq!(
+        client.check(&h.asset, &recv, &10),
+        CheckResult::Blocked(Symbol::new(&h.env, "recipient_not_allowed"))
+    );
+    h.transfer_expect_blocked(&recv, 10);
 }
 
 /// Issue #317: `check()`'s synthetic context must be a faithful replica of the
@@ -5463,6 +5594,10 @@ fn invalid_duplicate_per_asset_cap_rejected() {
             paused: false,
         },
     ];
+    assert_eq!(
+        PolicyEngineClient::new(&h.env, &h.guard).validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::DuplicateAssetCap)
+    );
     h.env.mock_all_auths();
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         PolicyEngineClient::new(&h.env, &h.guard).set_policy(&p);
@@ -6051,10 +6186,20 @@ fn heartbeat_event_uses_grace_current_at_emission_not_a_stale_one() {
 /// Dry-run names the exact rule, and `set_policy` still rejects fail-closed.
 fn assert_rejects_with(h: &Harness, cfg: &PolicyConfig, want: &PolicyRuleId) {
     let client = PolicyEngineClient::new(&h.env, &h.guard);
+    // The two preflight names are one read (issue #352): assert they agree on
+    // every §8 rule before asserting the rule itself, so the dry run can never
+    // drift from `validate_policy` — and both from `set_policy`'s gate, which
+    // the rejection below exercises.
+    let dry_run = client.dry_run_set_policy(cfg);
     assert_eq!(
+        dry_run,
         client.validate_policy(cfg),
+        "dry_run_set_policy must return exactly what validate_policy returns"
+    );
+    assert_eq!(
+        dry_run,
         ValidationOutcome::Invalid(want.clone()),
-        "validate_policy must identify the failing rule"
+        "the dry run must identify the failing rule"
     );
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.set_policy(cfg);
@@ -6077,6 +6222,47 @@ fn validate_policy_reports_amount_sign() {
     let mut p = h.base_policy();
     p.window_cap = -1;
     assert_rejects_with(&h, &p, &PolicyRuleId::AmountSign);
+}
+
+/// Issue #352: `dry_run_set_policy` is a permissionless, event-free, write-free
+/// read, and a config it calls `Valid` is exactly one `set_policy` installs.
+#[test]
+fn dry_run_set_policy_is_permissionless_and_writes_nothing() {
+    // Enforcing harness: no blanket `mock_all_auths`, so a read that called
+    // `require_auth` anywhere would fail here rather than pass by accident.
+    let mut h = Harness::new_enforced_auth();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let candidate = h.base_policy();
+
+    assert_eq!(
+        client.dry_run_set_policy(&candidate),
+        ValidationOutcome::Valid
+    );
+    assert!(
+        h.env.events().all().events().is_empty(),
+        "the dry run must not emit events"
+    );
+    assert!(
+        client.policy().is_none(),
+        "the dry run must not install the candidate policy"
+    );
+    assert_eq!(
+        client.status().policy_revision,
+        0,
+        "the dry run must not advance PolicyRevision"
+    );
+
+    // The write it preflights accepts exactly the config the dry run accepted:
+    // the real admin-authorized `set_policy`, with the same candidate.
+    let root = h.invocation(
+        &h.guard,
+        "set_policy",
+        std::vec![candidate.clone().into_val(&h.env)],
+    );
+    let entry = h.admin_entry(&root);
+    h.env.set_auths(&[entry]);
+    PolicyEngineClient::new(&h.env, &h.guard).set_policy(&candidate);
+    assert!(client.policy().is_some());
 }
 
 #[test]
@@ -6276,6 +6462,10 @@ fn validate_policy_reports_duplicate_address_in_list() {
     let mut p = h.base_policy();
     p.recipients = soroban_sdk::vec![&h.env, h.recv.clone(), h.recv.clone()];
     assert_rejects_with(&h, &p, &PolicyRuleId::DuplicateAddressInList);
+
+    let mut p = h.base_policy();
+    p.blocked_recipients = soroban_sdk::vec![&h.env, h.other.clone(), h.other.clone()];
+    assert_rejects_with(&h, &p, &PolicyRuleId::DuplicateAddressInList);
 }
 
 #[test]
@@ -6445,13 +6635,19 @@ fn validate_policy_reports_recipient_allow_and_blocked() {
 fn validate_policy_reports_protocol_contract_duplicate() {
     let h = Harness::new();
     let mut p = h.base_policy();
-    let rule = ProtocolRule {
+    let first = ProtocolRule {
         contract: h.asset.clone(),
         fns: None,
 
         paused: false,
     };
-    p.protocols = soroban_sdk::vec![&h.env, rule.clone(), rule];
+    let second = ProtocolRule {
+        contract: h.asset.clone(),
+        fns: Some(soroban_sdk::vec![&h.env, Symbol::new(&h.env, "swap")]),
+
+        paused: false,
+    };
+    p.protocols = soroban_sdk::vec![&h.env, first, second];
     assert_rejects_with(&h, &p, &PolicyRuleId::ProtocolContractDuplicate);
 }
 
@@ -6639,6 +6835,120 @@ fn validate_policy_reports_duration_exceeds_bound() {
     assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
     client.set_policy(&p);
     assert!(client.policy().is_some());
+}
+
+// ── Cap magnitude upper bound (issue #321, SPEC §8) ──────────────────────
+
+/// The ceiling applies to every cap field, not only the globals: an override
+/// is the *effective* per-tx / per-recipient cap, so leaving it unbounded would
+/// let an absurd value back in through `asset_caps` or `recipient_window_caps`.
+#[test]
+fn cap_magnitude_upper_bounds_rejected() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let over = crate::types::MAX_CAP_MAGNITUDE + 1;
+
+    let expect_invalid = |cfg: &PolicyConfig, what: &str| {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_policy(cfg);
+        }));
+        assert!(
+            res.is_err(),
+            "`{what}` must fail set_policy with InvalidConfig"
+        );
+        assert!(
+            client.policy().is_none(),
+            "`{what}` must leave the policy uninstalled (fail-closed)"
+        );
+    };
+
+    let mut p = h.base_policy();
+    p.per_tx_cap = over;
+    expect_invalid(&p, "per_tx_cap = MAX + 1");
+
+    let mut p = h.base_policy();
+    p.window_cap = over;
+    expect_invalid(&p, "window_cap = MAX + 1");
+
+    let mut p = h.base_policy();
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: over,
+            paused: false,
+        }
+    ];
+    expect_invalid(&p, "asset_caps[i].per_tx_cap = MAX + 1");
+
+    let mut p = h.base_policy();
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        RecipientCap {
+            recipient: h.recv.clone(),
+            cap: over,
+        }
+    ];
+    expect_invalid(&p, "recipient_window_caps[i].cap = MAX + 1");
+}
+
+/// Exactly at the ceiling remains legal on every cap field: the bound is
+/// inclusive, matching the duration bounds in SPEC §8.
+#[test]
+fn cap_magnitude_upper_bound_accepts_boundary() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+    let max = crate::types::MAX_CAP_MAGNITUDE;
+
+    let mut p = h.base_policy();
+    p.per_tx_cap = max;
+    p.window_cap = max;
+    p.asset_caps = soroban_sdk::vec![
+        &h.env,
+        AssetCap {
+            asset: h.asset.clone(),
+            per_tx_cap: max,
+            paused: false,
+        }
+    ];
+    p.recipient_window_caps = soroban_sdk::vec![
+        &h.env,
+        RecipientCap {
+            recipient: h.recv.clone(),
+            cap: max,
+        }
+    ];
+    client.set_policy(&p);
+    let stored = client.policy().expect("policy installed");
+    assert_eq!(stored.per_tx_cap, max);
+    assert_eq!(stored.window_cap, max);
+}
+
+/// The dry-run read reports the same ceiling rule, so `set_policy` and
+/// `validate_policy` cannot disagree about it.
+#[test]
+fn validate_policy_reports_cap_magnitude_exceeds_bound() {
+    let h = Harness::new();
+    let client = PolicyEngineClient::new(&h.env, &h.guard);
+
+    let mut p = h.base_policy();
+    p.per_tx_cap = crate::types::MAX_CAP_MAGNITUDE + 1;
+    assert_eq!(
+        client.validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::CapMagnitudeExceedsBound)
+    );
+
+    let mut p = h.base_policy();
+    p.window_cap = crate::types::MAX_CAP_MAGNITUDE + 1;
+    assert_eq!(
+        client.validate_policy(&p),
+        ValidationOutcome::Invalid(PolicyRuleId::CapMagnitudeExceedsBound)
+    );
+
+    let mut p = h.base_policy();
+    p.per_tx_cap = crate::types::MAX_CAP_MAGNITUDE;
+    p.window_cap = crate::types::MAX_CAP_MAGNITUDE;
+    assert_eq!(client.validate_policy(&p), ValidationOutcome::Valid);
 }
 
 // ── Auth verification ordering (Issue #27, SPEC §4 & §7) ───────────────────

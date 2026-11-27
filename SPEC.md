@@ -1,6 +1,7 @@
 # stellar-agent-guard-contracts — Architecture Specification (Phase 1)
 
 Status: **implemented against this spec; testnet proofs recorded in `tests/fixtures/README.md`.**
+Specification revision: **r1 — unreleased** (see [Specification revisions](#specification-revisions)).
 Mechanism is settled: **Soroban native Custom Account Abstraction.** This document specifies the
 smart-wallet policy contract, every public signature with auth-placement reasoning, the policy
 model (per-transaction cap, genuinely rolling window cap, recipient + protocol/function
@@ -13,6 +14,38 @@ site, see the [SPEC ↔ GitBook Cross-Reference Map](docs/README.md#spec--gitboo
 Sibling context: this project builds on the research and reasoning of `agent-spend-policy` (a
 related but distinct project). Mechanism conclusions are shared; code, policy math (rolling, not
 fixed-bucket), and the product split (contracts / SDK / dashboard) are this project's own.
+
+### Specification revisions
+
+This document is versioned separately from the crate so an auditor can answer one
+question from a deployed artifact: *which revision of the specification does this
+release implement?* (issue #146).
+
+- **Identifier.** Revisions are labelled `r1`, `r2`, … — monotonic, never reused.
+  The label is not the crate version: `Cargo.toml` may move for build-only
+  reasons while the normative text is unchanged, and a normative change may land
+  before any release is cut.
+- **Current revision.** The line directly under the status header always names the
+  revision of the text you are reading, plus one of two states: `unreleased`
+  (on `main`/a branch, not in any tagged release) or the contract release tag it
+  shipped in (`vX.Y.Z`).
+- **Relation to releases and Git.** A revision names a contract release only after
+  that release exists. The link is then `SPEC revision → release tag → commit`:
+  the tag is authoritative for the artifact, `provenance.txt` on the release pins
+  the tag to a commit, and this section pins the revision to both. A revision
+  that is not named by any release is explicitly `unreleased` — that state is not
+  a claim that it was released.
+- **When it changes.** Any normative change to this document (behavior, storage,
+  error variants, event vocabulary, enforcement scope) bumps the revision in the
+  same PR as the change. Editorial fixes that leave the normative meaning intact
+  do not.
+- **Release step.** [`docs/release-checklist.md`](docs/release-checklist.md#1-version-and-spec-revision)
+  requires the revision line and its table row to be updated while preparing a
+  release, so a tag is never published with a stale `unreleased` marker.
+
+| Revision | Contract release | Git revision | Scope |
+|---|---|---|---|
+| `r1` | none yet — no `v*` tag has been cut (crate `0.1.0`) | `main`, from the commit that introduced this section | Initial revision: Phase 1 specification as implemented in `src/`, with the Phase 1 testnet evidence in `tests/fixtures/README.md` and the re-verification contract in [`docs/fixture-verification.md`](docs/fixture-verification.md). |
 
 ---
 
@@ -193,8 +226,32 @@ A protocol that wants to move an allowlisted asset out of the account must there
 a context the guard evaluates; the honest statement of the boundary is "amount/recipient
 enforcement is per SAC-transfer context, wherever that context appears in the tree", not "a
 protocol can spend invisibly". This strengthens, and does not widen, the §2 paragraph — the v2
-work (protocol-specific parsers, declared-max, return-value commitments) remains open, and the
-v2 issue is referenced there rather than designed here.
+work (protocol-specific parsers, declared-max, return-value commitments) remains open, and
+the v2 issue is referenced there rather than designed here.
+
+### 2.2 What a protocol allowlist entry actually authorizes (issue #322)
+
+**Read this as an operator, not as a protocol author.** A `protocols` entry is a permission
+for the guarded account to authorize calls to that contract. The engine checks the contract
+address and, when `fns` is set, the function name; it does **not** inspect what the function
+does with the account's authorization. At authorization time the engine cannot tell whether
+the call moves value, calls further protocols, or grants a fresh authorization.
+
+Adding a protocol is therefore a materially larger grant than adding a recipient:
+
+| Grant | What it permits |
+|---|---|
+| One `recipients` entry | Transfers of allowlisted assets to that address, bounded per call by `per_tx_cap`, per window by `window_cap` / per-recipient caps, and restricted to the asset allowlist. |
+| One `protocols` entry | Any invocation of that contract (optionally restricted to named functions). The contract's own logic decides how much value moves and where it goes. |
+
+**Residual risk, stated explicitly:** an allowlisted protocol can move funds by its own
+internal logic, in amounts that `per_tx_cap` and `window_cap` never see. Those caps bind SAC
+`transfer`/`transfer_from` contexts only (§2, §6.2). `protocol_calls_per_window` bounds how
+often such a call may happen, not how much it can move. A nested SAC transfer performed by the
+protocol *is* seen and capped (§2.1), but a protocol that moves value by its own bookkeeping,
+or holds a balance of its own, is not. Only allowlist protocols whose function bodies you
+would trust with the account's authorization; when in doubt, narrow `fns` to the exact
+functions the agent needs.
 
 ---
 
@@ -360,7 +417,23 @@ Implementation (exact, lazy, bounded):
   should), which can only make enforcement stricter than policy — it can never admit spend that
   policy would reject. The exact guarantee ("window_cap is a hard ceiling over any
   `window_secs` span") is preserved in all cases; in the pathological region of ≥8192 distinct
-  spend seconds within one window the engine is conservative until density drops. This is
+  spend seconds within one window the engine is conservative until density drops.
+- **Derived bound: exactness holds while `window_secs <= MAX_WINDOW_ENTRIES` (8192 s).** The
+  ledger keeps at most one entry per second, because `SpendEntry.ts` is a whole unix second and
+  spends that share a second coalesce into the trailing entry (previous bullet). A window can
+  therefore never hold more distinct entries than `window_secs`, so any `window_secs` up to the
+  bound is accounted exactly at every spend density. Past it, a spender sustaining one admission
+  per second fills all 8192 slots after 8192 s — 2 h 16 min 32 s — and each further admission
+  merges the two oldest entries forward. The consequence is concrete: a policy with
+  `window_secs = 604800` (7 days) stays exact for a sparse spender and, for a sustained ≥1 Hz
+  one, switches to conservative accounting (spend counted for longer than it truly occurred)
+  for the remainder of the window. The degradation direction is **stricter, never looser**: the
+  merged entry over-counts, so enforcement can deny spend the raw ledger would have admitted,
+  and never the reverse. The bound is applied independently to each ledger — the global spend
+  window, every tracked per-recipient window, and the protocol-call ledger each merge at their
+  own 8192-entry ceiling (`admit_to_ledger` / `admit_to_protocol_call_ledger` in
+  `src/window.rs`). Measured worst-case prune cost for the pathological fill is in the
+  *Measured worst case* bullet below.
 - **Merge telemetry:** each successful admission that triggers this backstop emits one
   `event_window_merged` event. Topic 1 identifies `global_spend`, `recipient_spend`, or
   `protocol_calls`; data is the compact tuple `(merged_ts, merged_value)`, where `merged_ts`
@@ -549,6 +622,46 @@ ScVal::Map(Some(vec![
 Note the two address shapes: `assets` holds contract (C…) addresses →
 `ScAddress::Contract`, while `recipients` holds account (G…) addresses →
 `ScAddress::Account`.
+
+### 3.3 Maximum exposure implied by a policy (issue #323)
+
+The caps bound exactly one thing: how much value can leave the account through **SAC asset
+transfers** in a given span. For a policy with `per_tx_cap = P`, `window_cap = W`, and
+`window_secs = S` (`0` = disabled; §8 requires `0 < P ≤ W` whenever both are enabled):
+
+| Configuration | Maximum in one call | Maximum in any rolling `S`-second span |
+|---|---|---|
+| Both disabled (`P = 0`, `W = 0`) | Account balance | Account balance — no cap applies |
+| Per-tx only (`P > 0`, `W = 0`) | `P` | Unbounded over time: `N · P` for `N` calls, until the balance is gone |
+| Window only (`P = 0`, `W > 0`) | `W` (one call may consume the whole window) | `W` |
+| Both enabled (`0 < P ≤ W`) | `P` | `W` |
+
+The bound is per asset transfer, not per transaction: a transaction may carry several
+contexts, but every admitted SAC transfer is counted against the same rolling window, so `W`
+still bounds their sum within `S` seconds. When `recipient_window_caps` is in use, a
+recipient's own rolling cap `C_r` replaces `W` for that recipient's transfers (the global `W`
+still applies), so the per-recipient maximum in a window is `min(W, C_r)`; the account-wide
+maximum stays `W`.
+
+**Worked example (documented defaults).** With the default `window_secs = 86_400` (24 hours),
+`per_tx_cap = 100`, and `window_cap = 1_000` (units of the allowlisted asset): a single
+transfer can move at most 100, and any rolling 24-hour span can move at most 1,000 in total —
+for example ten transfers of 100 in one minute, after which no further transfer is admissible
+until the first of those entries is 24 hours old. A live attacker holding the agent key can
+extract at most 1,000 per rolling day, indefinitely — not 1,000 once.
+
+**What the bound does not cover.** It is not a bound on total loss:
+
+- **Protocol calls.** An allowlisted protocol can move funds by its own internal logic, beyond
+  `per_tx_cap`/`window_cap`; those caps bind SAC transfer contexts only (§2.2, §6.3). The
+  protocol-call rate limit bounds call count, not value.
+- **Admin compromise.** The admin can rewrite policy (including disabling the caps), rotate the
+  agent key, and pause/unpause. That is a control compromise, not a cap breach (§1, §10).
+- **A live agent key that keeps heartbeating.** The dead-man switch fires on silence only; a
+  heartbeating attacker is bounded by the caps per window, not stopped (§5, §10).
+- **Balance and asset scope.** The formula is denominated in the policy's shared, unit-less
+  window total. If several assets are allowlisted, the same `W` is shared across them (§3.1),
+  so the bound is an aggregate value across those assets, not a per-asset guarantee.
 
 ---
 
@@ -961,7 +1074,7 @@ Auth contexts, in the order the host supplies them:
 |---|---|---|---|
 | 0 | `P::deposit` | §6.3 protocol allowlist — contract listed, `fns = None` | **Allowed** |
 | 1 | `A.transfer(guard → R1, 40)` | §6.2 in order: recipient allowed, `40 ≤ 80` per-tx, `0 + 40 ≤ 100` window | **Allowed**, 40 staged |
-| 2 | `A.transfer(guard → R1, 90)` | §6.2 rule 3 — `90 > per_tx_cap 80` | **Blocked**, `per_tx_cap_exceeded` (22) |
+| 2 | `A.transfer(guard → R1, 90)` | §6.2 rule 4 — `90 > per_tx_cap 80` | **Blocked**, `per_tx_cap_exceeded` (22) |
 
 What each observer is left with:
 
@@ -1045,19 +1158,30 @@ issue #294 kept it and pinned that with `asset_identity_selects_the_per_asset_ca
 
 **Exact arity required; extra args deny -- we do not partially parse.** A call whose argument list does not match the SAC schema exactly (`transfer` = 3, `transfer_from` = 4) is rejected with `UnknownContract` and never reaches the cap/allowlist evaluation. We only enforce what we fully understand; a context carrying extra trailing values is treated as a call we cannot reason about (conservative default-deny).
 
-Rules applied (in order; the denylist is checked before the allowlist/escape hatch):
+Rules are applied in this **fixed order**, and **only the first failing rule is the reported
+reason**. The order is normative, not an accident of statement sequence: a transfer that
+violates several rules at once reports exactly one of them, so reordering the checks for
+readability would silently change every incident report. It matches the statement order in
+`decide` (`src/engine.rs`) and is pinned by
+`transfer_violating_recipient_and_per_tx_cap_reports_recipient_first` and
+`transfer_violating_amount_and_recipient_reports_invalid_amount_first` (`src/engine.rs`).
 
-1. **Recipient denylist:** if `recipient ∈ policy.blocked_recipients`, block
+A transfer whose `asset` has an `asset_caps` entry with `paused: true` is blocked with
+`AssetNotAllowed` before any numbered rule below runs.
+
+1. **Amount validity:** `amount > 0` or block `InvalidAmount`. Evaluated first so a malformed
+   amount is never described in terms of allowlists or caps.
+2. **Recipient denylist:** if `recipient ∈ policy.blocked_recipients`, block
    `RecipientBlocked`. The denylist wins over both the allowlist and
    `allow_any_recipient`.
-2. **Recipient allowlist:** if `allow_any_recipient == false`, `recipient ∈ policy.recipients`
+3. **Recipient allowlist:** if `allow_any_recipient == false`, `recipient ∈ policy.recipients`
    or block `RecipientNotAllowed`.
-3. **Per-tx cap:** resolve the effective per-tx cap for the transfer's asset — the matching
+4. **Per-tx cap:** resolve the effective per-tx cap for the transfer's asset — the matching
    `asset_caps` entry's `per_tx_cap` when non-zero, otherwise the global `per_tx_cap`. If the
    effective cap is non-zero, `amount <= effective_per_tx_cap` or block `PerTxCapExceeded`.
    The comparison is exclusive-of-blocking (i.e. the cap value itself is permitted:
    `amount == effective_per_tx_cap` is admitted; only `amount > effective_per_tx_cap` is blocked).
-4. **Rolling window (§3.1):**
+5. **Rolling window (§3.1):**
    - Global window: if `window_cap != 0`, prune expired entries, then
      `total + amount <= window_cap` or block `WindowCapExceeded`.
    - Per-recipient window: if `recipient` has an entry in `policy.recipient_window_caps` with
@@ -1065,7 +1189,10 @@ Rules applied (in order; the denylist is checked before the allowlist/escape hat
      the global window cap. If the effective cap is exceeded, block `WindowCapExceeded`.
    - On admission, update the global ledger and, when a per-recipient cap applies, the
      recipient's ledger.
-5. Amount validity: `amount > 0` or block `InvalidAmount`.
+
+Example of the first-failure rule: a transfer to a non-allowlisted recipient whose amount is
+*also* above the per-tx cap is reported as `RecipientNotAllowed`, because rule 3 runs before
+rule 4. The cap violation is real but unreported; the operator sees one reason per context.
 
 An asset contract listed in `assets` invoked with any other function — in particular the
 administrative and custody-altering functions `mint`, `burn`, `clawback`, `set_admin`, `pause`,
@@ -1075,7 +1202,7 @@ probing token custody is one alertable signal rather than several). The same fun
 contract that is *not* listed in `assets` are never parsed as asset calls and stay `UnknownContract` — an agent cannot silently move balances on an unregistered SAC. This keeps
 the "we know what we're enforcing" promise exact.
 
-**Measured worst case: evaluation ≈ 338,315 CPU instructions per context.** Rules 1 and 2 are the only
+**Measured worst case: evaluation ≈ 338,315 CPU instructions per context.** Rules 2 and 3 are the only
 steps whose cost depends on a policy list length, and §8 caps every recipient list at
 `MAX_RECIPIENT_ENTRIES = 256`, so the decision path is bounded by construction. Measured in the
 Soroban test environment with both `recipients` and `blocked_recipients` filled to exactly 256
@@ -1085,7 +1212,7 @@ the linear sweeps the dominant term:
 | Configuration | Instructions | % of the 100,000,000 per-invocation CPU budget |
 |---|---|---|
 | `allow_any_recipient = false` — full 2×256 scan, miss on the last element of each | **338,315** | 0.34% |
-| `allow_any_recipient = true` — denylist swept, rule 2 skipped | 179,674 | 0.18% |
+| `allow_any_recipient = true` — denylist swept, rule 3 skipped | 179,674 | 0.18% |
 
 The escape hatch saves 158,641 instructions by skipping the 256-entry allowlist, which is
 precisely what it buys: under the escape hatch the remaining linear work is a single sweep, not
@@ -1114,6 +1241,10 @@ cap, the call is blocked with `ProtocolCallRateExceeded`. This count-based throt
 defensible v1 enforcement that does not overclaim — it directly addresses runaway loops
 (the threat case this project exists to stop) within what the host actually exposes. Functions
 not in a rule's `fns` allowlist (when present) are blocked `FunctionNotAllowed`.
+
+What authorizing that contract/function pair means operationally — including the residual
+risk that the protocol can move funds beyond `per_tx_cap`/`window_cap` — is stated for
+operators in §2.2.
 
 ### 6.4 Anything else — blocked
 
@@ -1178,6 +1309,53 @@ authorized transactions.
 before any policy state is read, so an unverifiable signature never reaches the decision table
 below. The single-key choice and the rejected multi-sig / delegated-signer alternatives are
 recorded in [ADR-0003](docs/adr/0003-ed25519-single-key-over-multisig-v1.md).
+
+### 7.0 Canonical public-ABI table (issue #354)
+
+One row per public entry point: the authority it names, the `DataKey` set it touches (§3), the
+events it emits (§9), and how it fails. This table is the reviewer's checklist for the
+security-critical property above — *the authority that can change a thing is the authority named
+by the change* — and the one place an SDK author can read the whole surface at once. The prose
+signature block below, the README per-function sections, and the GitBook function pages remain
+the long form; each row cross-references them instead of restating them, and every row was
+verified against `src/lib.rs` in the PR that added this table.
+
+"Read" includes a read that decides whether to write (e.g. `has(&Policy)`); "written" lists
+**state** writes only — a permissionless read may still refresh a persistent entry's TTL (§9.5),
+and that rent-bearing effect is not a policy change. `A` = instance storage, `P` = persistent.
+
+| Entry point | Auth required | Keys read | Keys written | Events emitted | Failure on rejection | README | GitBook |
+|---|---|---|---|---|---|---|---|
+| `initialize(admin, agent_pubkey)` | `admin` | A: `Initialized` | A: `Admin`, `AgentPubkey`, `PolicyVersion`, `Initialized`; P: `AdminFrozen`, `LastHeartbeat` | `initialized` | `AlreadyInitialized` (#2); a bad/missing admin auth is a `require_auth` host trap, not a contract error | [§initialize](README.md#initialize) | [initialize](docs/functions/initialize.md) |
+| `set_policy(config)` | `Admin` | A: `Admin`; P: `Policy`, `PolicyRevision` | P: `Policy`, `PolicyRevision`; on first install also `Window` (empty) and `LastHeartbeat` | `policy_set`; plus `policy_no_recipient` when the installed policy permits no recipient (§8) | `NotInitialized` (#3) pre-init; `InvalidConfig` (#4) on any §8 rule, policy left unchanged | [§set_policy](README.md#set_policy) | [set_policy](docs/functions/set-policy.md) |
+| `reset_window()` | `Admin` | A: `Admin` | P: `Window` (removed) | `window_reset` | `NotInitialized` (#3); idempotent otherwise | [§reset_window](README.md#reset_window) | [set_policy §reset_window](docs/functions/set-policy.md#reset_window--the-explicit-reset) |
+| `increase_window_cap(new_cap)` | `Admin` | A: `Admin`; P: `Policy`, `Window`, `PolicyRevision` | P: `Policy`, `PolicyRevision` | `window_cap_increased` | `NotInitialized` (#3), `NoPolicy` (#12) with no policy installed, `InvalidConfig` (#4) when not an increase, below the live total, or §8-invalid | [§increase_window_cap](README.md#increase_window_cap) | — (SPEC §3.1 is the reference; no GitBook page yet) |
+| `add_recipient(recipient)` | `Admin` | A: `Admin`; P: `Policy`, `PolicyRevision` | P: `Policy`, `PolicyRevision` | `policy_set` | `NotInitialized` (#3), `NoPolicy` (#12), `InvalidConfig` (#4) on any §8 rule, policy left unchanged | — (SPEC §7 is the reference) | [set_policy](docs/functions/set-policy.md) |
+| `remove_recipient(recipient)` | `Admin` | A: `Admin`; P: `Policy`, `PolicyRevision` | P: `Policy`, `PolicyRevision` (only when present) | `policy_set` (only when removed) | `NotInitialized` (#3), `NoPolicy` (#12), `InvalidConfig` (#4) on any §8 rule, policy left unchanged | — (SPEC §7 is the reference) | [set_policy](docs/functions/set-policy.md) |
+| `revoke_policy()` | `Admin` | A: `Admin`; P: `PolicyRevision` | P: `Policy`, `Window` (removed), `PolicyRevision` | `policy_revoked` | `NotInitialized` (#3) | [§revoke_policy](README.md#revoke_policy) | [set_policy](docs/functions/set-policy.md) |
+| `rotate_agent_key(new_pubkey)` | `Admin` | A: `Admin`, `AgentPubkey` | A: `AgentPubkey` | `agent_rotated` | `NotInitialized` (#3) | [§rotate_agent_key](README.md#rotate_agent_key) | [key rotation](docs/key-rotation.md) |
+| `propose_admin_rotation(new_admin)` | `Admin` | A: `Admin` | A: `PendingAdmin` | `admin_rotation_proposed` | `NotInitialized` (#3); `InvalidConfig` (#4) when proposing the current admin | [§propose_admin_rotation](README.md#propose_admin_rotation--confirm_admin_rotation--cancel_admin_rotation) | [admin rotation](docs/functions/admin-rotation.md) |
+| `confirm_admin_rotation()` | `PendingAdmin` (the proposed address) | A: `Admin`, `PendingAdmin` | A: `Admin`, `PendingAdmin` (removed) | `admin_rotated` | `NotInitialized` (#3), `NoPendingAdmin` (#6) | [§confirm_admin_rotation](README.md#propose_admin_rotation--confirm_admin_rotation--cancel_admin_rotation) | [admin rotation](docs/functions/admin-rotation.md) |
+| `cancel_admin_rotation()` | `Admin` | A: `Admin`, `PendingAdmin` | A: `PendingAdmin` (removed) | `admin_rotation_cancelled` | `NotInitialized` (#3), `NoPendingAdmin` (#6) | [§cancel_admin_rotation](README.md#propose_admin_rotation--confirm_admin_rotation--cancel_admin_rotation) | [admin rotation](docs/functions/admin-rotation.md) |
+| `pause()` | `Admin` | A: `Admin`; P: `Policy`, `PolicyRevision` | P: `Policy`, `PolicyRevision` (only when the flag flips) | `paused` | `NotInitialized` (#3), `NoPolicy` (#12) | [§pause](README.md#pause--resume) | [pause / resume](docs/functions/freeze-unfreeze.md#pause--resume--the-policy-level-lever) |
+| `resume()` | `Admin` | A: `Admin`; P: `Policy`, `PolicyRevision` | P: `Policy`, `PolicyRevision` (only when the flag flips) | `resumed` | `NotInitialized` (#3), `NoPolicy` (#12) | [§resume](README.md#pause--resume) | [pause / resume](docs/functions/freeze-unfreeze.md#pause--resume--the-policy-level-lever) |
+| `heartbeat()` | the contract's own address — routed through `__check_auth`, so the registered agent key | A: `AgentPubkey` (inside `__check_auth`); P: `Policy`, `AdminFrozen`, `LastHeartbeat`, `Window` | P: `LastHeartbeat` (skipped when it already equals `now`); `Window` only if `__check_auth` admits the call | `auth_checked` (from the `__check_auth` evaluation), `heartbeat` | `NotInitialized` (#3), `NoPolicy` (#12), `AdminFrozen` (#10), `HeartbeatExpired` (#11), `Paused` (#13), `OutsideActiveWindow` (#14), `SelfFunctionNotAllowed` (#27) | [§heartbeat](README.md#heartbeat) | [heartbeat](docs/functions/heartbeat.md) |
+| `freeze()` | `Admin` | A: `Admin` | P: `AdminFrozen` | `frozen` | `NotInitialized` (#3) | [§freeze](README.md#freeze--unfreeze) | [freeze / unfreeze](docs/functions/freeze-unfreeze.md) |
+| `self_lock()` | the contract's own address — routed through `__check_auth`, so the registered agent key | A: `AgentPubkey` (inside `__check_auth`); P: `Policy`, `PolicyRevision`, `AdminFrozen`, `LastHeartbeat`, `Window` | P: `AdminFrozen` | `auth_checked` (from the `__check_auth` evaluation), `self_locked` | `NotInitialized` (#3), `NoPolicy` (#12), `AdminFrozen` (#10), `HeartbeatExpired` (#11), `Paused` (#13), `OutsideActiveWindow` (#14), `SelfFunctionNotAllowed` (#27) | [§self_lock](README.md#self_lock-agent) | [freeze / unfreeze](docs/functions/freeze-unfreeze.md) |
+| `unfreeze()` | `Admin` | A: `Admin`; P: `LastHeartbeat` | P: `AdminFrozen`, `LastHeartbeat` | `unfrozen` | `NotInitialized` (#3) | [§unfreeze](README.md#freeze--unfreeze) | [freeze / unfreeze](docs/functions/freeze-unfreeze.md) |
+| `refresh_deadman()` | none (permissionless) | P: `Policy`, `LastHeartbeat`, `AutoFrozenAt` | P: `AutoFrozenAt`, and only when the grace has elapsed and it is unrecorded | `dms_auto_frozen` | none — never traps; a no-op when not expired or already recorded | [§refresh_deadman](README.md#public-functions) | [incident playbook](docs/operations/incident-playbook-admin-key-lost.md) |
+| `policy()` | none | P: `Policy` | — | — | none — returns `None` (default-deny) | [§policy](README.md#policy-read) | — (SPEC §7 is the reference) |
+| `policy_version()` | none | A: `PolicyVersion` | — | — | none — returns `0` before `initialize` | [§policy_version](README.md#policy_version-read) | — (SPEC §7.4 is the reference) |
+| `policy_hash()` | none | P: `Policy` | — | — | none — returns `NO_POLICY_DIGEST` with no policy installed | [§policy_hash](README.md#policy_hash-read--cheap-drift-detection) | [policy attestation](docs/research/policy-attestation.md) |
+| `validate_policy(config)` | none | — (pure; compares against `current_contract_address()` only) | — | — | none — reports `ValidationOutcome::Invalid(rule)` instead of trapping | [§validate_policy](README.md#validate_policy--dry_run_set_policy-read) | — (SPEC §8.1 is the reference) |
+| `dry_run_set_policy(config)` | none | — (same read as `validate_policy`, issue #352) | — | — | none — reports `ValidationOutcome::Invalid(rule)` instead of trapping | [§dry_run_set_policy](README.md#validate_policy--dry_run_set_policy-read) | — (SPEC §8.1 is the reference) |
+| `dms_health()` | none | P: `Policy`, `LastHeartbeat` | — | — | none — `Ok` with no policy installed (switch disabled) | [§public functions](README.md#public-functions) | [dead-man switch](docs/concepts/dead-man-switch.md) |
+| `status()` | none | P: `Policy`, `PolicyRevision`, `AdminFrozen`, `LastHeartbeat`, `Window` | — | — | none — snapshot only, never traps | [§status](README.md#status-read) | — (SPEC §7 is the reference) |
+| `status_at(as_of)` | none | same as `status()` | — | — | none — `as_of` is caller-supplied, no clock dependency | [§status_at](README.md#status-read) | — (SPEC §7 is the reference) |
+| `check(asset, to, amount)` | none | P: `Policy`, `AdminFrozen`, `LastHeartbeat`, `Window` | — (prunes a local ledger copy only) | `auth_checked` | none returned as a trap — the verdict is `CheckResult::Blocked(reason)`; `DecisionInvariantViolation` (#31) only if the engine yields no verdict | [§check](README.md#check--preflight--simulate-a-transfer-read-permissionless) | [check_auth](docs/functions/check-auth.md) |
+| `check_detailed(asset, to, amount)` | none | same as `check()` | — (local ledger copy only) | `auth_checked` | same as `check()` | [§check_detailed](README.md#check--preflight--simulate-a-transfer-read-permissionless) | [check_auth](docs/functions/check-auth.md) |
+| `check_batch(asset, transfers)` | none | same as `check()` | — (staged admissions are discarded) | one `auth_checked` per evaluated context | none returned as a trap — per-item `CheckResult::Blocked(reason)` with `admissible: false` | [§check_batch](README.md#check--preflight--simulate-a-transfer-read-permissionless) | [check_auth](docs/functions/check-auth.md) |
+| `__check_auth(payload, signature, contexts)` | host-invoked; the agent's Ed25519 signature over the payload, verified before any policy read (§10.2) | A: `AgentPubkey`; P: `Policy`, `AdminFrozen`, `LastHeartbeat`, `Window` | P: `Window` — only when every context passed and entries exist or the window was already persisted | `auth_checked` per context; `window_merged` per 8192-entry merge | `NotInitialized` (#3), `NoPolicy` (#12), the §4 account gates (#10/#11/#13/#14), per-call codes (#20–#30, #32), `TooManyAuthContexts` (#33); a bad signature is a host crypto trap, never a contract error | [§__check_auth](README.md#__check_auth-host-invoked--not-callable-by-anyone) | [check_auth](docs/functions/check-auth.md) |
 
 ```rust
 // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -1333,6 +1511,14 @@ pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
     // the offending field before submission; the on-chain rejection path is
     // unchanged (`set_policy` still fails with the single `InvalidConfig`
     // code).
+pub fn dry_run_set_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+    // Dry-run of set_policy under its operator-facing name (issue #352):
+    // byte-for-byte the same read as validate_policy above — both call the
+    // shared validation_outcome, which walks the same rule set set_policy's
+    // validate_config gate uses, so the preflight cannot disagree with the
+    // write. No auth, no events, no state writes (read-path TTL effects in
+    // §9.5 still apply); validation is pure, so nothing is disclosed, but the
+    // entry point's cost is public (§8.1).
 pub fn check(env: Env, asset: Address, to: Address, amount: i128) -> CheckResult
     // Preflight / simulate a transfer (doc alias; ABI frozen as `check`):
     // pure pre-flight replica of the §6.2 decision path: it does not change
@@ -1723,6 +1909,7 @@ entire validation surface at a glance (issue #353).
 | `recipients.len() > 256`, `recipient_window_caps.len() > 256`, or `blocked_recipients.len() > 256` (`MAX_RECIPIENT_ENTRIES`) | **Rejected** — `InvalidConfig` / `RecipientListTooLong` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_recipient_list_too_long`, `policy_asset_protocol_and_recipient_limits_are_inclusive_and_fail_closed` (`src/integration_tests.rs`) |
 | `asset_caps.len() > MAX_ASSET_CAP_ENTRIES` (256) | **Rejected** — `InvalidConfig` / `AssetCapListTooLong` | `src/lib.rs` (`first_failing_rule`) | *(uncovered — no dedicated over-256 `asset_caps` test yet)* |
 | `per_tx_cap < 0` or `window_cap < 0` (`window_secs` and `dms_grace_secs` are `u64`, so negatives are unrepresentable) | **Rejected** — `InvalidConfig` / `AmountSign` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_amount_sign` (`src/integration_tests.rs`) |
+| `per_tx_cap`, `window_cap`, `asset_caps[i].per_tx_cap`, or `recipient_window_caps[i].cap` above `MAX_CAP_MAGNITUDE` (`10^24`; issue #321) | **Rejected** — `InvalidConfig` / `CapMagnitudeExceedsBound`; `0` (disabled) and the boundary value are **Accepted** | `src/lib.rs` (`first_failing_rule`) | `cap_magnitude_upper_bounds_rejected`, `cap_magnitude_upper_bound_accepts_boundary`, `validate_policy_reports_cap_magnitude_exceeds_bound` (`src/integration_tests.rs`) |
 | `window_cap > 0 && window_secs == 0` | **Rejected** — `InvalidConfig` / `WindowRequiresWidth` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_window_requires_width` (`src/integration_tests.rs`) |
 | `per_tx_cap > 0 && window_cap > 0 && per_tx_cap > window_cap` (issue #33) | **Rejected** — `InvalidConfig` / `PerTxCapExceedsWindowCap`; equal caps and either cap `== 0` are **Accepted** | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_per_tx_cap_exceeds_window_cap`, `validate_policy_accepts_equal_per_tx_and_window_caps`, `validate_policy_skips_cap_comparison_when_either_is_zero`, `validate_policy_accepts_per_tx_cap_less_than_window_cap` (`src/integration_tests.rs`) |
 | `active_until != 0 && active_until <= active_from` | **Rejected** — `InvalidConfig` / `ActiveWindowOrder` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_active_window_order` (`src/integration_tests.rs`) |
@@ -1736,12 +1923,12 @@ entire validation surface at a glance (issue #353).
 | `asset_caps[i].asset` absent from `assets` | **Rejected** — `InvalidConfig` / `AssetCapUnknownAsset` (never silently ignored) | `src/lib.rs` (`first_failing_asset_cap_rule`) | `invalid_unknown_asset_override_rejected` (`src/integration_tests.rs`) |
 | Duplicate `asset` within `asset_caps` | **Rejected** — `InvalidConfig` / `DuplicateAssetCap` | `src/lib.rs` (`first_failing_asset_cap_rule`) | `invalid_duplicate_per_asset_cap_rejected` (`src/integration_tests.rs`) |
 | Non-empty intersection between `recipients` and `blocked_recipients` | **Rejected** — `InvalidConfig` / `RecipientAllowAndBlocked` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_recipient_allow_and_blocked`, `blocked_recipients_contradiction_rejected_at_set_policy` (`src/integration_tests.rs`) |
-| Duplicate `protocols[i].contract` | **Rejected** — `InvalidConfig` / `ProtocolContractDuplicate` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_protocol_contract_duplicate` (`src/integration_tests.rs`) |
+| Duplicate `protocols[i].contract` (even when the two rules have different `fns`) | **Rejected** — `InvalidConfig` / `ProtocolContractDuplicate` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_protocol_contract_duplicate` (`src/integration_tests.rs`) |
 | `protocols[i].fns == Some(list)` where `list.is_empty()` or `list` has duplicate `Symbol`s | **Rejected** — `InvalidConfig` / `ProtocolFnListInvalid` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_protocol_fn_list_invalid` (`src/integration_tests.rs`) |
 | Non-empty intersection between `assets` and `protocols[i].contract` (issue #296) | **Rejected** — `InvalidConfig` / `AssetProtocolOverlap`; asset-first classification must never silently shadow a `ProtocolRule` | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_asset_protocol_overlap` (`src/integration_tests.rs`) |
 | `window_secs > MAX_WINDOW_SECS` or `dms_grace_secs > MAX_DMS_GRACE_SECS` (`315_360_000` s ≈ 10 years; issue #34) | **Rejected** — `InvalidConfig` / `DurationExceedsBound`; `0` (disabled) and `MAX_*` boundary are **Accepted** | `src/lib.rs` (`first_failing_rule`) | `validate_policy_reports_duration_exceeds_bound`, `window_and_dms_upper_bounds_rejected`, `window_and_dms_upper_bounds_accept_boundary` (`src/integration_tests.rs`) |
 | Empty `assets` (`assets.is_empty()`) | **Accepted (inert for SAC transfers)** — no SAC token is allowlisted, so every SAC `transfer`/`transfer_from` classifies as `UnknownContract` and is never allowed (useful for watch-only / heartbeat-only accounts) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`parse_call_inner`) | `empty_assets_policy_blocks_sac_transfers_but_allows_protocol_calls`, `empty_assets_policy_is_recoverable_by_adding_an_asset` (`src/integration_tests.rs`); `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset); `audit_event_payloads_and_topics` (`src/event_audit_tests.rs`) |
-| Empty `recipients` with `allow_any_recipient == false` | **Accepted (inert for SAC transfers)** — no destination is allowlisted and the escape hatch is off, so every SAC transfer is blocked with `RecipientNotAllowed`. Accepted in v1 unless changed by companion [issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) | `src/lib.rs` (`first_failing_rule` — no non-empty check); `src/engine.rs` (`decide`) | `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset); companion policy-rejection decision tracked in [issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) |
+| Empty `recipients` with `allow_any_recipient == false` | **Accepted + warned (inert for SAC transfers)** — no destination is allowlisted and the escape hatch is off, so every SAC transfer is blocked with `RecipientNotAllowed`. `set_policy` still installs it, and emits `policy_no_recipient` (`by`, `revision`) so the inert state is visible in telemetry instead of only in denials ([issue #351](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/351) chose warning over rejection; see the rationale below) | `src/lib.rs` (`first_failing_rule` — no non-empty check; `set_policy` emits the warning); `src/engine.rs` (`decide`) | `empty_recipients_without_escape_hatch_is_accepted_but_inert_for_transfers` (`src/integration_tests.rs`), `inert_recipient_policy_emits_one_warning_event` (`src/event_audit_tests.rs`), `every_documented_preset_installs_and_round_trips` (`src/policy_preset_tests.rs`, Watch-only preset) |
 | Empty `recipients` with `allow_any_recipient == true` | **Accepted** — recipient allowlist is skipped by the escape hatch; `blocked_recipients`, `per_tx_cap`, and `window_cap` still apply | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`decide`) | `allow_any_recipient_with_empty_list_still_enforces_both_caps` (`src/integration_tests.rs`) |
 | Empty `protocols` (`protocols.is_empty()`) | **Accepted (inert for protocol calls)** — no non-asset external protocol is allowlisted; every non-asset, non-self call is blocked with `UnknownContract` | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`parse_call_inner`) | `validate_policy_accepts_valid_config_and_ignores_installed_policy` (`src/integration_tests.rs`), `unlisted_asset_is_unknown_contract` (`src/engine.rs`) |
 | `protocols[i].fns == None` | **Accepted** — wildcard: any function on that allowlisted protocol contract is allowed (contrasts with `Some([])`, which is rejected as `ProtocolFnListInvalid`) | `src/lib.rs` (`first_failing_rule`); `src/engine.rs` (`decide`) | `protocol_allowlist_is_enforced_through_real_host_authorization` (`src/integration_tests.rs`) |
@@ -1750,10 +1937,21 @@ entire validation surface at a glance (issue #353).
 | Empty `asset_caps` | **Accepted** — no per-asset overrides; all allowlisted assets use global `per_tx_cap` | `src/lib.rs` (`first_failing_asset_cap_rule`); `src/engine.rs` (`effective_per_tx_cap`) | `per_asset_cap_falls_back_to_global_when_absent` (`src/integration_tests.rs`) |
 
 **Key design rationales:**
+- **Duplicate list entries are rejected, never normalized.** Identity is the address in `assets`, `recipients`, and `blocked_recipients`; the contract key in `protocols`; the recipient in `recipient_window_caps`; the asset in `asset_caps`; and the symbol in each protocol `fns` list. `policy.schema.json` rejects identical array values/records and documents key-based checks; the contract validator is authoritative when two records share a key but differ in their other fields, which standard JSON Schema `uniqueItems` cannot express.
 - **Cap ordering (`per_tx_cap <= window_cap`, issue #33):** if `per_tx_cap > window_cap` when both are nonzero, every transfer above `window_cap` is double-rejected and transfers between the two values pass per-tx only to fail on window — an operator error caught at install time. Disabled caps (`0`) skip this check; equal caps are allowed.
 - **Duration upper bounds (issue #34):** `window_secs` and `dms_grace_secs` are `u64`, so a seconds/milliseconds mix-up (e.g. a 90-day window passed as `7_776_000_000` ms) or `u64::MAX` would silently disable pruning (unbounded storage growth) or disable the dead-man switch (§5). Capping both at `315_360_000` s (86_400 × 3_650 ≈ 10 years) catches accidental units while affecting no realistic policy; `0` remains legal (feature disabled).
 - **Self-address rejection:** `env.current_contract_address()` is known at deployment (pre-`initialize`), and `set_policy` only runs post-initialize. Self-calls are governed by the fixed §6.1 rule rather than `assets`/`protocols`, a self-recipient is a no-op loop signaling a mis-pasted address, and self-entries in `recipient_window_caps`/`asset_caps` cannot be meaningful overrides.
 - **Cardinality bounds:** list bounds (`256` entries each) are checked before content and duplicate scans so validation work, authorization scans, and per-recipient storage stay strictly bounded.
+- **Empty `recipients` without the escape hatch — warn, do not reject (issue #351):** an empty
+  allowlist with `allow_any_recipient == false` can never admit a transfer, which is safe but
+  almost certainly unintended. Rejecting it was the alternative, and was not chosen: the
+  [watch-only baseline](docs/policy-templates.md) is *deliberately* configured this way (paused,
+  no assets, no destinations) as the posture to audit an agent from, so a hard rejection would
+  make a legitimate, safer-than-default configuration uninstallable. Instead `set_policy` emits
+  the dedicated `policy_no_recipient` event (§9) on every install of that combination,
+  making the inert state explicit in the audit trail; the empty-`assets` case is the symmetric
+  row above and is likewise accepted, with its own documented consequence.
+- **Cap magnitude ceiling (issue #321):** `MAX_CAP_MAGNITUDE = 10^24` smallest units is above any realistic token supply (at Stellar's usual 7 decimals, `10^17` whole tokens — roughly two million times the entire XLM supply) and far below `i128::MAX` (`≈1.7 × 10^38`). An unbounded cap is indistinguishable from "disabled" to the decision path while still charging the account for a window ledger nothing will prune; the ceiling keeps the saturating additions in `window.rs`/`engine.rs` belt-and-braces rather than load-bearing, and gives the SDK/dashboard a finite value to preflight against. Override caps are bounded too, because they are the effective per-tx / per-recipient ceiling for the assets and recipients they name.
 
 Invalid config → `InvalidConfig`, policy unchanged (fail-closed, never partially applied).
 
@@ -1781,6 +1979,7 @@ order:
 | `RecipientListTooLong` | `recipients` / `recipient_window_caps` / `blocked_recipients` over `MAX_RECIPIENT_ENTRIES` |
 | `AssetCapListTooLong` | `asset_caps` over `MAX_ASSET_CAP_ENTRIES` |
 | `AmountSign` | `per_tx_cap`, `window_cap`, or `asset_caps[i].per_tx_cap` negative |
+| `CapMagnitudeExceedsBound` | `per_tx_cap`, `window_cap`, or an override cap above `MAX_CAP_MAGNITUDE` (`10^24`; issue #321) |
 | `WindowRequiresWidth` | `window_cap != 0` (or a per-recipient cap `> 0`) with `window_secs == 0` |
 | `PerTxCapExceedsWindowCap` | `per_tx_cap > window_cap` when both are enabled (`> 0`; issue #33) |
 | `ActiveWindowOrder` | `active_until != 0 && active_until <= active_from` |
@@ -1801,6 +2000,24 @@ TTL effects in §9.5 still apply). The `InvalidConfig` code itself is
 unchanged — every decoder matching on it keeps working; surfacing
 `ValidationOutcome` in the SDK/dashboard is a cross-repo follow-up tracked in
 those repositories.
+
+**`dry_run_set_policy` — the same read under its operator-facing name (issue
+#352).** `pub fn dry_run_set_policy(env: Env, config: PolicyConfig) ->
+ValidationOutcome` returns exactly what `validate_policy` returns: both call one
+private `validation_outcome`, which walks `first_failing_rule`, the function
+`set_policy`'s `validate_config` gate is built on. Nothing about the rules is
+reimplemented, so there is no second rule set to drift, and the test suite
+asserts the equality on every §8 rule rather than trusting it
+(`assert_rejects_with` in `src/integration_tests.rs` compares the two reads
+before asserting the expected rule). The alias exists because "validate this
+before I sign the `set_policy`" is how SDKs and dashboards frame the call, while
+`validate_policy` is the name the ABI already shipped and stays for existing
+consumers. As a read it adds no authority — validation is pure, so it discloses
+nothing — but its cost is public, which is the trade-off of any permissionless
+entry point.
+
+The rule order this read reports is the order in §8's table: the first failing
+rule wins, and no rule reports more than one `PolicyRuleId`.
 
 ---
 
@@ -1856,6 +2073,7 @@ read them by key regardless.
 | `self_locked` | (none) | `at: u64`, `revision: u64` — lock timestamp and the `PolicyRevision` in force | agent `self_lock` |
 | `unfrozen` | (none) | `by: Address`, `rearmed_dms: bool` — whether `LastHeartbeat` was changed (DMS clock re-armed; §5) | admin unfreeze |
 | `policy_set` / `policy_revoked` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced | admin policy changes |
+| `policy_no_recipient` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this install produced | `set_policy` installs a policy with an empty `recipients` list and `allow_any_recipient == false`, i.e. one that can never admit a SAC transfer (issue #351; §8). Emitted once per such install, alongside `policy_set` |
 | `paused` / `resumed` | (none) | `by: Address`, `revision: u64` — the `PolicyRevision` this call produced; the counter advances only when the call actually flips `paused`, so a redundant double-pause emits the event with an unchanged revision | admin `pause()` / `resume()` (issues #289/#290) |
 | `window_reset` | (none) | `by: Address` — the admin that explicitly zeroed the rolling window (`set_policy` preserves it across edits, issue #289) | admin `reset_window()` (issue #289) |
 | `window_cap_increased` | (none) | `by: Address`, `old_cap: i128`, `new_cap: i128`, `revision: u64` — the admin that raised `window_cap` in place without resetting the ledger, plus the incremented `PolicyRevision` | admin `increase_window_cap(new_cap)` (issue #349) |
@@ -1998,10 +2216,12 @@ moves):
   (issue #306) — a halt path that gives the agent no fund-moving power
 
 Not guarded by v1 (documented, not hidden):
-- fine-grained amount/recipient limits on non-SAC protocol calls (§2, v2 item)
-- a live attacker who keeps the agent key heartbeating and never calls `self_lock` (caps still
-  bind them; the switch only fires on silence). `self_lock` closes the *honest runaway* half of
-  this gap, not the compromised-key half: an attacker holding the key simply does not call it.
+- fine-grained amount/recipient limits on non-SAC protocol calls (§2, v2 item); the caps
+  are therefore not a total maximum-loss bound — §3.3 states exactly what the bound covers
+- a live attacker who keeps the agent key heartbeating (caps still bind them; the switch only
+  fires on silence). A live attacker who never calls `self_lock` keeps this gap open: `self_lock`
+  closes only the *honest runaway* half, not the compromised-key half — an attacker holding the
+  key simply does not call it.
 - `self_lock` as a fund-safety control: an agent (or a compromised agent) can lock itself — and
   therefore the account — out. That is an availability outcome, not a loss-of-funds outcome; the
   call cannot move funds, change policy, or rotate keys, and only admin `unfreeze` reverses it.
