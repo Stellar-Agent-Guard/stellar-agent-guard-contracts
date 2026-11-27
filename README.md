@@ -178,7 +178,8 @@ pub fn initialize(env: Env, admin: Address, agent_pubkey: BytesN<32>)
 ```
 One-time setup, `require_auth(admin)`. Stores the policy `admin` and the agent's Ed25519
 public key (32 bytes) in instance storage, and initializes `AdminFrozen = false`,
-`LastHeartbeat = 0`. It also records the policy-model format version
+`LastHeartbeat = None` (never heartbeated; `Some(0)` — a heartbeat or install at ledger
+timestamp 0 — is a real attestation and arms the dead-man switch, issue #295). It also records the policy-model format version
 (`PolicyVersion`, readable via [`policy_version`](#policy_version-read)), so tooling can tell
 which `PolicyConfig` model this deployment implements. Until `set_policy` runs, the account is
 **default-deny** — every authorization is rejected with `not_initialized`/`no_policy`.

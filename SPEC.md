@@ -269,7 +269,7 @@ TTL on every write; see §9.5).
 | `PolicyVersion` | `u32` | instance | policy-model format version written at `initialize` (`POLICY_FORMAT_VERSION`, issue #339); absent before initialization. Read via `policy_version()` (never moved by `set_policy`, `revoke_policy`, or a pause) |
 | `Policy` | `PolicyConfig` | persistent | current policy (`None` = default-deny) |
 | `Window` | `WindowState` | persistent | rolling spend ledger for asset transfers (global + per-recipient) |
-| `LastHeartbeat` | `u64` | persistent | unix seconds of last agent heartbeat (0 = never) |
+| `LastHeartbeat` | `Option<u64>` | persistent | unix seconds of the last agent heartbeat: `Some(t)` = last attestation (may be `0`), `None` = never heartbeated (issue #295). The `Option` is what keeps "never" distinct from a heartbeat at ledger timestamp 0 — `Some(0)` arms the dead-man switch, `None` never does |
 | `AdminFrozen` | `bool` | persistent | admin-initiated freeze flag |
 | `PolicyRevision` | `u64` | persistent | policy sequence number; incremented on every `set_policy`/`revoke_policy` and on a `pause()`/`resume()` that actually flips `paused` (issues #289/#290), stamped into `policy_set`/`policy_revoked`/`paused`/`resumed`/`auth_checked` events (§9, issue #38) |
 
@@ -999,7 +999,8 @@ availability, which is the wrong default for a spend guard. The secondary reason
   `now`/`last_heartbeat`/`heartbeat_expires_at`, `status_at(as_of)`, and the `heartbeat` event's
   `expires_at` are all unix seconds. A sequence-based DMS would introduce a second clock and make
   `status_at` unable to project the DMS gate without a new ledger-sequence parameter.
-- **Storage and events stay intelligible.** `LastHeartbeat` is a `u64` unix timestamp and the
+- **Storage and events stay intelligible.** `LastHeartbeat` holds a unix timestamp (an
+  `Option<u64>` whose `Some` value is the timestamp, per §3) and the
   heartbeat event records `at + dms_grace_secs` as a deadline. A sequence basis would change the
   meaning of both fields, and a bare `u64` could no longer be interpreted without knowing which
   basis wrote it.

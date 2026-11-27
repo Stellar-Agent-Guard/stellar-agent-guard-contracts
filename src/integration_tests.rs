@@ -2686,7 +2686,7 @@ fn test_only_decision_trace_covers_allow_deny_and_malformed_paths() {
     };
     let state = AccountState {
         admin_frozen: false,
-        last_heartbeat: 0,
+        last_heartbeat: Some(0),
     };
     let prefix = [
         DecisionGate::AdminFrozen,
@@ -3042,10 +3042,10 @@ fn bundled_heartbeat_with_spend_blocked_when_heartbeat_expired() {
         h.env
             .storage()
             .persistent()
-            .get::<DataKey, u64>(&DataKey::LastHeartbeat)
+            .get::<DataKey, Option<u64>>(&DataKey::LastHeartbeat)
             .unwrap()
     });
-    assert_eq!(stored_heartbeat, 1_000_000);
+    assert_eq!(stored_heartbeat, Some(1_000_000));
 }
 
 /// Reads the most recent `event_unfrozen` data map and asserts the value of
@@ -3283,13 +3283,14 @@ fn admin_freeze_blocks_immediately_and_unfreeze_restores() {
 // SPEC §11 scenario 5: one runner, labelled scenarios, one assertion per row,
 // and failure messages that name the row that moved.
 //
-// The timelines start at `DMS_T0`, not at ledger time 0, because installing a
-// policy at ts 0 writes `LastHeartbeat = 0`, which is the encoding of "never
-// heartbeated". Rather than route around that collision, scenario B pins what
-// it means.
+// Every timeline except scenario B starts at `DMS_T0`. Scenario B starts at
+// ledger time 0 on purpose: since issue #295 the stored clock is an
+// `Option<u64>`, so a policy installed at timestamp 0 stores `Some(0)` — a real
+// attestation that arms the switch — instead of colliding with "never
+// heartbeated" (`None`).
 
-/// Base ledger timestamp for the timelines. Non-zero so `set_policy`'s clock arm
-/// cannot be mistaken for the "never heartbeated" sentinel.
+/// Base ledger timestamp for the timelines. Non-zero because a realistic
+/// deployment is never at epoch zero; epoch zero itself is scenario B's subject.
 const DMS_T0: u64 = 1_000_000;
 /// Grace used by the timeline scenarios (SPEC §5 recommends small values on
 /// testnet proofs; the matrix only needs the expiry boundary to be reachable).
@@ -3325,6 +3326,10 @@ enum DmsOp {
         last_heartbeat: u64,
     },
     /// `status()` snapshot: the two DMS-ish flags plus the persisted clock.
+    /// The `last_heartbeat` field is `u64` for wire-stability: it reads as `0`
+    /// for both "never heartbeated" (`None`) and a real epoch-zero heartbeat
+    /// (`Some(0)`). The gate uses the stored `Option`, so the two states are
+    /// distinct internally.
     Status {
         admin_frozen: bool,
         heartbeat_expired: bool,
@@ -3593,16 +3598,15 @@ fn dms_timeline_edge_matrix() {
     // Expired so consumers can alert. This scenario pins the asymmetry and the
     // moment the clock becomes armed.
     run_dms_scenario(
-        "B: LastHeartbeat = 0 (never armed)",
+        "B: install at ledger ts 0 arms the switch",
         &[
             (
-                "installing at ledger ts 0 stores the sentinel as the clock",
+                "installing at ledger ts 0 records Some(0), not the never-sentinel",
                 DmsOp::Install {
                     t: 0,
                     grace: DMS_GRACE,
                 },
             ),
-            ("t=500_000", DmsOp::Time { t: 500_000 }),
             (
                 "rule #3 cannot fire on the sentinel: not expired",
                 DmsOp::Status {
@@ -3612,37 +3616,29 @@ fn dms_timeline_edge_matrix() {
                 },
             ),
             (
-                "dms_health still reports Expired",
-                DmsOp::Health(DmsHealthStatus::Expired),
+                "health agrees the epoch-zero install is fresh",
+                DmsOp::Health(DmsHealthStatus::Ok),
             ),
-            ("spend is admitted", DmsOp::SpendOk),
+            ("spend inside the grace is admitted", DmsOp::SpendOk),
+            ("t=101 (past the 100s grace)", DmsOp::Time { t: 101 }),
             (
-                "a heartbeat is admitted and replaces the sentinel",
-                DmsOp::HeartbeatOk,
-            ),
-            (
-                "the clock is now armed",
-                DmsOp::Status {
-                    admin_frozen: false,
-                    heartbeat_expired: false,
-                    last_heartbeat: 500_000,
-                },
-            ),
-            ("t=500_101", DmsOp::Time { t: 500_101 }),
-            (
-                "once armed, the grace binds like any other",
+                "the epoch-zero clock expires like any other",
                 DmsOp::Status {
                     admin_frozen: false,
                     heartbeat_expired: true,
-                    last_heartbeat: 500_000,
+                    last_heartbeat: 0,
                 },
+            ),
+            (
+                "health reports Expired",
+                DmsOp::Health(DmsHealthStatus::Expired),
             ),
             (
                 "spend blocked with HeartbeatExpired",
                 DmsOp::SpendBlocked("heartbeat_expired"),
             ),
             (
-                "heartbeat blocked too",
+                "heartbeat blocked too: only unfreeze revives an expired account",
                 DmsOp::HeartbeatBlocked("heartbeat_expired"),
             ),
         ],
@@ -6087,6 +6083,10 @@ fn heartbeat_event_reports_expiry_from_current_grace() {
     let mut h = Harness::new();
     let mut policy = h.base_policy();
     policy.dms_grace_secs = 60;
+    // Install inside the grace of the heartbeat below. Since issue #295 an
+    // install at ledger ts 0 arms the clock at `Some(0)`, so waiting until
+    // 1_000 with grace 60 would (correctly) expire the account first.
+    h.set_time(990);
     h.install_policy(&policy);
 
     h.set_time(1_000);
@@ -6128,6 +6128,10 @@ fn heartbeat_event_uses_grace_current_at_emission_not_a_stale_one() {
     let mut h = Harness::new();
     let mut policy = h.base_policy();
     policy.dms_grace_secs = 60;
+    // Install at 990 so the 1_000 heartbeat is still inside the grace: since
+    // issue #295 an epoch-zero install arms the switch instead of hiding behind
+    // a sentinel, so installing at ts 0 would expire before the heartbeat.
+    h.set_time(990);
     h.install_policy(&policy);
 
     h.set_time(1_000);
