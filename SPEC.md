@@ -1,6 +1,7 @@
 # stellar-agent-guard-contracts — Architecture Specification (Phase 1)
 
 Status: **implemented against this spec; testnet proofs recorded in `tests/fixtures/README.md`.**
+Specification revision: **r1 — unreleased** (see [Specification revisions](#specification-revisions)).
 Mechanism is settled: **Soroban native Custom Account Abstraction.** This document specifies the
 smart-wallet policy contract, every public signature with auth-placement reasoning, the policy
 model (per-transaction cap, genuinely rolling window cap, recipient + protocol/function
@@ -13,6 +14,38 @@ site, see the [SPEC ↔ GitBook Cross-Reference Map](docs/README.md#spec--gitboo
 Sibling context: this project builds on the research and reasoning of `agent-spend-policy` (a
 related but distinct project). Mechanism conclusions are shared; code, policy math (rolling, not
 fixed-bucket), and the product split (contracts / SDK / dashboard) are this project's own.
+
+### Specification revisions
+
+This document is versioned separately from the crate so an auditor can answer one
+question from a deployed artifact: *which revision of the specification does this
+release implement?* (issue #146).
+
+- **Identifier.** Revisions are labelled `r1`, `r2`, … — monotonic, never reused.
+  The label is not the crate version: `Cargo.toml` may move for build-only
+  reasons while the normative text is unchanged, and a normative change may land
+  before any release is cut.
+- **Current revision.** The line directly under the status header always names the
+  revision of the text you are reading, plus one of two states: `unreleased`
+  (on `main`/a branch, not in any tagged release) or the contract release tag it
+  shipped in (`vX.Y.Z`).
+- **Relation to releases and Git.** A revision names a contract release only after
+  that release exists. The link is then `SPEC revision → release tag → commit`:
+  the tag is authoritative for the artifact, `provenance.txt` on the release pins
+  the tag to a commit, and this section pins the revision to both. A revision
+  that is not named by any release is explicitly `unreleased` — that state is not
+  a claim that it was released.
+- **When it changes.** Any normative change to this document (behavior, storage,
+  error variants, event vocabulary, enforcement scope) bumps the revision in the
+  same PR as the change. Editorial fixes that leave the normative meaning intact
+  do not.
+- **Release step.** [`docs/release-checklist.md`](docs/release-checklist.md#1-version-and-spec-revision)
+  requires the revision line and its table row to be updated while preparing a
+  release, so a tag is never published with a stale `unreleased` marker.
+
+| Revision | Contract release | Git revision | Scope |
+|---|---|---|---|
+| `r1` | none yet — no `v*` tag has been cut (crate `0.1.0`) | `main`, from the commit that introduced this section | Initial revision: Phase 1 specification as implemented in `src/`, with the Phase 1 testnet evidence in `tests/fixtures/README.md` and the re-verification contract in [`docs/fixture-verification.md`](docs/fixture-verification.md). |
 
 ---
 
