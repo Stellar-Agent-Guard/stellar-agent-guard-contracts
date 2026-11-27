@@ -83,6 +83,40 @@ PR description for #155):
 3. **Auditor-facing repro guide** — one page an auditor can execute end-to-end: toolchain
    pin → build → `cargo test` → fixture re-verification (ties items 8, 13, 20 together).
 
+## Audit evidence index
+
+A direct map from every pack item to the **live repo path(s)** an auditor can open
+immediately. Items marked 🔲 have no evidence yet; their tracking issue is the
+work item. All paths are relative to the repository root.
+
+| # | Pack item | Live path(s) |
+|---|---|---|
+| 1 | Property suite | [`src/window.rs`](../src/window.rs) — `spec_3_1_window_total_matches_independent_reference_model`; full randomized suite: 🔲 [#22](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/22) |
+| 2 | Invariants as executable checks | [`src/window.rs`](../src/window.rs), [`src/engine.rs`](../src/engine.rs) — assertion tests; decision-table extraction: 🔲 [#76](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/76) |
+| 3 | Fuzz targets | 🔲 [#65](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/65) — no `cargo-fuzz` setup yet |
+| 4 | Coverage report | 🔲 [#64](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/64) — not wired into CI |
+| 5 | Denial-path gas evidence | [`benches/denial_path_gas.rs`](../benches/denial_path_gas.rs), [`SPEC.md §4.1`](../SPEC.md) |
+| 6 | Decision-path cost regression guard | [`benches/denial_path_gas.rs`](../benches/denial_path_gas.rs) — bench harness; regression threshold: 🔲 [#75](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/75) |
+| 7 | Panic-safety guard | [`Cargo.toml`](../Cargo.toml) (`deny(clippy::…)`); [`scripts/check-wasm-panic-strings.sh`](../scripts/check-wasm-panic-strings.sh); [`scripts/wasm-panic-strings.allowlist`](../scripts/wasm-panic-strings.allowlist) |
+| 8 | Reproducible WASM build | [`scripts/check-wasm-reproducible.sh`](../scripts/check-wasm-reproducible.sh), [`rust-toolchain.toml`](../rust-toolchain.toml), [`docs/verification.md §Reproducible release verification recipe`](verification.md#reproducible-release-verification-recipe), [`.github/workflows/`](../.github/workflows/) (`wasm-reproducible` job) |
+| 9 | WASM size budget | [`scripts/check-wasm-size.sh`](../scripts/check-wasm-size.sh), [`scripts/wasm-size-budget.txt`](../scripts/wasm-size-budget.txt) |
+| 10 | Threat model | [`SPEC.md §10`](../SPEC.md), [`SPEC.md §10.1`](../SPEC.md), [`SPEC.md §10.2`](../SPEC.md); compromised-admin delta: 🔲 [#45](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/45) |
+| 11 | Reason glossary | [`docs/reason-glossary.md`](reason-glossary.md) |
+| 12 | SPEC/code consistency proof | [`SPEC.md §4`](../SPEC.md), [`SPEC.md §6`](../SPEC.md), [`src/errors.rs`](../src/errors.rs), [`tests/decision_table.rs`](../tests/decision_table.rs) |
+| 13 | Testnet fixture evidence | [`tests/fixtures/README.md`](../tests/fixtures/README.md), [`tests/fixtures/index.json`](../tests/fixtures/index.json), [`tests/fixtures_index.rs`](../tests/fixtures_index.rs), [`docs/verification.md`](verification.md) |
+| 14 | SECURITY.md audit status and disclosure channels | [`SECURITY.md`](../SECURITY.md), [`SUPPORT.md`](../SUPPORT.md), [`SECURITY.md §Security-reporting decision tree`](../SECURITY.md#security-reporting-decision-tree) |
+| 15 | Enforcement-scope honesty statement | [`docs/enforcement-scope.md`](enforcement-scope.md) |
+| 16 | Event payload audit | 🔲 [#105](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/105) — no complete documented-vs-emitted contract |
+| 17 | Runtime/custody analysis | [`tests/fixtures/README.md`](../tests/fixtures/README.md), [`docs/research/wire-format.md`](research/wire-format.md), [`SPEC.md §10.1`](../SPEC.md); `auth_contexts` handling: 🔲 [#114](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/114) |
+| 18 | SBOM (CycloneDX) | [`.github/workflows/release.yml`](../.github/workflows/release.yml) (`cargo cyclonedx` step); attached to every `v*` release as `sbom.cdx.json` |
+| 19 | Dependency audit | [`deny.toml`](../deny.toml), [`.github/dependabot.yml`](../.github/dependabot.yml); advisory gate: 🔲 [#69](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/69) |
+| 20 | Release provenance | [`.github/workflows/release.yml`](../.github/workflows/release.yml); `provenance.txt` attached to every `v*` release; [`docs/verification.md §Reproducible release verification recipe`](verification.md#reproducible-release-verification-recipe) |
+| 21 | ABI / version-compatibility snapshot | 🔲 [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/74) — `cargo semver-checks` not wired |
+
+**Coordination rule:** this index is updated in the same PR as the item it links
+to. A path listed here must exist and be reachable at the time the PR merges.
+Broken links are caught by [`scripts/verify-docs-reachability.sh`](../scripts/verify-docs-reachability.sh).
+
 ## Links
 
 - [Issue #6 — audit readiness](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/6) · [Issue #155 — this inventory](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/155)

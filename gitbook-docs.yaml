@@ -1,3 +1,8 @@
+# Repository-side authority for which directory feeds which GitBook space.
+# The connected branch, sync direction, and fork previews are configured in the
+# GitBook app, not here; a change to a `key`, `path`, or `directory` alters
+# published URLs and needs maintainer sign-off. Process, ownership, and the
+# post-merge handoff: docs/README.md and docs/contributing.md.
 site:
   title: Stellar Agent Guard — Contracts
   structure:

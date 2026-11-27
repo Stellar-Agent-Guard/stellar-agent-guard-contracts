@@ -134,7 +134,17 @@ process.
 
 ## Enforcement scope — read this before relying on the caps
 
-Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces window and pause state, but per-call amount/recipient limits are not yet enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered — full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing). Elaborated with tables in [docs/enforcement-scope.md](docs/enforcement-scope.md).
+Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces account-level gates — admin freeze, dead-man switch, pause, and the active window (`active_from` / `active_until`) — but per-call amount/recipient limits and rolling-window spend accounting are not applied to non-SAC calls; extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered. Full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing) (canonical; this paragraph is kept word-for-word identical by `scripts/check-enforcement-scope.sh`). Elaborated with tables in [docs/enforcement-scope.md](docs/enforcement-scope.md).
+
+**Maximum exposure.** For a policy with `per_tx_cap = P`, `window_cap = W`, and
+`window_secs = S`: both disabled → balance-limited; per-tx only → `P` per call,
+unbounded over time; window only → `W` per call and `W` per rolling `S` seconds;
+both → `P` per call and `W` per rolling `S` seconds. With the documented default
+`S = 86_400`, `P = 100`, `W = 1_000` means at most 100 per transfer and 1,000 per
+rolling day. This bound covers SAC transfers only — it is not a bound on value an
+allowlisted protocol can move, on an admin who rewrites policy, or on a live key
+that keeps heartbeating. Full derivation and caveats:
+[SPEC §3.3](SPEC.md#33-maximum-exposure-implied-by-a-policy-issue-323).
 
 ## Quick Start
 
@@ -143,7 +153,7 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 250 tests, isolated (no network)
+cargo test                                      # 289 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -203,11 +213,24 @@ pub fn set_policy(env: Env, config: PolicyConfig)
 Admin-only (`require_auth(Admin)`). Replaces the policy. A policy *edit* — any `set_policy`
 while a policy is already installed — **preserves the rolling window and the
 dead-man-switch clock** ([issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289)):
-pausing, tightening, or widening a policy no longer hands the agent a fresh budget or a
+pausing, tightening, or widening a policy does not hand the agent a fresh budget or a
 fresh grace period. Only a *first* install (no policy stored, including an install after
 `revoke_policy`) seeds an empty window and arms the dead-man-switch clock at install time
 (a fresh policy gets full grace). To zero the window explicitly, call
 [`reset_window`](#reset_window) below. The `PolicyConfig` fields:
+
+> ⚠️ **Caps are not continuous across every policy change.** An ordinary edit keeps the
+> ledger, so the cap keeps binding against the same accumulated spend — but two admin-attested
+> actions *do* reset the budget. First, editing `window_cap` re-compares the preserved total
+> against a new ceiling, so a raise immediately admits the difference the old cap would have
+> blocked (the spend history survives; the budget does not). Second, `revoke_policy` followed
+> by `set_policy` is a first install: it starts an empty window and re-arms the dead-man
+> clock, i.e. a full budget and full grace. Read that pair as a budget reset, not as a policy
+> edit. Whether `set_policy` itself should reset the window is discussed in
+> [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289)
+> and [issue #305](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/305);
+> see [SPEC §7](SPEC.md#7-public-surface--exact-signatures-and-auth-placement) for the full
+> statement of what survives an edit.
 
 Tooling can validate this CLI JSON shape against the checked-in
 [`policy.schema.json`](policy.schema.json); the contract remains the authoritative validator.
@@ -219,7 +242,7 @@ Tooling can validate this CLI JSON shape against the checked-in
 | `window_secs` | `u64` | rolling window width in seconds (default 86_400) |
 | `window_cap` | `i128` | rolling cap within `window_secs` (shared across all assets in `assets`); `0` = disabled |
 | `assets` | `Vec<Address>` | SAC token contracts whose transfers get parsed and enforced |
-| `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`) |
+| `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`); **this authorizes the contract's whole function body — it can move funds beyond `per_tx_cap`/`window_cap`** ([SPEC §2.2](SPEC.md#22-what-a-protocol-allowlist-entry-actually-authorizes-issue-322)) |
 | `recipients` | `Vec<Address>` | allowed SAC transfer destinations |
 | `recipient_window_caps` | `Vec<RecipientCap>` | per-recipient rolling-window cap overrides; recipients not listed use the global `window_cap` |
 | `blocked_recipients` | `Vec<Address>` | denied SAC transfer destinations; checked before the allowlist and `allow_any_recipient` |
@@ -246,7 +269,8 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
     "window_cap": "150", "window_secs": 60 }'
 # → Event: EventPolicySet (event_policy_set)
 ```
-Other validation rules (SPEC §8): negative caps, `window_cap > 0` or a positive
+Other validation rules (SPEC §8): negative caps, caps above `MAX_CAP_MAGNITUDE`
+(`10^24` smallest units, on the global and override caps alike), `window_cap > 0` or a positive
 `recipient_window_caps` entry with `window_secs == 0`, duplicate
 assets/recipients/blocked_recipients/protocol contracts, duplicate recipients in
 `recipient_window_caps`, a non-empty intersection between `recipients` and
@@ -265,10 +289,19 @@ single rolling window: an admitted transfer is compared against the asset's
 and the shared `window_cap` still bounds total spend across assets.
 
 **Not sure where to start?** Copy-paste presets for common operator personas —
-day-trader agent, payments bot, watch-only + heartbeat, max security — each with
-rationale, explicit "what it does NOT protect against", and unaudited/mainnet/DMS-grace
-warnings, are in [`docs/policy-templates.md`](docs/policy-templates.md). A CI test
-installs every preset documented there, so the examples stay valid.
+day-trader agent, payments bot, watch-only + heartbeat, max security — live as
+loadable JSON files in [`examples/policies/`](examples/policies/), with rationale,
+explicit "what it does NOT protect against", and unaudited/mainnet/DMS-grace
+warnings in [`docs/policy-templates.md`](docs/policy-templates.md). A CI test
+discovers and installs every file in that directory, so a preset cannot be added
+without validation.
+
+| Preset | File |
+|---|---|
+| Day-trader agent | [`examples/policies/day-trader-agent.json`](examples/policies/day-trader-agent.json) |
+| Payments bot | [`examples/policies/payments-bot.json`](examples/policies/payments-bot.json) |
+| Watch-only + heartbeat | [`examples/policies/watch-only-heartbeat.json`](examples/policies/watch-only-heartbeat.json) |
+| Max security | [`examples/policies/max-security.json`](examples/policies/max-security.json) |
 
 ### `reset_window`
 ```rust
@@ -414,7 +447,8 @@ other:
 | Control | How to set / clear | Operational effect |
 |---|---|---|
 | `AdminFrozen` | `freeze()` / `unfreeze()` | Immediate halt without changing the policy or rolling window. `unfreeze()` also sets `LastHeartbeat = now`, re-arming the dead-man clock when needed. |
-| `PolicyConfig.paused` | `set_policy()` with `paused: true` / `false` | Replaces the whole policy each time, resets the rolling window, and re-arms the dead-man clock. This is not a pause-only update; see [issue #289](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/289). Dedicated `pause()`/`resume()` functions are proposed in [issue #290](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/290), but are not available yet. |
+| `PolicyConfig.paused` | `pause()` / `resume()` | Flips the stored flag in place. The rolling window, the dead-man-switch clock, and every other field are untouched, so it does not hand the agent a fresh budget or a fresh grace period. |
+| `PolicyConfig.paused` (legacy route) | `set_policy()` with `paused: true` / `false` | Replaces the whole policy each time; an *edit* preserves the rolling window and the dead-man clock (issue #289), so it is a config change, not a budget reset. Prefer `pause()`/`resume()` for a pause-only change. |
 
 For gate ordering and full incident guidance, see [SPEC §4.2](SPEC.md#42-admin-freeze-and-policy-pause).
 
@@ -468,6 +502,16 @@ budget: it does not refund what was spent while paused.
 > `unfreeze` also re-arms the dead-man-switch clock (warning above), while `resume` touches
 > nothing but the flag.
 
+### `self_lock` (agent)
+```rust
+pub fn self_lock(env: Env)   // agent only — sets AdminFrozen = true
+```
+The agent can stop its own spending when the admin key is unavailable (issue #306). It
+routes through `__check_auth`, so the registered agent's signature is verified and the
+normal account gates apply. It is strictly a capability *reduction*: no funds move, and
+the agent cannot clear the flag — only the admin's `unfreeze` revives the account. It
+emits `event_self_locked`. See [SPEC §5](SPEC.md#5-dead-man-switch--precise-definition).
+
 ### `policy` (read)
 ```rust
 pub fn policy(env: Env) -> Option<PolicyConfig>
@@ -516,6 +560,22 @@ read returns the documented sentinel `NO_POLICY_DIGEST` = `sha256("")`
 and sentinel are pinned in [SPEC §7.3](SPEC.md#73-policy-hash--cheap-drift-detection-policy_hash)
 and locked by `tests/policy_hash_encoding.rs`; off-chain, reproduce the hash by SHA-256-ing
 the XDR bytes of the same policy value your SDK builds for `set_policy`.
+
+### `validate_policy` / `dry_run_set_policy` (read)
+```rust
+pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+pub fn dry_run_set_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+```
+No auth, no events, no state writes. Both names are one read ([issue #352](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/352)):
+they validate the **candidate** `config` against the same SPEC §8 rules, in the same order,
+that `set_policy` enforces, and return `Valid` or `Invalid(rule)` naming the **first** failing
+rule. Nothing is installed, so an SDK or dashboard can preflight a policy — and point at the
+offending field — before asking the admin to sign the `set_policy` transaction, instead of
+deducing the cause from `set_policy`'s single opaque `InvalidConfig` code. The rule →
+`PolicyRuleId` mapping is in [SPEC §8](SPEC.md#8-config-validation-set_policy); the equality
+between the two names and the write they preflight is asserted for every rule in the test
+suite. Like `set_policy`, both are only meaningful after `initialize` (the self-address rules
+compare against the contract's own address).
 
 ### `status` (read)
 ```rust
@@ -648,9 +708,14 @@ host invokes it automatically on every authorization the account must approve. S
 3. Snapshot policy state: `PolicyConfig` (missing → `NoPolicy`), `AdminFrozen`,
    `LastHeartbeat`, ledger time.
 4. Run the decision table (`decide`) — account-level gates first, then a per-context
-   decision loop, then commit window admissions only if every context passed.
+   decision loop. Asset transfers check asset pause, positive amount, blocked
+   recipient, recipient allowlist, per-transaction cap, then window cap, in the
+   stable precedence documented in [SPEC §6.2](SPEC.md#62-asset-sac-calls--fully-enforced).
+   Window admissions commit only if every context passed.
 5. Return `Ok(())` to approve the transaction, or `Err(reason)` to reject it — and emit
-   the `auth_checked` event either way. **Observability caveat:** a blocked decision rolls
+   the `auth_checked` event either way, with real topics in both cases:
+   `[event_auth_checked, allowed, ok]` on approval and
+   `[event_auth_checked, blocked, <reason>]` on denial (SPEC §9). **Observability caveat:** a blocked decision rolls
    back with its transaction, so its `auth_checked` event never becomes a committed ledger
    event — blocks reach observers via simulation diagnostics and the SDK telemetry listener
    (dual-stream), not via raw RPC `getEvents`. See
@@ -832,8 +897,8 @@ its own commit so the hash change is reviewable on its own.
 ┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
 │ Load PolicyConfig,   │◀───│ Contexts >64 block   │◀───│ Load instance +      │
 │ AdminFrozen,         │    │ before gates; else   │    │ persistent state     │
-│ LastHeartbeat, now   │    │ admin → DMS → pause  │    │ (agent key, policy,  │
-└──────────┬───────────┘    │ → active window      │    │ window, heartbeat)   │
+│ LastHeartbeat, now   │    │ no policy → frozen → │    │ (agent key, policy,  │
+└──────────┬───────────┘    │ DMS → pause → window │    │ window, heartbeat)   │
            │                └──────────────────────┘    └──────────────────────┘
            ▼
 ┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
@@ -877,22 +942,27 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    ledger time are loaded. No policy stored ⇒ `NoPolicy` — the account is default-deny.
 3. **Context-count bound.** After loading the snapshot, `decide` rejects more than
    `MAX_AUTH_CONTEXTS` (64) contexts as one aggregate block before account gates or parsing.
-4. **Account-level gates** (in this order): admin freeze, dead-man switch (grace elapsed
-   since last heartbeat), pause, active window. Any one firing rejects the transaction
-   regardless of what the call is. Every context in the transaction is evaluated against
+4. **Account-level gates** (in this order): no policy (default deny), admin freeze
+   (admin `freeze` or agent `self_lock`), dead-man switch (grace elapsed since last
+   heartbeat), pause, active window. Any one firing rejects the transaction regardless
+   of what the call is. The order is stated once in [SPEC §4](SPEC.md#4-policy-semantics--decision-table);
+   this walkthrough references that table. Every context in the transaction is evaluated against
    the pre-transaction snapshot, so the dead-man gate evaluates the pre-transaction
    heartbeat for every context in the transaction, including the heartbeat self-call — a
    bundle of `[heartbeat, transfer]` against an expired account is judged against the
    expired state and blocked, never updating `LastHeartbeat`.
-4. **Per-context classification.** `parse_call` turns each `Context` into a typed call:
-   `SelfCall` (only `heartbeat` is allowed), `CreateContract` (denied in v1),
+5. **Per-context classification.** `parse_call` turns each `Context` into a typed call:
+   `SelfCall` (only `heartbeat` and `self_lock` are allowed), `CreateContract` (denied in v1),
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).
-6. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
-   denylist (checked before the allowlist and before `allow_any_recipient`), recipient
-   allowlist, per-tx cap, and the rolling-window projection (existing total + amounts
-   staged earlier in the same request). Protocol calls get contract + per-function
-   allowlisting. Everything else is denied by default.
+6. **Per-kind enforcement.** Asset transfers get the full treatment, in this fixed
+   order: amount validity (`amount > 0`), recipient denylist (checked before the
+   allowlist and before `allow_any_recipient`), recipient allowlist, per-tx cap, then
+   the rolling-window projection (existing total + amounts staged earlier in the same
+   request). Only the **first** failing rule is the reported reason — a transfer to a
+   disallowed recipient that also exceeds the per-tx cap reports `recipient_not_allowed`
+   ([SPEC §6.2](SPEC.md#62-asset-sac-calls--fully-enforced)). Protocol calls get contract
+   + per-function allowlisting. Everything else is denied by default.
 7. **All-or-nothing commit.** Window admissions are staged and only committed to storage
    if *every* context passes — a partially-validating batch can never spend. `Ok(())`
    approves; `Err(reason)` rejects the entire transaction, and the `auth_checked` event
@@ -921,6 +991,10 @@ maximum TTL on writes and refreshed to maximum when a read finds less than half 
 TTL remaining (`persist_get`; SPEC §9.5). The `Window` ledger is bounded at
 `MAX_WINDOW_ENTRIES = 8192` — beyond that, the two oldest entries merge *forward*
 (conservative over-count), so the `window_cap` ceiling is never exceeded (SPEC §3.1).
+Because the ledger holds at most one entry per second, accounting is exact for any
+`window_secs <= 8192` (2 h 16 min 32 s); a wider window (`window_secs = 604800`, say) stays
+exact for a sparse spender but falls back to the conservative merge once spending sustains
+1 Hz for 8192 s, and that merge can only make enforcement stricter, never looser (SPEC §3.1).
 Each successful admission that triggers the merge emits `event_window_merged` with the ledger
 kind, retained timestamp, and merged spend amount or protocol call count (SPEC §9).
 See [Storage rent and TTL cost model](docs/rent-and-ttl.md) for approximate XLM costs,
@@ -975,10 +1049,12 @@ Stellar Agent Guard operates across three dedicated repositories:
 - `examples/agent-loop.md` — the steady-state **24/7 agent runtime loop**: heartbeat
   cadence formula (`interval ≤ grace / 3`), pre-flight `check()`, blocked-reason
   handling table, and stop conditions, with tested `agent-tx` commands.
-- `docs/policy-templates.md` — copy-paste **policy presets** for common operator
-  personas (day-trader, payments bot, watch-only, max security), each with rationale
-  and explicit "what it does NOT protect against"; kept installable by
-  `src/policy_preset_tests.rs`, which installs every preset via `set_policy` in CI.
+- `examples/policies/` — the **policy presets** as loadable JSON files
+  (day-trader, payments bot, watch-only, max security), one file per preset, each
+  validated against `policy.schema.json` and installed via `set_policy` in CI.
+- `docs/policy-templates.md` — the rationale, warnings, and "what it does NOT
+  protect against" for each preset, linking to the files in `examples/policies/`
+  as the source of truth.
 - `tests/fixtures/README.md` — the real testnet evidence for the five scenarios,
   with a machine-readable scenario index in
   [`tests/fixtures/index.json`](tests/fixtures/index.json) (scenario → tx hash →
@@ -1069,11 +1145,11 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-250 tests (unit + integration) cover the policy decision engine — including the regression
+289 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `229 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green this session: `281 passed; 0 failed`.
 
 These are the commands CI runs, in the order the `ci` job runs them — the same
 block a contributor can copy (see also
