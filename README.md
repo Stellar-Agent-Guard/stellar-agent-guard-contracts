@@ -136,6 +136,16 @@ process.
 
 Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces account-level gates — admin freeze, dead-man switch, pause, and the active window (`active_from` / `active_until`) — but per-call amount/recipient limits and rolling-window spend accounting are not applied to non-SAC calls; extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered. Full statement: [SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing) (canonical; this paragraph is kept word-for-word identical by `scripts/check-enforcement-scope.sh`). Elaborated with tables in [docs/enforcement-scope.md](docs/enforcement-scope.md).
 
+**Maximum exposure.** For a policy with `per_tx_cap = P`, `window_cap = W`, and
+`window_secs = S`: both disabled → balance-limited; per-tx only → `P` per call,
+unbounded over time; window only → `W` per call and `W` per rolling `S` seconds;
+both → `P` per call and `W` per rolling `S` seconds. With the documented default
+`S = 86_400`, `P = 100`, `W = 1_000` means at most 100 per transfer and 1,000 per
+rolling day. This bound covers SAC transfers only — it is not a bound on value an
+allowlisted protocol can move, on an admin who rewrites policy, or on a live key
+that keeps heartbeating. Full derivation and caveats:
+[SPEC §3.3](SPEC.md#33-maximum-exposure-implied-by-a-policy-issue-323).
+
 ## Quick Start
 
 ```bash
@@ -145,10 +155,10 @@ cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none
 # → Finished `release` profile [optimized] target(s) in …
 #   artifact: target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 273 tests, isolated (no network)
+cargo test                                      # 289 tests, isolated (no network)
 # → one `test result:` line per test binary, each of the form
 #   test result: ok. <N> passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-#   summed across every test binary: 273 passed; 0 failed
+#   summed across every test binary: 289 passed; 0 failed
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -165,7 +175,7 @@ successful [`set_policy`](#set-policy) is expected to emit
 `Event: EventPolicySet (event_policy_set)` — that section has the full command and
 its expected output.
 
-The `273` above is a claim CI checks, so it cannot rot silently here:
+The `289` above is a claim CI checks, so it cannot rot silently here:
 `scripts/verify-readme.sh` runs `cargo test`, sums the `passed` counts, and fails when
 they differ from the `N tests` number stated in this README. When you add or remove
 tests, update that line **and** the [Testing & CI](#testing--ci) total in the same PR
@@ -250,7 +260,7 @@ Tooling can validate this CLI JSON shape against the checked-in
 | `window_secs` | `u64` | rolling window width in seconds (default 86_400) |
 | `window_cap` | `i128` | rolling cap within `window_secs` (shared across all assets in `assets`); `0` = disabled |
 | `assets` | `Vec<Address>` | SAC token contracts whose transfers get parsed and enforced |
-| `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`) |
+| `protocols` | `Vec<ProtocolRule>` | allowlisted non-asset contracts (`contract` + optional `fns: Option<Vec<Symbol>>`); **this authorizes the contract's whole function body — it can move funds beyond `per_tx_cap`/`window_cap`** ([SPEC §2.2](SPEC.md#22-what-a-protocol-allowlist-entry-actually-authorizes-issue-322)) |
 | `recipients` | `Vec<Address>` | allowed SAC transfer destinations |
 | `recipient_window_caps` | `Vec<RecipientCap>` | per-recipient rolling-window cap overrides; recipients not listed use the global `window_cap` |
 | `blocked_recipients` | `Vec<Address>` | denied SAC transfer destinations; checked before the allowlist and `allow_any_recipient` |
@@ -277,7 +287,8 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
     "window_cap": "150", "window_secs": 60 }'
 # → Event: EventPolicySet (event_policy_set)
 ```
-Other validation rules (SPEC §8): negative caps, `window_cap > 0` or a positive
+Other validation rules (SPEC §8): negative caps, caps above `MAX_CAP_MAGNITUDE`
+(`10^24` smallest units, on the global and override caps alike), `window_cap > 0` or a positive
 `recipient_window_caps` entry with `window_secs == 0`, duplicate
 assets/recipients/blocked_recipients/protocol contracts, duplicate recipients in
 `recipient_window_caps`, a non-empty intersection between `recipients` and
@@ -568,6 +579,22 @@ and sentinel are pinned in [SPEC §7.3](SPEC.md#73-policy-hash--cheap-drift-dete
 and locked by `tests/policy_hash_encoding.rs`; off-chain, reproduce the hash by SHA-256-ing
 the XDR bytes of the same policy value your SDK builds for `set_policy`.
 
+### `validate_policy` / `dry_run_set_policy` (read)
+```rust
+pub fn validate_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+pub fn dry_run_set_policy(env: Env, config: PolicyConfig) -> ValidationOutcome
+```
+No auth, no events, no state writes. Both names are one read ([issue #352](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/352)):
+they validate the **candidate** `config` against the same SPEC §8 rules, in the same order,
+that `set_policy` enforces, and return `Valid` or `Invalid(rule)` naming the **first** failing
+rule. Nothing is installed, so an SDK or dashboard can preflight a policy — and point at the
+offending field — before asking the admin to sign the `set_policy` transaction, instead of
+deducing the cause from `set_policy`'s single opaque `InvalidConfig` code. The rule →
+`PolicyRuleId` mapping is in [SPEC §8](SPEC.md#8-config-validation-set_policy); the equality
+between the two names and the write they preflight is asserted for every rule in the test
+suite. Like `set_policy`, both are only meaningful after `initialize` (the self-address rules
+compare against the contract's own address).
+
 ### `status` (read)
 ```rust
 pub fn status(env: Env) -> Status
@@ -699,7 +726,10 @@ host invokes it automatically on every authorization the account must approve. S
 3. Snapshot policy state: `PolicyConfig` (missing → `NoPolicy`), `AdminFrozen`,
    `LastHeartbeat`, ledger time.
 4. Run the decision table (`decide`) — account-level gates first, then a per-context
-   decision loop, then commit window admissions only if every context passed.
+   decision loop. Asset transfers check asset pause, positive amount, blocked
+   recipient, recipient allowlist, per-transaction cap, then window cap, in the
+   stable precedence documented in [SPEC §6.2](SPEC.md#62-asset-sac-calls--fully-enforced).
+   Window admissions commit only if every context passed.
 5. Return `Ok(())` to approve the transaction, or `Err(reason)` to reject it — and emit
    the `auth_checked` event either way, with real topics in both cases:
    `[event_auth_checked, allowed, ok]` on approval and
@@ -943,11 +973,14 @@ Walkthrough, matching the real code path in `src/lib.rs` / `src/engine.rs`:
    `SelfCall` (only `heartbeat` and `self_lock` are allowed), `CreateContract` (denied in v1),
    `Unknown`/`AssetOther` (denied), `AssetTransfer` (a known SAC transfer with parsed
    recipient and amount), or `Protocol` (a call to an allowlisted contract).
-6. **Per-kind enforcement.** Asset transfers get the full treatment — recipient
-   denylist (checked before the allowlist and before `allow_any_recipient`), recipient
-   allowlist, per-tx cap, and the rolling-window projection (existing total + amounts
-   staged earlier in the same request). Protocol calls get contract + per-function
-   allowlisting. Everything else is denied by default.
+6. **Per-kind enforcement.** Asset transfers get the full treatment, in this fixed
+   order: amount validity (`amount > 0`), recipient denylist (checked before the
+   allowlist and before `allow_any_recipient`), recipient allowlist, per-tx cap, then
+   the rolling-window projection (existing total + amounts staged earlier in the same
+   request). Only the **first** failing rule is the reported reason — a transfer to a
+   disallowed recipient that also exceeds the per-tx cap reports `recipient_not_allowed`
+   ([SPEC §6.2](SPEC.md#62-asset-sac-calls--fully-enforced)). Protocol calls get contract
+   + per-function allowlisting. Everything else is denied by default.
 7. **All-or-nothing commit.** Window admissions are staged and only committed to storage
    if *every* context passes — a partially-validating batch can never spend. `Ok(())`
    approves; `Err(reason)` rejects the entire transaction, and the `auth_checked` event
@@ -976,6 +1009,10 @@ maximum TTL on writes and refreshed to maximum when a read finds less than half 
 TTL remaining (`persist_get`; SPEC §9.5). The `Window` ledger is bounded at
 `MAX_WINDOW_ENTRIES = 8192` — beyond that, the two oldest entries merge *forward*
 (conservative over-count), so the `window_cap` ceiling is never exceeded (SPEC §3.1).
+Because the ledger holds at most one entry per second, accounting is exact for any
+`window_secs <= 8192` (2 h 16 min 32 s); a wider window (`window_secs = 604800`, say) stays
+exact for a sparse spender but falls back to the conservative merge once spending sustains
+1 Hz for 8192 s, and that merge can only make enforcement stricter, never looser (SPEC §3.1).
 Each successful admission that triggers the merge emits `event_window_merged` with the ledger
 kind, retained timestamp, and merged spend amount or protocol call count (SPEC §9).
 See [Storage rent and TTL cost model](docs/rent-and-ttl.md) for approximate XLM costs,
@@ -1005,7 +1042,8 @@ Stellar Agent Guard operates across three dedicated repositories:
                                       │
                                       ▼ Soroban RPC
 ┌─────────────────────────────────────────────────────────────────────────┐
-│               stellar-agent-guard-contracts (Soroban / Rust)             │
+│              stellar-agent-guard-contracts (Soroban / Rust)             │
+│                               [THIS REPO]                               │
 │            • CustomAccount interface (`__check_auth`)                   │
 │            • Spend caps, rolling window, allowlists, dead-man switch    │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -1110,6 +1148,8 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Project Status
 
+Status legend: ✅ completed; 🚧 in progress; 🔲 not started/open. A “v2, tracked as issue” status must include a direct link to its tracking issue.
+
 | Feature | Status |
 |---|---|
 | Custom-account `__check_auth` enforcement | ✅ |
@@ -1126,13 +1166,13 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-273 tests (unit + integration) cover the policy decision engine — including the regression
+289 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
 scenario matrix (SPEC §11). Verified green locally on the pinned `1.99.0` toolchain
 (`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
-`cargo test`): **273 passed; 0 failed**, summed across every test binary. That total
+`cargo test`): **289 passed; 0 failed**, summed across every test binary. That total
 is not a hand-maintained guess — `scripts/verify-readme.sh` runs `cargo test` and
 fails if the number above drifts from reality, so adding tests means updating the
 quick-start comment and this paragraph in the same PR.
