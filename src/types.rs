@@ -1025,4 +1025,67 @@ mod tests {
              agent-tx's `GuardKey` until it passes."
         );
     }
+
+    #[test]
+    fn parsed_call_variants_and_parser_denial_reasons_round_trip() {
+        use soroban_sdk::xdr::{ContractId, Hash, ScAddress};
+        use soroban_sdk::TryFromVal;
+
+        let env = Env::default();
+        let make_addr = |id: u8| {
+            Address::try_from_val(&env, &ScAddress::Contract(ContractId(Hash([id; 32]))))
+                .unwrap_or_else(|err| panic!("fixed contract address must convert: {err:?}"))
+        };
+        let variants = [
+            ParsedCall::AssetTransfer {
+                asset: make_addr(1),
+                to: make_addr(2),
+                amount: 10,
+            },
+            ParsedCall::AssetOther {
+                asset: make_addr(1),
+                fname: Symbol::new(&env, "mint"),
+            },
+            ParsedCall::Protocol {
+                contract: make_addr(3),
+                fname: Symbol::new(&env, "swap"),
+            },
+            ParsedCall::SelfCall {
+                fname: Symbol::new(&env, "heartbeat"),
+            },
+            ParsedCall::CreateContract,
+            ParsedCall::Unknown {
+                contract: make_addr(4),
+                fname: Symbol::new(&env, "unknown"),
+            },
+        ];
+
+        let mut seen = 0u8;
+        for call in &variants {
+            match call {
+                ParsedCall::AssetTransfer { .. } => seen |= 1 << 0,
+                ParsedCall::AssetOther { .. } => seen |= 1 << 1,
+                ParsedCall::Protocol { .. } => seen |= 1 << 2,
+                ParsedCall::SelfCall { .. } => seen |= 1 << 3,
+                ParsedCall::CreateContract => seen |= 1 << 4,
+                ParsedCall::Unknown { .. } => seen |= 1 << 5,
+            }
+        }
+        assert_eq!(
+            seen, 0b11_1111,
+            "all six ParsedCall variants must be distinct"
+        );
+
+        for err in [
+            Error::InvalidAmount,
+            Error::AssetFnNotAllowed,
+            Error::UnknownContract,
+            Error::SelfFunctionNotAllowed,
+            Error::CreateContractNotAllowed,
+            Error::FunctionNotAllowed,
+        ] {
+            let reason = err.to_block_reason();
+            assert_eq!(Error::from_block_reason(&reason), Some(err));
+        }
+    }
 }
