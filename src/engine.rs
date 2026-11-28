@@ -858,6 +858,42 @@ mod tests {
         }
     }
 
+    #[track_caller]
+    fn assert_first_allowed(decisions: &[Decision]) {
+        assert_eq!(
+            decisions.first(),
+            Some(&Decision::Allowed),
+            "expected first decision to be Allowed, got {decisions:?}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_first_allowed_with_context(decisions: &[Decision], context: &str) {
+        assert_eq!(
+            decisions.first(),
+            Some(&Decision::Allowed),
+            "{context}: expected first decision to be Allowed, got {decisions:?}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_first_blocked(decisions: &[Decision], expected: Error) {
+        assert_eq!(
+            decisions.first(),
+            Some(&Decision::Blocked(expected)),
+            "expected first decision to be Blocked({expected:?}), got {decisions:?}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_first_blocked_with_context(decisions: &[Decision], expected: Error, context: &str) {
+        assert_eq!(
+            decisions.first(),
+            Some(&Decision::Blocked(expected)),
+            "{context}: expected first decision to be Blocked({expected:?}), got {decisions:?}"
+        );
+    }
+
     #[test]
     fn auth_context_batch_at_limit_is_evaluated_and_policy_still_applies() {
         let env = Env::default();
@@ -947,10 +983,7 @@ mod tests {
         let verdicts = decide(&env, &sa, Some(&p), &alive(), &mut ledger, 1_000, contexts);
 
         assert_eq!(verdicts.len(), 1);
-        assert!(matches!(
-            verdicts.first().unwrap(),
-            Decision::Blocked(Error::TooManyAuthContexts)
-        ));
+        assert_first_blocked(&verdicts, Error::TooManyAuthContexts);
         assert_eq!(ledger.total, before_total);
         assert_eq!(ledger.len(), before_len);
     }
@@ -1017,10 +1050,7 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx(&env, 1, 2, 5)];
         let d = decide(&env, &sa, None, &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::NoPolicy)
-        ));
+        assert_first_blocked(&d, Error::NoPolicy);
     }
 
     /// Issue #306: `self_lock` is admitted through the fixed §6.1 self-call
@@ -1040,7 +1070,7 @@ mod tests {
             }),
         ];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx);
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
         assert_eq!(l.total, 0, "self_lock moves no funds");
     }
 
@@ -1076,10 +1106,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 20)],
         );
-        assert!(matches!(
-            capped.first().unwrap(),
-            Decision::Blocked(Error::PerTxCapExceeded)
-        ));
+        assert_first_blocked(&capped, Error::PerTxCapExceeded);
 
         // Asset 2 falls back to the global 100-unit cap: the same amount is
         // admitted. A decision that ignored `asset` could not tell these apart.
@@ -1092,7 +1119,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 2, 2, 20)],
         );
-        assert!(matches!(uncapped.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&uncapped);
     }
 
     #[test]
@@ -1104,7 +1131,7 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx(&env, 1, 2, 5)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
         assert_eq!(l.total, 5);
     }
 
@@ -1154,7 +1181,7 @@ mod tests {
         let ctx = vec![&env, transfer_from_ctx(&env, 1, 9, 7, 2, 5)];
 
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
         assert_eq!(l.total, 5, "the window is debited with the args[3] amount");
     }
 
@@ -1171,10 +1198,7 @@ mod tests {
         let ctx = vec![&env, transfer_from_ctx(&env, 1, 9, 2, 7, 5)];
 
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::RecipientNotAllowed)
-        ));
+        assert_first_blocked(&d, Error::RecipientNotAllowed);
     }
 
     #[test]
@@ -1190,10 +1214,7 @@ mod tests {
         let ctx = vec![&env, transfer_from_ctx(&env, 1, 9, 7, 2, 50)];
 
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::PerTxCapExceeded)
-        ));
+        assert_first_blocked(&d, Error::PerTxCapExceeded);
     }
 
     #[test]
@@ -1216,10 +1237,7 @@ mod tests {
                 1000,
                 vec![&env, transfer_ctx(&env, 1, 2, amount)],
             );
-            assert!(matches!(
-                d.first().unwrap(),
-                Decision::Blocked(Error::InvalidAmount)
-            ));
+            assert_first_blocked(&d, Error::InvalidAmount);
             assert_eq!(l, before, "rejected amount {amount} mutated the window");
         }
     }
@@ -1235,10 +1253,7 @@ mod tests {
         let before = l.clone();
         let ctx = vec![&env, transfer_ctx(&env, 1, 2, 11)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::PerTxCapExceeded)
-        ));
+        assert_first_blocked(&d, Error::PerTxCapExceeded);
         assert_eq!(l, before);
     }
 
@@ -1253,15 +1268,12 @@ mod tests {
         // amount == per_tx_cap (50): admitted (SPEC §6.2 rule 4: cap is inclusive).
         let ctx_admit = vec![&env, transfer_ctx(&env, 1, 2, 50)];
         let d1 = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx_admit);
-        assert_eq!(d1.first(), Some(&Decision::Allowed));
+        assert_first_allowed(&d1);
 
         // amount == per_tx_cap + 1 (51): blocked with PerTxCapExceeded.
         let ctx_block = vec![&env, transfer_ctx(&env, 1, 2, 51)];
         let d2 = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx_block);
-        assert!(matches!(
-            d2.first(),
-            Some(Decision::Blocked(Error::PerTxCapExceeded))
-        ));
+        assert_first_blocked(&d2, Error::PerTxCapExceeded);
     }
 
     #[test]
@@ -1274,16 +1286,13 @@ mod tests {
         let before = l.clone();
         let ctx = vec![&env, transfer_ctx(&env, 1, 99, 5)];
         let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::RecipientNotAllowed)
-        ));
+        assert_first_blocked(&d, Error::RecipientNotAllowed);
         assert_eq!(l, before);
         let mut p2 = base_policy(&env);
         p2.allow_any_recipient = true;
         let ctx2 = vec![&env, transfer_ctx(&env, 1, 99, 5)];
         let d2 = decide(&env, &sa, Some(&p2), &alive(), &mut l, 1000, ctx2.clone());
-        assert!(matches!(d2.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d2);
     }
 
     /// SPEC §6.2: the asset-transfer rules run in a fixed order and only the
@@ -1305,10 +1314,10 @@ mod tests {
         // 50 also exceeds the per-tx cap of 10: both rules fail at once.
         let ctx = vec![&env, transfer_ctx(&env, 1, 99, 50)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, ctx);
-        assert_eq!(
-            d.first(),
-            Some(&Decision::Blocked(Error::RecipientNotAllowed)),
-            "the recipient allowlist is evaluated before the per-tx cap (SPEC §6.2)"
+        assert_first_blocked_with_context(
+            &d,
+            Error::RecipientNotAllowed,
+            "the recipient allowlist is evaluated before the per-tx cap (SPEC §6.2)",
         );
     }
 
@@ -1325,10 +1334,10 @@ mod tests {
 
         let ctx = vec![&env, transfer_ctx(&env, 1, 99, 0)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, ctx);
-        assert_eq!(
-            d.first(),
-            Some(&Decision::Blocked(Error::InvalidAmount)),
-            "amount validity is evaluated before the recipient allowlist (SPEC §6.2)"
+        assert_first_blocked_with_context(
+            &d,
+            Error::InvalidAmount,
+            "amount validity is evaluated before the recipient allowlist (SPEC §6.2)",
         );
     }
 
@@ -1347,10 +1356,7 @@ mod tests {
         let before = l.clone();
         let ctx = vec![&env, transfer_ctx(&env, 1, 3, 5)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::RecipientBlocked)
-        ));
+        assert_first_blocked(&d, Error::RecipientBlocked);
         assert_eq!(l, before);
 
         // allow_any_recipient true but address is blocked -> still blocked.
@@ -1358,16 +1364,13 @@ mod tests {
         p2.allow_any_recipient = true;
         p2.blocked_recipients = vec![&env, blocked_addr.clone()];
         let d2 = decide(&env, &sa, Some(&p2), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d2.first().unwrap(),
-            Decision::Blocked(Error::RecipientBlocked)
-        ));
+        assert_first_blocked(&d2, Error::RecipientBlocked);
         assert_eq!(l, before);
 
         // A different non-blocked recipient passes under the escape hatch.
         let ctx3 = vec![&env, transfer_ctx(&env, 1, 4, 5)];
         let d3 = decide(&env, &sa, Some(&p2), &alive(), &mut l, 1000, ctx3);
-        assert!(matches!(d3.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d3);
     }
 
     #[test]
@@ -1420,8 +1423,8 @@ mod tests {
             },
         ];
         let mut ledger = Ledger::empty(&env);
-        assert_eq!(
-            decide(
+        assert_first_blocked_with_context(
+            &decide(
                 &env,
                 &sa,
                 Some(&p),
@@ -1429,16 +1432,15 @@ mod tests {
                 &mut ledger,
                 1_000,
                 vec![&env, transfer_ctx(&env, 1, 99, 0)],
-            )
-            .first(),
-            Some(&Decision::Blocked(Error::AssetNotAllowed)),
-            "asset pause precedes amount validation"
+            ),
+            Error::AssetNotAllowed,
+            "asset pause precedes amount validation",
         );
 
         let mut p = base_policy(&env);
         p.blocked_recipients = vec![&env, addr(&env, 3)];
-        assert_eq!(
-            decide(
+        assert_first_blocked_with_context(
+            &decide(
                 &env,
                 &sa,
                 Some(&p),
@@ -1446,16 +1448,15 @@ mod tests {
                 &mut ledger,
                 1_000,
                 vec![&env, transfer_ctx(&env, 1, 3, 0)],
-            )
-            .first(),
-            Some(&Decision::Blocked(Error::InvalidAmount)),
-            "amount validation precedes the blocked-recipient check"
+            ),
+            Error::InvalidAmount,
+            "amount validation precedes the blocked-recipient check",
         );
 
         let mut p = base_policy(&env);
         p.blocked_recipients = vec![&env, addr(&env, 3)];
-        assert_eq!(
-            decide(
+        assert_first_blocked_with_context(
+            &decide(
                 &env,
                 &sa,
                 Some(&p),
@@ -1463,16 +1464,15 @@ mod tests {
                 &mut ledger,
                 1_000,
                 vec![&env, transfer_ctx(&env, 1, 3, 5)],
-            )
-            .first(),
-            Some(&Decision::Blocked(Error::RecipientBlocked)),
-            "blocked-recipient denial precedes the allowlist check"
+            ),
+            Error::RecipientBlocked,
+            "blocked-recipient denial precedes the allowlist check",
         );
 
         let mut p = base_policy(&env);
         p.per_tx_cap = 1;
-        assert_eq!(
-            decide(
+        assert_first_blocked_with_context(
+            &decide(
                 &env,
                 &sa,
                 Some(&p),
@@ -1480,18 +1480,17 @@ mod tests {
                 &mut ledger,
                 1_000,
                 vec![&env, transfer_ctx(&env, 1, 99, 2)],
-            )
-            .first(),
-            Some(&Decision::Blocked(Error::RecipientNotAllowed)),
-            "recipient allowlist denial precedes the per-transaction cap"
+            ),
+            Error::RecipientNotAllowed,
+            "recipient allowlist denial precedes the per-transaction cap",
         );
 
         let mut p = base_policy(&env);
         p.per_tx_cap = 1;
         p.window_cap = 1;
         ledger.admit(1_000, 1);
-        assert_eq!(
-            decide(
+        assert_first_blocked_with_context(
+            &decide(
                 &env,
                 &sa,
                 Some(&p),
@@ -1499,10 +1498,9 @@ mod tests {
                 &mut ledger,
                 1_000,
                 vec![&env, transfer_ctx(&env, 1, 2, 2)],
-            )
-            .first(),
-            Some(&Decision::Blocked(Error::PerTxCapExceeded)),
-            "per-transaction cap denial precedes the window cap"
+            ),
+            Error::PerTxCapExceeded,
+            "per-transaction cap denial precedes the window cap",
         );
     }
 
@@ -1514,7 +1512,7 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx(&env, 1, 2, 5)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
     }
 
     #[test]
@@ -1525,10 +1523,7 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx(&env, 7, 2, 5)];
         let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::UnknownContract)
-        ));
+        assert_first_blocked(&d, Error::UnknownContract);
     }
 
     /// SPEC §6.2: a listed asset invoked with anything other than
@@ -1543,10 +1538,7 @@ mod tests {
         // Contract 1 is in `assets`; `mint` is not a SAC transfer function.
         let ctx = vec![&env, proto_ctx(&env, 1, "mint")];
         let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::AssetFnNotAllowed)
-        ));
+        assert_first_blocked(&d, Error::AssetFnNotAllowed);
     }
 
     /// SPEC §6.2 / issue #101: every administrative or custody-altering SAC
@@ -1562,12 +1554,10 @@ mod tests {
             let mut l = Ledger::empty(&env);
             let ctx = vec![&env, proto_ctx(&env, 1, function)];
             let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx);
-            assert!(
-                matches!(
-                    d.first().unwrap(),
-                    Decision::Blocked(Error::AssetFnNotAllowed)
-                ),
-                "{function} on a listed SAC must be AssetFnNotAllowed"
+            assert_first_blocked_with_context(
+                &d,
+                Error::AssetFnNotAllowed,
+                &alloc::format!("{function} on a listed SAC must be AssetFnNotAllowed"),
             );
         }
     }
@@ -1584,12 +1574,10 @@ mod tests {
             // Contract 7 is not in `assets` or `protocols`.
             let ctx = vec![&env, proto_ctx(&env, 7, function)];
             let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx);
-            assert!(
-                matches!(
-                    d.first().unwrap(),
-                    Decision::Blocked(Error::UnknownContract)
-                ),
-                "{function} on an unlisted contract must stay UnknownContract"
+            assert_first_blocked_with_context(
+                &d,
+                Error::UnknownContract,
+                &alloc::format!("{function} on an unlisted contract must stay UnknownContract"),
             );
         }
     }
@@ -1610,7 +1598,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 60)],
         );
-        assert!(matches!(d1.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d1);
         let before_rejection = l.clone();
         let d2 = decide(
             &env,
@@ -1621,10 +1609,7 @@ mod tests {
             2000,
             vec![&env, transfer_ctx(&env, 1, 2, 60)],
         );
-        assert!(matches!(
-            d2.first().unwrap(),
-            Decision::Blocked(Error::WindowCapExceeded)
-        ));
+        assert_first_blocked(&d2, Error::WindowCapExceeded);
         assert_eq!(l, before_rejection);
         let d3 = decide(
             &env,
@@ -1635,7 +1620,7 @@ mod tests {
             200_000,
             vec![&env, transfer_ctx(&env, 1, 2, 60)],
         );
-        assert!(matches!(d3.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d3);
     }
 
     #[test]
@@ -1670,7 +1655,7 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx(&env, 1, 2, i128::MAX)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx);
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
         assert_eq!(l.total, 0);
         assert_eq!(l.entries.len(), 0);
     }
@@ -1698,7 +1683,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, i128::MAX - 5)],
         );
-        assert!(matches!(d1.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d1);
         assert_eq!(l.total, i128::MAX - 5);
 
         // 6 more would overflow i128 -> deliberate stable block, no mutation.
@@ -1712,10 +1697,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 6)],
         );
-        assert!(matches!(
-            d2.first().unwrap(),
-            Decision::Blocked(Error::WindowCapExceeded)
-        ));
+        assert_first_blocked(&d2, Error::WindowCapExceeded);
         assert_eq!(l, before);
 
         // 5 more lands exactly on the ceiling and is still admitted.
@@ -1728,7 +1710,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 5)],
         );
-        assert!(matches!(d3.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d3);
         assert_eq!(l.total, i128::MAX);
 
         // Any further unit at the ceiling overflows -> blocked, not trapped.
@@ -1742,10 +1724,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 1)],
         );
-        assert!(matches!(
-            d4.first().unwrap(),
-            Decision::Blocked(Error::WindowCapExceeded)
-        ));
+        assert_first_blocked(&d4, Error::WindowCapExceeded);
         assert_eq!(l, before);
     }
 
@@ -1776,7 +1755,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, i128::MAX - 5)],
         );
-        assert!(matches!(d1.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d1);
         assert_eq!(l.recipient_total(&addr(&env, 2)), i128::MAX - 5);
 
         let before = l.clone();
@@ -1789,10 +1768,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 6)],
         );
-        assert!(matches!(
-            d2.first().unwrap(),
-            Decision::Blocked(Error::WindowCapExceeded)
-        ));
+        assert_first_blocked(&d2, Error::WindowCapExceeded);
         assert_eq!(l, before, "an overflowing recipient spend must not mutate");
     }
 
@@ -1812,48 +1788,39 @@ mod tests {
             },
         ];
         let mut l = Ledger::empty(&env);
-        assert!(matches!(
-            decide(
+        assert_first_allowed(&decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, proto_ctx(&env, 3, "swap")],
+        ));
+        assert_first_blocked(
+            &decide(
                 &env,
                 &sa,
                 Some(&p),
                 &alive(),
                 &mut l,
                 1000,
-                vec![&env, proto_ctx(&env, 3, "swap")]
-            )
-            .first()
-            .unwrap(),
-            Decision::Allowed
-        ));
-        assert!(matches!(
-            decide(
+                vec![&env, proto_ctx(&env, 3, "drain")],
+            ),
+            Error::FunctionNotAllowed,
+        );
+        assert_first_blocked(
+            &decide(
                 &env,
                 &sa,
                 Some(&p),
                 &alive(),
                 &mut l,
                 1000,
-                vec![&env, proto_ctx(&env, 3, "drain")]
-            )
-            .first()
-            .unwrap(),
-            Decision::Blocked(Error::FunctionNotAllowed)
-        ));
-        assert!(matches!(
-            decide(
-                &env,
-                &sa,
-                Some(&p),
-                &alive(),
-                &mut l,
-                1000,
-                vec![&env, proto_ctx(&env, 4, "swap")]
-            )
-            .first()
-            .unwrap(),
-            Decision::Blocked(Error::UnknownContract)
-        ));
+                vec![&env, proto_ctx(&env, 4, "swap")],
+            ),
+            Error::UnknownContract,
+        );
     }
 
     #[test]
@@ -1872,33 +1839,23 @@ mod tests {
             },
         ];
         let mut l = Ledger::empty(&env);
-        assert!(matches!(
-            decide(
-                &env,
-                &sa,
-                Some(&p),
-                &alive(),
-                &mut l,
-                1000,
-                vec![&env, proto_ctx(&env, 3, "swap")]
-            )
-            .first()
-            .unwrap(),
-            Decision::Allowed
+        assert_first_allowed(&decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, proto_ctx(&env, 3, "swap")],
         ));
-        assert!(matches!(
-            decide(
-                &env,
-                &sa,
-                Some(&p),
-                &alive(),
-                &mut l,
-                1000,
-                vec![&env, proto_ctx(&env, 3, "anything_else")]
-            )
-            .first()
-            .unwrap(),
-            Decision::Allowed
+        assert_first_allowed(&decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, proto_ctx(&env, 3, "anything_else")],
         ));
     }
 
@@ -1932,19 +1889,14 @@ mod tests {
             },
         ];
         let mut l = Ledger::empty(&env);
-        assert!(matches!(
-            decide(
-                &env,
-                &sa,
-                Some(&p),
-                &alive(),
-                &mut l,
-                1000,
-                vec![&env, proto_ctx(&env, 3, "swap")]
-            )
-            .first()
-            .unwrap(),
-            Decision::Allowed
+        assert_first_allowed(&decide(
+            &env,
+            &sa,
+            Some(&p),
+            &alive(),
+            &mut l,
+            1000,
+            vec![&env, proto_ctx(&env, 3, "swap")],
         ));
     }
 
@@ -1964,20 +1916,18 @@ mod tests {
             },
         ];
         let mut l = Ledger::empty(&env);
-        assert!(matches!(
-            decide(
+        assert_first_blocked(
+            &decide(
                 &env,
                 &sa,
                 Some(&p),
                 &alive(),
                 &mut l,
                 1000,
-                vec![&env, proto_ctx(&env, 3, "drain")]
-            )
-            .first()
-            .unwrap(),
-            Decision::Blocked(Error::FunctionNotAllowed)
-        ));
+                vec![&env, proto_ctx(&env, 3, "drain")],
+            ),
+            Error::FunctionNotAllowed,
+        );
     }
 
     #[test]
@@ -1996,20 +1946,18 @@ mod tests {
             },
         ];
         let mut l = Ledger::empty(&env);
-        assert!(matches!(
-            decide(
+        assert_first_blocked(
+            &decide(
                 &env,
                 &sa,
                 Some(&p),
                 &alive(),
                 &mut l,
                 1000,
-                vec![&env, proto_ctx(&env, 4, "swap")]
-            )
-            .first()
-            .unwrap(),
-            Decision::Blocked(Error::UnknownContract)
-        ));
+                vec![&env, proto_ctx(&env, 4, "swap")],
+            ),
+            Error::UnknownContract,
+        );
     }
 
     #[test]
@@ -2034,7 +1982,7 @@ mod tests {
         // Must be classified as Protocol (allowed), not AssetTransfer.
         let ctx = vec![&env, transfer_ctx(&env, 3, 2, 5)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
         assert_eq!(l.total, 0);
     }
 
@@ -2050,29 +1998,25 @@ mod tests {
             admin_frozen: true,
             last_heartbeat: 0,
         };
-        assert!(matches!(
-            decide(&env, &sa, p.as_ref(), &frozen, &mut l, 1000, ctx.clone())
-                .first()
-                .unwrap(),
-            Decision::Blocked(Error::AdminFrozen)
-        ));
+        assert_first_blocked(
+            &decide(&env, &sa, p.as_ref(), &frozen, &mut l, 1000, ctx.clone()),
+            Error::AdminFrozen,
+        );
 
         let mut paused = base_policy(&env);
         paused.paused = true;
-        assert!(matches!(
-            decide(
+        assert_first_blocked(
+            &decide(
                 &env,
                 &sa,
                 Some(&paused),
                 &alive(),
                 &mut l,
                 1000,
-                ctx.clone()
-            )
-            .first()
-            .unwrap(),
-            Decision::Blocked(Error::Paused)
-        ));
+                ctx.clone(),
+            ),
+            Error::Paused,
+        );
 
         let mut dms = base_policy(&env);
         dms.dms_grace_secs = 100;
@@ -2080,21 +2024,22 @@ mod tests {
             admin_frozen: false,
             last_heartbeat: 500,
         };
-        assert!(matches!(
-            decide(&env, &sa, Some(&dms), &st, &mut l, 700, ctx.clone())
-                .first()
-                .unwrap(),
-            Decision::Blocked(Error::HeartbeatExpired)
-        ));
+        assert_first_blocked(
+            &decide(&env, &sa, Some(&dms), &st, &mut l, 700, ctx.clone()),
+            Error::HeartbeatExpired,
+        );
         let st2 = AccountState {
             admin_frozen: false,
             last_heartbeat: 650,
         };
-        assert!(matches!(
-            decide(&env, &sa, Some(&dms), &st2, &mut l, 700, ctx.clone())
-                .first()
-                .unwrap(),
-            Decision::Allowed
+        assert_first_allowed(&decide(
+            &env,
+            &sa,
+            Some(&dms),
+            &st2,
+            &mut l,
+            700,
+            ctx.clone(),
         ));
     }
 
@@ -2213,10 +2158,7 @@ mod tests {
             p.active_from - 1,
             vec![&env, transfer_ctx(&env, 1, 2, 5)],
         );
-        assert!(matches!(
-            d_before.first().unwrap(),
-            Decision::Blocked(Error::OutsideActiveWindow)
-        ));
+        assert_first_blocked(&d_before, Error::OutsideActiveWindow);
 
         // Exactly at `active_from`: allowed (inclusive lower bound).
         let d_from = decide(
@@ -2228,7 +2170,7 @@ mod tests {
             p.active_from,
             vec![&env, transfer_ctx(&env, 1, 2, 5)],
         );
-        assert!(matches!(d_from.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d_from);
 
         // Exactly at `active_until`: allowed (inclusive upper bound).
         let d_until = decide(
@@ -2240,7 +2182,7 @@ mod tests {
             p.active_until,
             vec![&env, transfer_ctx(&env, 1, 2, 5)],
         );
-        assert!(matches!(d_until.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d_until);
 
         // One second after the window closes: blocked.
         let d_after = decide(
@@ -2252,10 +2194,7 @@ mod tests {
             p.active_until + 1,
             vec![&env, transfer_ctx(&env, 1, 2, 5)],
         );
-        assert!(matches!(
-            d_after.first().unwrap(),
-            Decision::Blocked(Error::OutsideActiveWindow)
-        ));
+        assert_first_blocked(&d_after, Error::OutsideActiveWindow);
     }
 
     #[test]
@@ -2281,9 +2220,9 @@ mod tests {
                 now,
                 vec![&env, transfer_ctx(&env, 1, 2, 5)],
             );
-            assert!(
-                matches!(d.first().unwrap(), Decision::Allowed),
-                "now={now} should be allowed when both bounds are disabled"
+            assert_first_allowed_with_context(
+                &d,
+                &alloc::format!("now={now} should be allowed when both bounds are disabled"),
             );
         }
     }
@@ -2300,21 +2239,22 @@ mod tests {
             last_heartbeat: 500,
         };
         let mut l = Ledger::empty(&env);
-        assert!(matches!(
-            decide(&env, &sa, Some(&p), &expired, &mut l, 700, hb.clone())
-                .first()
-                .unwrap(),
-            Decision::Blocked(Error::HeartbeatExpired)
-        ));
+        assert_first_blocked(
+            &decide(&env, &sa, Some(&p), &expired, &mut l, 700, hb.clone()),
+            Error::HeartbeatExpired,
+        );
         let fresh = AccountState {
             admin_frozen: false,
             last_heartbeat: 650,
         };
-        assert!(matches!(
-            decide(&env, &sa, Some(&p), &fresh, &mut l, 700, hb.clone())
-                .first()
-                .unwrap(),
-            Decision::Allowed
+        assert_first_allowed(&decide(
+            &env,
+            &sa,
+            Some(&p),
+            &fresh,
+            &mut l,
+            700,
+            hb.clone(),
         ));
     }
 
@@ -2355,10 +2295,7 @@ mod tests {
             }),
         ];
         let d = decide(&env, &sa, p.as_ref(), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::SelfFunctionNotAllowed)
-        ));
+        assert_first_blocked(&d, Error::SelfFunctionNotAllowed);
     }
 
     fn transfer_ctx_with_extra_args(
@@ -2422,10 +2359,7 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_ctx_with_extra_args(&env, 1, 2, 5, 1)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::UnknownContract)
-        ));
+        assert_first_blocked(&d, Error::UnknownContract);
     }
 
     #[test]
@@ -2446,10 +2380,7 @@ mod tests {
             }),
         ];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::UnknownContract)
-        ));
+        assert_first_blocked(&d, Error::UnknownContract);
     }
 
     #[test]
@@ -2460,10 +2391,7 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_from_ctx_with_arg_count(&env, 1, 2, 5, 5)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::UnknownContract)
-        ));
+        assert_first_blocked(&d, Error::UnknownContract);
     }
 
     #[test]
@@ -2474,10 +2402,7 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_from_ctx_with_arg_count(&env, 1, 2, 5, 3)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::UnknownContract)
-        ));
+        assert_first_blocked(&d, Error::UnknownContract);
     }
 
     #[test]
@@ -2488,7 +2413,7 @@ mod tests {
         let mut l = Ledger::empty(&env);
         let ctx = vec![&env, transfer_from_ctx_with_arg_count(&env, 1, 2, 5, 4)];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx.clone());
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
     }
 
     #[test]
@@ -2519,10 +2444,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 101)],
         );
-        assert!(matches!(
-            d1.first().unwrap(),
-            Decision::Blocked(Error::WindowCapExceeded)
-        ));
+        assert_first_blocked(&d1, Error::WindowCapExceeded);
 
         // r3 is not in the override map, so it falls back to the global cap.
         let d2 = decide(
@@ -2534,7 +2456,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 3, 500)],
         );
-        assert!(matches!(d2.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d2);
 
         // Allowed spends to r2 are tracked only in its own ledger.
         let d3 = decide(
@@ -2546,7 +2468,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 80)],
         );
-        assert!(matches!(d3.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d3);
         let d4 = decide(
             &env,
             &sa,
@@ -2556,10 +2478,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 21)],
         );
-        assert!(matches!(
-            d4.first().unwrap(),
-            Decision::Blocked(Error::WindowCapExceeded)
-        ));
+        assert_first_blocked(&d4, Error::WindowCapExceeded);
     }
 
     #[test]
@@ -2616,10 +2535,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 60)],
         );
-        assert!(matches!(
-            d.first().unwrap(),
-            Decision::Blocked(Error::WindowCapExceeded)
-        ));
+        assert_first_blocked(&d, Error::WindowCapExceeded);
     }
 
     #[test]
@@ -2648,10 +2564,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 2, 51)],
         );
-        assert!(matches!(
-            d1.first().unwrap(),
-            Decision::Blocked(Error::WindowCapExceeded)
-        ));
+        assert_first_blocked(&d1, Error::WindowCapExceeded);
 
         // Unlisted recipient falls back to the global cap and is allowed.
         let d2 = decide(
@@ -2663,7 +2576,7 @@ mod tests {
             1000,
             vec![&env, transfer_ctx(&env, 1, 99, 500)],
         );
-        assert!(matches!(d2.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d2);
     }
 
     #[test]
@@ -2694,7 +2607,7 @@ mod tests {
                 1000,
                 vec![&env, proto_ctx(&env, 3, "swap")],
             );
-            assert!(matches!(d.first().unwrap(), Decision::Allowed));
+            assert_first_allowed(&d);
         }
     }
 
@@ -2726,10 +2639,9 @@ mod tests {
                 1000,
                 vec![&env, proto_ctx(&env, 3, "swap")],
             );
-            assert!(
-                matches!(d.first().unwrap(), Decision::Allowed),
-                "Call {} should be allowed",
-                i + 1
+            assert_first_allowed_with_context(
+                &d,
+                &alloc::format!("Call {} should be allowed", i + 1),
             );
         }
         assert_eq!(l.protocol_call_total, 3);
@@ -2744,10 +2656,7 @@ mod tests {
             1000,
             vec![&env, proto_ctx(&env, 3, "swap")],
         );
-        assert!(matches!(
-            d4.first().unwrap(),
-            Decision::Blocked(Error::ProtocolCallRateExceeded)
-        ));
+        assert_first_blocked(&d4, Error::ProtocolCallRateExceeded);
         // Ledger should not be updated
         assert_eq!(l.protocol_call_total, 3);
     }
@@ -2780,7 +2689,7 @@ mod tests {
             1000,
             vec![&env, proto_ctx(&env, 3, "swap")],
         );
-        assert!(matches!(d1.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d1);
         let d2 = decide(
             &env,
             &sa,
@@ -2790,7 +2699,7 @@ mod tests {
             1000,
             vec![&env, proto_ctx(&env, 3, "swap")],
         );
-        assert!(matches!(d2.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d2);
         assert_eq!(l.protocol_call_total, 2);
 
         // Third call within window blocked
@@ -2803,10 +2712,7 @@ mod tests {
             1050,
             vec![&env, proto_ctx(&env, 3, "swap")],
         );
-        assert!(matches!(
-            d3.first().unwrap(),
-            Decision::Blocked(Error::ProtocolCallRateExceeded)
-        ));
+        assert_first_blocked(&d3, Error::ProtocolCallRateExceeded);
 
         // After window expires (1000 + 100 = 1100), new calls allowed
         let d4 = decide(
@@ -2818,7 +2724,7 @@ mod tests {
             1200,
             vec![&env, proto_ctx(&env, 3, "swap")],
         );
-        assert!(matches!(d4.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d4);
         assert_eq!(l.protocol_call_total, 1);
     }
 
@@ -2847,7 +2753,7 @@ mod tests {
             proto_ctx(&env, 3, "swap"), // cumulative 3 > limit of 2
         ];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx);
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
         assert!(matches!(d.get(1).unwrap(), Decision::Allowed));
         assert!(matches!(
             d.get(2).unwrap(),
@@ -2884,7 +2790,7 @@ mod tests {
             proto_ctx(&env, 3, "swap"),    // Protocol - counts
         ];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx);
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
         assert!(matches!(d.get(1).unwrap(), Decision::Allowed));
         assert!(matches!(d.get(2).unwrap(), Decision::Allowed));
         assert!(matches!(d.get(3).unwrap(), Decision::Allowed));
@@ -2975,7 +2881,7 @@ mod tests {
             transfer_ctx(&env, 2, 2, 60),
         ];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, ctx);
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
         assert_eq!(l.total, 100);
     }
 
@@ -3002,7 +2908,7 @@ mod tests {
         ];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, batch);
         assert_eq!(d.len(), 2);
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
         assert!(matches!(
             d.get(1).unwrap(),
             Decision::Blocked(Error::PerTxCapExceeded)
@@ -3016,7 +2922,7 @@ mod tests {
         // (If the staged 40 had committed, 40 + 70 = 110 would have exceeded window_cap 100).
         let subsequent = vec![&env, transfer_ctx(&env, 1, 2, 70)];
         let d2 = decide(&env, &sa, Some(&p), &alive(), &mut l, 1000, subsequent);
-        assert!(matches!(d2.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d2);
         assert_eq!(l.total, 70);
         assert_eq!(l.len(), 1);
     }
@@ -3062,7 +2968,7 @@ mod tests {
         ];
         let d = decide(&env, &sa, Some(&p), &alive(), &mut l, 1_000, batch);
         assert_eq!(d.len(), 3, "one verdict per context");
-        assert!(matches!(d.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&d);
         assert!(matches!(d.get(1).unwrap(), Decision::Allowed));
         assert!(matches!(
             d.get(2).unwrap(),
@@ -3089,7 +2995,7 @@ mod tests {
             1_000,
             vec![&env, transfer_ctx(&env, 1, 2, 70)],
         );
-        assert!(matches!(after.first().unwrap(), Decision::Allowed));
+        assert_first_allowed(&after);
         assert_eq!(l.total, 70);
 
         // Two failing contexts at once: the reported reason is whichever comes
@@ -3275,5 +3181,115 @@ mod tests {
             ledger, before,
             "zero-context authorization must not admit any spend or protocol calls"
         );
+    }
+
+    #[test]
+    fn parse_call_reaches_every_variant_and_malformed_shapes_deny_safely() {
+        use soroban_sdk::auth::{
+            ContractExecutable, CreateContractHostFnContext,
+            CreateContractWithConstructorHostFnContext,
+        };
+        use soroban_sdk::BytesN;
+
+        let env = Env::default();
+        let sa = self_addr(&env);
+        let mut p = base_policy(&env);
+        p.protocols = vec![
+            &env,
+            ProtocolRule {
+                contract: addr(&env, 3),
+                fns: Some(vec![&env, Symbol::new(&env, "swap")]),
+                paused: false,
+            },
+        ];
+
+        // 1. AssetTransfer (transfer and transfer_from)
+        assert!(matches!(
+            parse_call(&env, &sa, &transfer_ctx(&env, 1, 2, 5), &p),
+            ParsedCall::AssetTransfer { amount: 5, .. }
+        ));
+        assert!(matches!(
+            parse_call(&env, &sa, &transfer_from_ctx(&env, 1, 9, 7, 2, 11), &p),
+            ParsedCall::AssetTransfer { amount: 11, .. }
+        ));
+        // 2. AssetOther
+        assert!(matches!(
+            parse_call(&env, &sa, &proto_ctx(&env, 1, "mint"), &p),
+            ParsedCall::AssetOther { .. }
+        ));
+        // 3. Protocol
+        assert!(matches!(
+            parse_call(&env, &sa, &proto_ctx(&env, 3, "swap"), &p),
+            ParsedCall::Protocol { .. }
+        ));
+        // 4. SelfCall
+        assert!(matches!(
+            parse_call(&env, &sa, &heartbeat_ctx(&env, &sa), &p),
+            ParsedCall::SelfCall { .. }
+        ));
+        // 5. CreateContract (both host-function variants)
+        let create_no_ctor = Context::CreateContractHostFn(CreateContractHostFnContext {
+            executable: ContractExecutable::Wasm(BytesN::from_array(&env, &[0; 32])),
+            salt: BytesN::from_array(&env, &[1; 32]),
+        });
+        let create_with_ctor =
+            Context::CreateContractWithCtorHostFn(CreateContractWithConstructorHostFnContext {
+                executable: ContractExecutable::Wasm(BytesN::from_array(&env, &[2; 32])),
+                salt: BytesN::from_array(&env, &[3; 32]),
+                constructor_args: Vec::new(&env),
+            });
+        assert_eq!(
+            parse_call(&env, &sa, &create_no_ctor, &p),
+            ParsedCall::CreateContract
+        );
+        assert_eq!(
+            parse_call(&env, &sa, &create_with_ctor, &p),
+            ParsedCall::CreateContract
+        );
+        // 6. Unknown (unlisted contract + malformed SAC transfer arg types)
+        assert!(matches!(
+            parse_call(&env, &sa, &proto_ctx(&env, 99, "anything"), &p),
+            ParsedCall::Unknown { .. }
+        ));
+        let mut bad_type_args: Vec<Val> = Vec::new(&env);
+        bad_type_args.push_back(addr(&env, 9).into_val(&env));
+        bad_type_args.push_back(42_i128.into_val(&env)); // not an Address
+        bad_type_args.push_back(true.into_val(&env)); // not an i128
+        let malformed_transfer = Context::Contract(ContractContext {
+            contract: addr(&env, 1),
+            fn_name: Symbol::new(&env, "transfer"),
+            args: bad_type_args,
+        });
+        assert!(matches!(
+            parse_call(&env, &sa, &malformed_transfer, &p),
+            ParsedCall::Unknown { .. }
+        ));
+
+        let mut ledger = Ledger::empty(&env);
+        assert_first_blocked(
+            &decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut ledger,
+                1_000,
+                vec![&env, malformed_transfer],
+            ),
+            Error::UnknownContract,
+        );
+        assert_first_blocked(
+            &decide(
+                &env,
+                &sa,
+                Some(&p),
+                &alive(),
+                &mut ledger,
+                1_000,
+                vec![&env, create_with_ctor],
+            ),
+            Error::CreateContractNotAllowed,
+        );
+        assert_eq!(ledger.total, 0);
     }
 }
