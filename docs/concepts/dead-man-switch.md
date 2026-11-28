@@ -87,6 +87,8 @@ These are **separate conditions**:
 
 Both are cleared by `unfreeze()`, which also restarts the heartbeat clock. The key point: **a live attacker who keeps the agent key heartbeating cannot trigger the dead-man switch**, but spend caps still bind them.
 
+During an active incident (such as a suspected agent-key leak where the attacker may keep heartbeating), do not wait for the dead-man switch: call `freeze()` immediately and optionally install the [`examples/policies/emergency-freeze.json`](../../examples/policies/emergency-freeze.json) lockdown preset (`paused: true`, empty allowlists, `dms_grace_secs: 0`). The full operator sequence — including verification reads and safe recovery ordering — is in the [emergency freeze runbook section](../operations/incident-playbook-admin-key-lost.md#emergency-freeze-sequence-when-the-admin-key-is-available) and the [rollback and policy-recovery runbook](../operations/rollback-and-recovery.md#1-pause).
+
 ## Timeline example
 
 ```

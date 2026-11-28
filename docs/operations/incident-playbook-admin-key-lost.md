@@ -26,6 +26,99 @@ not recoverable, and how to avoid it. The normative behavior is
   the contract address is permanently unspendable. Treat it as lost access, not as funds
   that can be recovered later.
 
+## Emergency freeze sequence (when the admin key is available)
+
+If an incident is active and you **still control the admin key** (for example, suspected
+agent-key leak, runaway loop, or compromised host), halt transfers immediately before
+investigating. Combine the account-level `freeze()` brake with the
+[`examples/policies/emergency-freeze.json`](../../examples/policies/emergency-freeze.json)
+lockdown preset so every authorization is blocked and no allowlist entry survives an
+accidental `resume()` or `unfreeze()`.
+
+### 1. Freeze and strip policy permissions
+
+```bash
+# Step 1 — immediate account-level halt (rule #1, blocks transfers, protocol calls, and heartbeat)
+stellar contract invoke --id <GUARD_ID> --network <NETWORK> \
+  --source-account <ADMIN_ALIAS> --send=yes -- freeze
+# → Event: frozen (by: <ADMIN_G>)
+
+# Step 2 — replace the stored policy with the zero-permission emergency-freeze preset
+# (paused=true, empty assets/recipients/protocols, dms_grace_secs=0)
+stellar contract invoke --id <GUARD_ID> --network <NETWORK> \
+  --source-account <ADMIN_ALIAS> --send=yes -- \
+  set_policy --config "$(cat examples/policies/emergency-freeze.json)"
+# → Event: policy_set (by: <ADMIN_G>, revision: <N+1>)
+```
+
+If the agent key may have leaked, rotate it while the account is frozen:
+
+```bash
+stellar contract invoke --id <GUARD_ID> --network <NETWORK> \
+  --source-account <ADMIN_ALIAS> --send=yes -- \
+  rotate_agent_key --new_pubkey <NEW_64_HEX_CHARS>
+# → Event: agent_rotated (old_fingerprint, new_fingerprint)
+```
+
+### 2. Verify the freeze before standing down
+
+Run all three read-only checks and record the outputs in your incident log:
+
+```bash
+# Confirm both account-level freeze and policy pause are active
+stellar contract invoke --id <GUARD_ID> --network <NETWORK> \
+  --source-account <ADMIN_ALIAS> --send=no -- status
+# → expected: "admin_frozen":true, "paused":true, "has_policy":true, "dms_grace_secs":0
+
+# Record the installed policy digest and confirm allowlists are empty
+stellar contract invoke --id <GUARD_ID> --network <NETWORK> \
+  --source-account <ADMIN_ALIAS> --send=no -- policy_hash
+
+# Prove an agent-signed transfer is rejected pre-broadcast with admin_frozen
+./tools/agent-tx/target/release/agent-tx preflight --guard <GUARD_ID> \
+  --asset <SAC_ID> --to <RECIPIENT_G> --amount 1
+# → exit 1, reason `admin_frozen`
+```
+
+### 3. Recover after the incident is resolved
+
+Never call `unfreeze()` until the replacement policy is validated and installed, because
+`unfreeze()` clears `AdminFrozen` and re-arms `LastHeartbeat = now` in one transaction:
+
+1. **Validate the replacement policy off-chain / via simulation:**
+   ```bash
+   stellar contract invoke --id <GUARD_ID> --network <NETWORK> \
+     --source-account <ADMIN_ALIAS> --send=no -- \
+     validate_policy --config "$(cat <VETTED_POLICY_JSON>)"
+   # → Valid
+   ```
+2. **Install the replacement policy** (still while `admin_frozen: true`, so the agent
+   cannot spend until the final step):
+   ```bash
+   stellar contract invoke --id <GUARD_ID> --network <NETWORK> \
+     --source-account <ADMIN_ALIAS> --send=yes -- \
+     set_policy --config "$(cat <VETTED_POLICY_JSON>)"
+   ```
+3. **Clear the freeze (and re-arm DMS):**
+   ```bash
+   stellar contract invoke --id <GUARD_ID> --network <NETWORK> \
+     --source-account <ADMIN_ALIAS> --send=yes -- unfreeze
+   # → Event: unfrozen (by: <ADMIN_G>, rearmed_dms: true/false)
+   ```
+   If the replacement policy was intentionally staged with `paused: true`, also call
+   `resume` once you are ready to admit traffic.
+4. **Verify live recovery:**
+   - Re-run `status` and confirm `admin_frozen: false`, `paused: false`,
+     `heartbeat_expired: false`, and the expected `dms_grace_secs`.
+   - Run `agent-tx preflight` for a known-good transfer (expect exit `0`) and an
+     over-cap transfer (expect exit `1`, `per_tx_cap_exceeded`).
+   - Confirm the agent's heartbeat loop is running on the new key before leaving the
+     incident channel.
+
+If the admin key is **not** available during an incident, the agent itself can still pull
+the emergency brake with `self_lock()` (sets `AdminFrozen = true`), or silence will
+trigger the dead-man switch — but reversal still requires the admin key as detailed below.
+
 ## 1. Recognise the state
 
 Reads are permissionless and simulation-only, so they work even while the account is frozen:

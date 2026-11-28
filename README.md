@@ -153,7 +153,7 @@ that keeps heartbeating. Full derivation and caveats:
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
 cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 289 tests, isolated (no network)
+cargo test                                      # 293 tests, isolated (no network)
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -288,13 +288,13 @@ single rolling window: an admitted transfer is compared against the asset's
 *effective* per-tx cap (override if present, else the global `per_tx_cap`),
 and the shared `window_cap` still bounds total spend across assets.
 
-**Not sure where to start?** Copy-paste presets for common operator personas —
-day-trader agent, payments bot, watch-only + heartbeat, max security — live as
-loadable JSON files in [`examples/policies/`](examples/policies/), with rationale,
-explicit "what it does NOT protect against", and unaudited/mainnet/DMS-grace
-warnings in [`docs/policy-templates.md`](docs/policy-templates.md). A CI test
-discovers and installs every file in that directory, so a preset cannot be added
-without validation.
+**Not sure where to start?** Copy-paste presets for common operator personas and incident
+postures — day-trader agent, payments bot, watch-only + heartbeat, max security, least
+privilege, and emergency freeze — live as loadable JSON files in
+[`examples/policies/`](examples/policies/), with rationale, explicit "what it does NOT
+protect against", and unaudited/mainnet/DMS-grace warnings in
+[`docs/policy-templates.md`](docs/policy-templates.md). A CI test discovers and installs
+every file in that directory, so a preset cannot be added without validation.
 
 | Preset | File |
 |---|---|
@@ -302,6 +302,19 @@ without validation.
 | Payments bot | [`examples/policies/payments-bot.json`](examples/policies/payments-bot.json) |
 | Watch-only + heartbeat | [`examples/policies/watch-only-heartbeat.json`](examples/policies/watch-only-heartbeat.json) |
 | Max security | [`examples/policies/max-security.json`](examples/policies/max-security.json) |
+| Least privilege | [`examples/policies/least-privilege.json`](examples/policies/least-privilege.json) |
+| Emergency freeze | [`examples/policies/emergency-freeze.json`](examples/policies/emergency-freeze.json) |
+
+**Why each restriction in [`least-privilege.json`](examples/policies/least-privilege.json) exists:**
+
+- **Single allowlisted asset (`assets` length 1):** Limits SAC transfer parsing and spend authorization to one token contract; every other token is rejected as `UnknownContract`, and non-transfer calls (`mint`, `burn`, `clawback`, `set_admin`) on that asset are rejected as `AssetFnNotAllowed`.
+- **Single allowlisted recipient (`recipients` length 1, `allow_any_recipient: false`):** Prevents a compromised agent key or prompt injection from redirecting transfers to attacker-controlled addresses (`RecipientNotAllowed`).
+- **Single protocol contract and single function (`protocols`: one entry with `fns: ["swap"]`):** Avoids wildcard (`fns: null`) protocol exposure so the agent can invoke only the exact function its workflow requires; any other function on that contract fails with `FunctionNotAllowed` and any other contract fails with `UnknownContract`.
+- **Tight spend caps (`per_tx_cap: "100"`, `window_cap: "500"`, `window_secs: 3600`):** Bounds both single-call loss and cumulative rolling-hour loss even if the agent key stays live and keeps heartbeating.
+- **Protocol call rate limit (`protocol_calls_per_window: 10`):** Caps how many times the single allowlisted protocol function can be invoked per rolling hour (`ProtocolCallRateExceeded`), since non-SAC calls do not carry SAC amount caps ([SPEC §2](SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing)).
+- **Dead-man switch (`dms_grace_secs: 3600`):** Automatically freezes the account after an hour of silence so an abandoned or crashed agent cannot remain spendable indefinitely (raise to ≥ several days before mainnet).
+
+For incident lockdown using [`emergency-freeze.json`](examples/policies/emergency-freeze.json) alongside `freeze()`, follow the operator verification and recovery steps in [`docs/operations/incident-playbook-admin-key-lost.md`](docs/operations/incident-playbook-admin-key-lost.md#emergency-freeze-sequence-when-the-admin-key-is-available).
 
 ### `reset_window`
 ```rust
@@ -1050,8 +1063,9 @@ Stellar Agent Guard operates across three dedicated repositories:
   cadence formula (`interval ≤ grace / 3`), pre-flight `check()`, blocked-reason
   handling table, and stop conditions, with tested `agent-tx` commands.
 - `examples/policies/` — the **policy presets** as loadable JSON files
-  (day-trader, payments bot, watch-only, max security), one file per preset, each
-  validated against `policy.schema.json` and installed via `set_policy` in CI.
+  (day-trader, payments bot, watch-only, max security, least privilege, emergency freeze),
+  one file per preset, each validated against `policy.schema.json` and installed via
+  `set_policy` in CI.
 - `docs/policy-templates.md` — the rationale, warnings, and "what it does NOT
   protect against" for each preset, linking to the files in `examples/policies/`
   as the source of truth.
@@ -1145,7 +1159,7 @@ and honestly reports the DMS has since expired, exactly as designed.
 
 ## Testing & CI
 
-289 tests (unit + integration) cover the policy decision engine — including the regression
+293 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement

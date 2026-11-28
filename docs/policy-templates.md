@@ -1,12 +1,13 @@
 # Policy templates / presets — named starter configs for common operator personas
 
 Every new operator faces a blank `PolicyConfig` and must learn the semantics from
-[SPEC §8](../SPEC.md#8-config-validation-set_policy). This page documents four named
-presets for the most common operator personas, each with a one-paragraph rationale and
-an explicit list of what it does **not** protect against. The presets themselves are
-loadable JSON files in [`examples/policies/`](../examples/policies/) — that directory,
-not this page, is the source of truth. A CI test discovers every file there, validates
-it against `policy.schema.json`, and installs it via `set_policy`.
+[SPEC §8](../SPEC.md#8-config-validation-set_policy). This page documents six named
+presets for the most common operator personas and incident postures, each with a
+one-paragraph rationale and an explicit list of what it does **not** protect against.
+The presets themselves are loadable JSON files in
+[`examples/policies/`](../examples/policies/) — that directory, not this page, is the
+source of truth. A CI test discovers every file there, validates it against
+`policy.schema.json`, and installs it via `set_policy`.
 
 > ⚠️ **Read first — these are unaudited starting points, not security advice.**
 >
@@ -127,6 +128,60 @@ savings account an agent can top up but never meaningfully spend from.
   detection, not just ceilings.
 - Admin compromise (policy rewrite / key rotation; funds still cannot move).
 - Non-SAC protocol calls — default-deny via the empty `protocols` list.
+
+### 5. Least privilege — one asset, one recipient, one protocol function
+
+**File:** [`examples/policies/least-privilege.json`](../examples/policies/least-privilege.json)
+
+**Rationale.** The narrowest active operating posture for an agent that needs both a
+bounded SAC transfer rail and a single protocol interaction: one allowlisted asset
+(`assets` of length 1), one allowlisted recipient (`recipients` of length 1 with
+`allow_any_recipient: false`), and one allowlisted protocol contract restricted to a
+single function (`fns: ["swap"]`, capped at `protocol_calls_per_window: 10` per hour).
+Tight spend ceilings (`per_tx_cap: "100"`, `window_cap: "500"` over `window_secs: 3600`)
+bound the blast radius of a compromised agent key, and `dms_grace_secs: 3600` freezes
+the account if the agent goes silent. Every other asset, recipient, protocol contract,
+protocol function, or non-transfer SAC function (`mint`, `burn`, `clawback`, etc.) is
+default-deny.
+
+**What it does NOT protect against:**
+
+- Arbitrary amounts or destinations inside the single allowlisted protocol function
+  (`swap`) — non-SAC argument inspection is a v2 item ([SPEC §2](../SPEC.md#2-enforcement-scope--sac-token-calls-vs-every-other-soroban-call-required-framing)).
+- A live, heartbeating attacker using the agent key within the 100/tx, 500/hour, and
+  10-protocol-calls/hour bounds.
+- Compromise of the single allowlisted recipient or protocol contract itself.
+- Admin compromise (policy rewrite / key rotation; no admin call moves funds directly).
+
+### 6. Emergency freeze — incident lockdown
+
+**File:** [`examples/policies/emergency-freeze.json`](../examples/policies/emergency-freeze.json)
+
+**Rationale.** An incident-response lockdown policy meant to be paired with the admin's
+immediate `freeze()` call when an agent key or runtime is suspected compromised. It sets
+`paused: true` (blocking every authorization, including `heartbeat`, at SPEC §4 gate #4)
+and clears `assets`, `recipients`, `protocols`, and `allow_any_recipient` so that even
+an accidental `resume()` or `unfreeze()` before a vetted policy is reinstalled leaves
+every transfer and protocol call default-denied (`UnknownContract`). Setting
+`dms_grace_secs: 0` avoids stacking a separate `heartbeat_expired` gate on top of
+`admin_frozen`/`paused` while operators investigate and rotate keys.
+
+**Operational note.** During an incident, call `freeze()` first for an immediate
+account-level halt (without touching spend history), then optionally install
+`emergency-freeze.json` if you also want the stored policy stripped to zero permissions
+before rotating keys and restoring a vetted policy. See the
+[emergency freeze sequence](operations/incident-playbook-admin-key-lost.md#emergency-freeze-sequence-when-the-admin-key-is-available)
+and the [rollback and policy-recovery runbook](operations/rollback-and-recovery.md#1-pause)
+for verification and recovery steps.
+
+**What it does NOT protect against:**
+
+- Loss of the admin key — an admin-frozen or paused account can only be recovered by
+  the admin (`unfreeze()` / `resume()` / `set_policy()`); see the
+  [incident playbook](operations/incident-playbook-admin-key-lost.md).
+- Admin compromise — an attacker with the admin key can unfreeze and install a permissive
+  policy.
+- Transactions already finalized on-ledger before `freeze()` or `set_policy()` landed.
 
 ## Warnings that apply to every preset
 

@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::{fs, path::PathBuf};
 
 const PRESET_DIR: &str = "examples/policies";
-const MIN_PRESETS: usize = 4;
+const MIN_PRESETS: usize = 6;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
