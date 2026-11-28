@@ -2428,7 +2428,11 @@ Scenarios 1–5 were executed against a real testnet deployment; evidence
 2. **Per-tx cap violation** — transfer above `per_tx_cap` is blocked on-chain.
 3. **Rolling-window cap violation** — cumulative spend across separate transactions inside one
    `window_secs` span exceeds `window_cap`; the later one is blocked (then a window rollover
-   restores spending, proving it is rolling).
+   restores spending, proving it is rolling). The rollover half is automated, without the
+   60-second wall-clock wait the testnet run used, by
+   `spec_11_scenario_3_window_rollover_restores_spending` in
+   [`src/integration_tests.rs`](src/integration_tests.rs), which also pins the exact-boundary
+   membership rule of §3.1.
 4. **Allowlist violation** — transfer to a recipient outside the allowlist is blocked.
 5. **Dead-man switch trigger + reversal** — heartbeat stops past `dms_grace_secs`; a subsequent
    spend is blocked with `HeartbeatExpired`; admin `unfreeze` + fresh heartbeat restores it.

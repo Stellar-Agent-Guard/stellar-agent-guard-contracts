@@ -152,8 +152,13 @@ that keeps heartbeating. Full derivation and caveats:
 # Build the contract and run the test suite
 git clone https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts.git
 cd stellar-agent-guard-contracts
-cargo build --release --target wasm32v1-none   # → target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
-cargo test                                      # 289 tests, isolated (no network)
+cargo build --release --target wasm32v1-none
+# → Finished `release` profile [optimized] target(s) in …
+#   artifact: target/wasm32v1-none/release/stellar_agent_guard_contracts.wasm
+cargo test                                      # 290 tests, isolated (no network)
+# → one `test result:` line per test binary, each of the form
+#   test result: ok. <N> passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+#   summed across every test binary: 290 passed; 0 failed
 
 # Read live state from the Phase-1 testnet deployment (no auth, simulation only).
 # Live, testnet protocol 28, 2026-09-08: the fixture account was DMS-frozen
@@ -163,6 +168,19 @@ stellar contract invoke --id CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3
   --network testnet --source-account guard_admin --send=no -- status
 # → {"admin_frozen":false,"has_policy":true,"heartbeat_expired":true,"last_heartbeat":1788855212,"now":1788863857}
 ```
+
+A read returning those fields proves the deployment is live and readable; an empty
+or erroring response is a failure, not a quiet no-op. For the write path, a
+successful [`set_policy`](#set-policy) is expected to emit
+`Event: EventPolicySet (event_policy_set)` — that section has the full command and
+its expected output.
+
+The `290` above is a claim CI checks, so it cannot rot silently here:
+`scripts/verify-readme.sh` runs `cargo test`, sums the `passed` counts, and fails when
+they differ from the `N tests` number stated in this README. When you add or remove
+tests, update that line **and** the [Testing & CI](#testing--ci) total in the same PR
+— the check reads every `N tests` claim in the file, so a second, stale number
+anywhere fails it too.
 
 ## Public functions
 
@@ -1148,11 +1166,16 @@ Status legend: ✅ completed; 🚧 in progress; 🔲 not started/open. A “v2, 
 
 ## Testing & CI
 
-289 tests (unit + integration) cover the policy decision engine — including the regression
+290 tests (unit + integration) cover the policy decision engine — including the regression
 for the rolling-window prune underflow at low timestamps, the per-tx-cap arithmetic that
 proves blocked transactions never consume the window, and dead-man-switch timeline edge
 cases — plus `__check_auth` Ed25519 signature verification and the full enforcement
-scenario matrix (SPEC §11). Verified green this session: `281 passed; 0 failed`.
+scenario matrix (SPEC §11). Verified green locally on the pinned `1.99.0` toolchain
+(`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+`cargo test`): **290 passed; 0 failed**, summed across every test binary. That total
+is not a hand-maintained guess — `scripts/verify-readme.sh` runs `cargo test` and
+fails if the number above drifts from reality, so adding tests means updating the
+quick-start comment and this paragraph in the same PR.
 
 These are the commands CI runs, in the order the `ci` job runs them — the same
 block a contributor can copy (see also
