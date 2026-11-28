@@ -51,6 +51,12 @@ jsonschema = "0.61"
 
 [profile.release]
 opt-level = "z"
+# Issue #121: overflow checks stay ON in release. Debug builds check by default
+# and release builds do not, so turning them off here would let an overflow trap
+# in the shipped wasm while every debug-profile test passed. CI runs the suite a
+# second time with `cargo test --release`, which compiles the test binaries with
+# this section (and therefore these checks), so the tested and shipped code
+# share one arithmetic semantics.
 overflow-checks = true
 debug = 0
 strip = "symbols"

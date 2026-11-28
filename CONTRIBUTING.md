@@ -39,6 +39,14 @@ cargo clippy --all-targets --all-features -- -D warnings
 # 4. Unit + integration tests
 cargo test
 
+# 4b. The same suite under the release profile (issue #121). The shipped
+#     artifact is release-mode wasm, so CI runs `cargo test --release` as well:
+#     it compiles the test binaries with [profile.release] (opt-level = "z",
+#     LTO, panic = "abort", overflow-checks = true), which is where an
+#     overflow-only or panic-path regression would otherwise hide.
+#     ~2s on a warm target dir, ~2min the first time the release graph builds.
+cargo test --release
+
 # 5. Public API documentation, warnings denied
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 

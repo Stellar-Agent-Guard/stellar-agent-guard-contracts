@@ -84,6 +84,15 @@ jobs:
       - name: Unit + integration tests
         run: cargo test
 
+      # Issue #121: the shipped artifact is release-mode wasm, and release
+      # codegen is not debug codegen — optimizations change panic paths and
+      # release builds do not check arithmetic overflow by default. This step
+      # compiles the test binaries with [profile.release] (which keeps
+      # `overflow-checks = true`), so a release-only regression fails the
+      # required `ci` status check instead of slipping through to the wasm.
+      - name: Unit + integration tests (release profile)
+        run: cargo test --release
+
       # Issue #128: enforcement-evidence fixtures may only reference reason
       # symbols that exist in the current Error::reason() vocabulary, or in the
       # recorded vocabulary for the historical contract_version they document.

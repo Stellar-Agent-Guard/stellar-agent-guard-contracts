@@ -21,8 +21,12 @@ cargo fmt --check
 # Lint. `-D warnings` is what makes this a gate (CI fails on warnings)
 cargo clippy --all-targets --all-features -- -D warnings
 
-# Run tests (224 unit + integration tests, no network needed)
+# Run tests (unit + integration, no network needed)
 cargo test
+
+# Run the same suite under the release profile: the shipped wasm is built with
+# --release, so CI tests both (issue #121)
+cargo test --release
 
 # Public API docs, warnings denied
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
