@@ -19,3 +19,14 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Run bounded check-auth smoke test
         run: cargo +nightly fuzz run check_auth_full_path --fuzz-dir fuzz -- -max_total_time=60
+
+  invocation-parser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run bounded invocation-parser smoke test
+        run: cargo +nightly fuzz run invocation_parser --fuzz-dir fuzz -- -max_total_time=60

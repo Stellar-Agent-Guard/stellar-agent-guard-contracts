@@ -29,6 +29,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "invocation_parser"
+path = "fuzz_targets/invocation_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "seed-policy-config"
 path = "src/bin/seed_policy_config.rs"
 test = false

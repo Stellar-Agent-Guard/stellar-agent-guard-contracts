@@ -737,6 +737,24 @@ mod tests {
         Address::try_from_val(env, &sc).unwrap()
     }
 
+    #[track_caller]
+    fn assert_first_spend_entry(
+        entries: &soroban_sdk::Vec<SpendEntry>,
+        expected_ts: u64,
+        expected_amount: i128,
+    ) {
+        let first = entries
+            .first()
+            .unwrap_or_else(|| panic!("expected at least one spend entry, got empty vec"));
+        assert_eq!(
+            (first.ts, first.amount),
+            (expected_ts, expected_amount),
+            "first spend entry mismatch: expected (ts={expected_ts}, amount={expected_amount}), got (ts={}, amount={})",
+            first.ts,
+            first.amount
+        );
+    }
+
     /// Pruning drops only entries whose window has fully elapsed.
     #[test]
     fn prune_drops_only_expired() {
@@ -745,7 +763,7 @@ mod tests {
         prune_entries(&mut l.total, &mut l.entries, 300, 200); // cutoff 100; ts==cutoff expired
         assert_eq!(l.total, 7);
         assert_eq!(l.entries.len(), 1);
-        assert_eq!(l.entries.first().unwrap().ts, 200);
+        assert_first_spend_entry(&l.entries, 200, 7);
     }
 
     /// Same-second admissions coalesce into a single entry.
@@ -757,13 +775,11 @@ mod tests {
         ledger.admit(100, 4);
         ledger.admit(100, 5);
         assert_eq!(ledger.entries.len(), 1);
-        assert_eq!(ledger.entries.get(0).unwrap().ts, 100);
-        assert_eq!(ledger.entries.get(0).unwrap().amount, 12);
+        assert_first_spend_entry(&ledger.entries, 100, 12);
 
         ledger.admit(101, 6);
         assert_eq!(ledger.entries.len(), 2);
-        assert_eq!(ledger.entries.get(0).unwrap().ts, 100);
-        assert_eq!(ledger.entries.get(0).unwrap().amount, 12);
+        assert_first_spend_entry(&ledger.entries, 100, 12);
         assert_eq!(ledger.entries.get(1).unwrap().ts, 101);
         assert_eq!(ledger.entries.get(1).unwrap().amount, 6);
     }
@@ -801,8 +817,7 @@ mod tests {
         ledger.admit(100, 11);
 
         assert_eq!(ledger.entries.len(), 1);
-        assert_eq!(ledger.entries.get(0).unwrap().ts, 100);
-        assert_eq!(ledger.entries.get(0).unwrap().amount, 18);
+        assert_first_spend_entry(&ledger.entries, 100, 18);
         assert_eq!(ledger.total, 18);
     }
 
@@ -897,7 +912,7 @@ mod tests {
         }
         assert_eq!(entries.len(), MAX_WINDOW_ENTRIES);
         assert_eq!(total, i128::from(MAX_WINDOW_ENTRIES));
-        assert_eq!(entries.first().unwrap().ts, 0);
+        assert_first_spend_entry(&entries, 0, 1);
         assert_eq!(
             entries.get(entries.len() - 1).unwrap().ts,
             u64::from(MAX_WINDOW_ENTRIES - 1)
@@ -908,9 +923,7 @@ mod tests {
         admit_to_ledger(&mut total, &mut entries, u64::from(MAX_WINDOW_ENTRIES), 1);
         assert_eq!(entries.len(), MAX_WINDOW_ENTRIES);
         assert_eq!(total, i128::from(MAX_WINDOW_ENTRIES + 1));
-        let head = entries.first().unwrap();
-        assert_eq!(head.ts, 1, "merged ts is the newer of {{0, 1}}");
-        assert_eq!(head.amount, 2, "merged amount is the sum");
+        assert_first_spend_entry(&entries, 1, 2);
         // The tail and the ascending order are untouched.
         assert_eq!(entries.get(1).unwrap().ts, 2);
         assert_eq!(
@@ -969,7 +982,7 @@ mod tests {
             "stored total is never used for enforcement"
         );
         assert_eq!(ledger.entries.len(), 1);
-        assert_eq!(ledger.entries.first().unwrap().amount, 10);
+        assert_first_spend_entry(&ledger.entries, 0, 10);
     }
 
     /// Ledger round-trips through persisted `WindowState`.

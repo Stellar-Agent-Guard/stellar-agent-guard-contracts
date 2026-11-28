@@ -8,23 +8,29 @@
 //! cannot silently pass. A preset that stops deserializing, stops validating,
 //! or stops round-tripping fails `cargo test` — preset rot cannot ship silently.
 
-use crate::types::{PolicyConfig, ProtocolRule, RecipientCap};
+use crate::types::{CheckResult, Error, PolicyConfig, ProtocolRule, RecipientCap};
 use crate::{PolicyEngine, PolicyEngineClient};
 
+use ed25519_dalek::{Signer, SigningKey};
 use serde_json::Value as JsonValue;
-use soroban_sdk::auth::{Context, CustomAccountInterface};
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::auth::{Context, ContractContext, CustomAccountInterface};
+use soroban_sdk::testutils::Address as _;
+use soroban_sdk::{
+    contract, contractimpl, vec, Address, Bytes, BytesN, Env, IntoVal, Symbol, Val, Vec,
+};
 use std::fs;
 use std::string::String;
 
 const DOC: &str = "docs/policy-templates.md";
 const PRESET_DIR: &str = "examples/policies";
-const MIN_PRESETS: usize = 4;
-const PRESET_NAMES: [&str; 4] = [
+const MIN_PRESETS: usize = 6;
+const PRESET_NAMES: [&str; 6] = [
     "Day-trader agent",
     "Payments bot",
     "Watch-only + heartbeat",
     "Max security",
+    "Least privilege",
+    "Emergency freeze",
 ];
 
 /// Admin account contract: approves every authorization it is asked to
@@ -161,10 +167,17 @@ fn protocols(env: &Env, block: &JsonValue, index: usize) -> Vec<ProtocolRule> {
                 panic!("preset #{index}: `fns` must be null or an array of strings, got {other}")
             }
         };
+        let paused = match rule.get("paused") {
+            None | Some(JsonValue::Null) => false,
+            Some(JsonValue::Bool(flag)) => *flag,
+            Some(other) => {
+                panic!("preset #{index}: protocol `paused` must be a bool, got {other}")
+            }
+        };
         out.push_back(ProtocolRule {
             contract: Address::from_str(env, contract),
             fns,
-            paused: false,
+            paused,
         });
     }
     out
@@ -198,6 +211,12 @@ fn recipient_window_caps(env: &Env, block: &JsonValue, index: usize) -> Vec<Reci
     out
 }
 
+fn u32_field(block: &JsonValue, field: &str, index: usize) -> u32 {
+    let value = u64_field(block, field, index);
+    u32::try_from(value)
+        .unwrap_or_else(|err| panic!("preset #{index}: `{field}` overflows u32: {err}"))
+}
+
 fn policy_config_from_json(env: &Env, block: &JsonValue, index: usize) -> PolicyConfig {
     PolicyConfig {
         per_tx_cap: i128_field(block, "per_tx_cap", index),
@@ -214,8 +233,103 @@ fn policy_config_from_json(env: &Env, block: &JsonValue, index: usize) -> Policy
         active_until: u64_field(block, "active_until", index),
         paused: bool_field(block, "paused", index),
         dms_grace_secs: u64_field(block, "dms_grace_secs", index),
-        protocol_calls_per_window: 0,
+        protocol_calls_per_window: u32_field(block, "protocol_calls_per_window", index),
     }
+}
+
+fn load_named_preset(env: &Env, filename: &str) -> PolicyConfig {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(PRESET_DIR)
+        .join(filename);
+    let raw = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+    let value: JsonValue = serde_json::from_str(&raw)
+        .unwrap_or_else(|err| panic!("{PRESET_DIR}/{filename} is not valid JSON: {err}"));
+    policy_config_from_json(env, &value, 0)
+}
+
+struct SignedPresetEnv {
+    env: Env,
+    guard: Address,
+    signing_key: SigningKey,
+}
+
+fn signed_preset_env() -> SignedPresetEnv {
+    let env = Env::default();
+    env.mock_all_auths();
+    let signing_key = SigningKey::from_bytes(&[11u8; 32]);
+    let admin = env.register(MockAdmin, ());
+    let guard = env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&env, &guard);
+    client.initialize(
+        &admin,
+        &BytesN::from_array(&env, &signing_key.verifying_key().to_bytes()),
+    );
+    SignedPresetEnv {
+        env,
+        guard,
+        signing_key,
+    }
+}
+
+impl SignedPresetEnv {
+    fn check_auth(&self, tag: &[u8], context: Context) -> Result<(), Error> {
+        let payload = self.env.crypto().sha256(&Bytes::from_slice(&self.env, tag));
+        let signature = BytesN::from_array(
+            &self.env,
+            &self.signing_key.sign(&payload.to_array()).to_bytes(),
+        );
+        self.env.as_contract(&self.guard, || {
+            <PolicyEngine as CustomAccountInterface>::__check_auth(
+                self.env.clone(),
+                payload,
+                signature,
+                vec![&self.env, context],
+            )
+        })
+    }
+
+    fn check_transfer(
+        &self,
+        tag: &[u8],
+        asset: &Address,
+        to: &Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        let ctx = sac_transfer_context(&self.env, &self.guard, asset, to, amount);
+        self.check_auth(tag, ctx)
+    }
+
+    fn check_call(&self, tag: &[u8], contract: &Address, fn_name: &str) -> Result<(), Error> {
+        let ctx = contract_call_context(&self.env, contract, fn_name);
+        self.check_auth(tag, ctx)
+    }
+}
+
+fn sac_transfer_context(
+    env: &Env,
+    from: &Address,
+    asset: &Address,
+    to: &Address,
+    amount: i128,
+) -> Context {
+    let mut args: Vec<Val> = Vec::new(env);
+    args.push_back(from.clone().into_val(env));
+    args.push_back(to.clone().into_val(env));
+    args.push_back(amount.into_val(env));
+    Context::Contract(ContractContext {
+        contract: asset.clone(),
+        fn_name: Symbol::new(env, "transfer"),
+        args,
+    })
+}
+
+fn contract_call_context(env: &Env, contract: &Address, fn_name: &str) -> Context {
+    Context::Contract(ContractContext {
+        contract: contract.clone(),
+        fn_name: Symbol::new(env, fn_name),
+        args: Vec::new(env),
+    })
 }
 
 /// A real contract instance in the Soroban test environment, initialized and
@@ -272,4 +386,187 @@ fn every_preset_file_installs_and_round_trips() {
              to the config the contract stores",
         );
     }
+}
+
+#[test]
+fn least_privilege_preset_permits_only_single_asset_recipient_and_protocol_function() {
+    let ctx = signed_preset_env();
+    let cfg = load_named_preset(&ctx.env, "least-privilege.json");
+    assert_eq!(cfg.assets.len(), 1, "least-privilege allows one asset");
+    assert_eq!(
+        cfg.recipients.len(),
+        1,
+        "least-privilege allows one recipient"
+    );
+    assert_eq!(
+        cfg.protocols.len(),
+        1,
+        "least-privilege allows one protocol"
+    );
+    let protocol_rule = cfg
+        .protocols
+        .get(0)
+        .unwrap_or_else(|| panic!("least-privilege must contain one protocol rule"));
+    let allowed_fns = protocol_rule
+        .fns
+        .as_ref()
+        .unwrap_or_else(|| panic!("least-privilege protocol rule must not use wildcard fns"));
+    assert_eq!(allowed_fns.len(), 1, "least-privilege allows one function");
+    assert!(!cfg.allow_any_recipient);
+    assert!(!cfg.paused);
+
+    PolicyEngineClient::new(&ctx.env, &ctx.guard).set_policy(&cfg);
+
+    let asset = cfg
+        .assets
+        .get(0)
+        .unwrap_or_else(|| panic!("missing asset in least-privilege preset"));
+    let recipient = cfg
+        .recipients
+        .get(0)
+        .unwrap_or_else(|| panic!("missing recipient in least-privilege preset"));
+    let other_asset = Address::generate(&ctx.env);
+    let other_recipient = Address::generate(&ctx.env);
+    let other_protocol = Address::generate(&ctx.env);
+
+    // Single allowed asset + recipient within per-tx cap passes; over-cap, other asset,
+    // other recipient, and non-transfer asset functions are denied.
+    assert_eq!(
+        ctx.check_transfer(b"lp-ok", &asset, &recipient, 100),
+        Ok(())
+    );
+    assert_eq!(
+        ctx.check_transfer(b"lp-over-cap", &asset, &recipient, 101),
+        Err(Error::PerTxCapExceeded)
+    );
+    assert_eq!(
+        ctx.check_transfer(b"lp-other-asset", &other_asset, &recipient, 10),
+        Err(Error::UnknownContract)
+    );
+    assert_eq!(
+        ctx.check_transfer(b"lp-other-recip", &asset, &other_recipient, 10),
+        Err(Error::RecipientNotAllowed)
+    );
+    assert_eq!(
+        ctx.check_call(b"lp-asset-mint", &asset, "mint"),
+        Err(Error::AssetFnNotAllowed)
+    );
+
+    // Single allowed protocol + single allowed function passes up to rate limit.
+    for call_index in 0..cfg.protocol_calls_per_window {
+        let tag = [b'p', u8::try_from(call_index).unwrap_or(0)];
+        assert_eq!(
+            ctx.check_call(&tag, &protocol_rule.contract, "swap"),
+            Ok(())
+        );
+    }
+    assert_eq!(
+        ctx.check_call(b"lp-rate-limit", &protocol_rule.contract, "swap"),
+        Err(Error::ProtocolCallRateExceeded)
+    );
+    assert_eq!(
+        ctx.check_call(b"lp-other-fn", &protocol_rule.contract, "add_liquidity"),
+        Err(Error::FunctionNotAllowed)
+    );
+    assert_eq!(
+        ctx.check_call(b"lp-other-proto", &other_protocol, "swap"),
+        Err(Error::UnknownContract)
+    );
+
+    // Window spend cap (500 total; 100 already admitted) blocks after 4 more 100-unit transfers.
+    for step in 0..4u8 {
+        assert_eq!(
+            ctx.check_transfer(&[b'w', step], &asset, &recipient, 100),
+            Ok(())
+        );
+    }
+    assert_eq!(
+        ctx.check_transfer(b"lp-window-cap", &asset, &recipient, 1),
+        Err(Error::WindowCapExceeded)
+    );
+}
+
+#[test]
+fn emergency_freeze_preset_enforces_freeze_pause_and_recovery_sequence() {
+    let ctx = signed_preset_env();
+    let operating = load_named_preset(&ctx.env, "least-privilege.json");
+    let lockdown = load_named_preset(&ctx.env, "emergency-freeze.json");
+    assert!(lockdown.paused);
+    assert!(lockdown.assets.is_empty());
+    assert!(lockdown.recipients.is_empty());
+    assert!(lockdown.protocols.is_empty());
+    assert!(!lockdown.allow_any_recipient);
+    assert_eq!(lockdown.dms_grace_secs, 0);
+
+    let asset = operating
+        .assets
+        .get(0)
+        .unwrap_or_else(|| panic!("missing asset in operating preset"));
+    let recipient = operating
+        .recipients
+        .get(0)
+        .unwrap_or_else(|| panic!("missing recipient in operating preset"));
+    let client = PolicyEngineClient::new(&ctx.env, &ctx.guard);
+
+    // Baseline: operating policy admits a valid transfer.
+    client.set_policy(&operating);
+    assert_eq!(
+        ctx.check_transfer(b"ef-base", &asset, &recipient, 10),
+        Ok(())
+    );
+
+    // Incident step 1: immediate admin freeze halts transfers and heartbeats.
+    client.freeze();
+    assert!(client.status().admin_frozen);
+    assert_eq!(
+        client.check(&asset, &recipient, &10),
+        CheckResult::Blocked(Symbol::new(&ctx.env, "admin_frozen"))
+    );
+    assert_eq!(
+        ctx.check_transfer(b"ef-frozen", &asset, &recipient, 10),
+        Err(Error::AdminFrozen)
+    );
+    assert_eq!(
+        ctx.check_call(b"ef-frozen-hb", &ctx.guard, "heartbeat"),
+        Err(Error::AdminFrozen)
+    );
+
+    // Incident step 2: install emergency-freeze lockdown policy while frozen.
+    client.set_policy(&lockdown);
+    let locked_status = client.status();
+    assert!(locked_status.admin_frozen && locked_status.paused);
+    assert_eq!(locked_status.dms_grace_secs, 0);
+
+    // Defense-in-depth: accidental unfreeze still blocks with Paused; accidental resume
+    // still denies with UnknownContract because allowlists are empty.
+    client.unfreeze();
+    assert!(!client.status().admin_frozen && client.status().paused);
+    assert_eq!(
+        ctx.check_transfer(b"ef-paused", &asset, &recipient, 10),
+        Err(Error::Paused)
+    );
+    assert_eq!(
+        ctx.check_call(b"ef-paused-hb", &ctx.guard, "heartbeat"),
+        Err(Error::Paused)
+    );
+
+    client.resume();
+    assert!(!client.status().paused);
+    assert_eq!(
+        ctx.check_transfer(b"ef-empty-lists", &asset, &recipient, 10),
+        Err(Error::UnknownContract)
+    );
+
+    // Recovery sequence: freeze -> install vetted policy -> verify still blocked -> unfreeze -> ok.
+    client.freeze();
+    client.set_policy(&operating);
+    assert_eq!(
+        ctx.check_transfer(b"ef-still-frozen", &asset, &recipient, 10),
+        Err(Error::AdminFrozen)
+    );
+    client.unfreeze();
+    let recovered = client.status();
+    assert!(!recovered.admin_frozen && !recovered.paused);
+    assert_eq!(recovered.dms_grace_secs, operating.dms_grace_secs);
+    assert_eq!(ctx.check_transfer(b"ef-ok", &asset, &recipient, 10), Ok(()));
 }
