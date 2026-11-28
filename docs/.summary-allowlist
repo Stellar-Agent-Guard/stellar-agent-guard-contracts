@@ -8,6 +8,7 @@ docs/SUMMARY.md
 
 # Internal research, RFCs, and design explorations awaiting maintainer sign-off
 # (not exposed in GitBook spaces or public user-facing navigation):
+docs/research/cap71-delegated-signers.md
 docs/research/heartbeat-sources.md
 docs/research/multi-sig-threshold-models.md
 docs/research/non-sac-enforcement.md

@@ -129,7 +129,10 @@ context, in tree order — measured and pinned in §2.1 (issue #340). `type Sign
 Ed25519 key; a `Vec` of keys / threshold signatures is a v2 item — see [Multi-Sig Threshold Models](docs/research/multi-sig-threshold-models.md)). Signature verification:
 `env.crypto().ed25519_verify(registered_pubkey, signature_payload (32B), presented_sig)`, then
 policy evaluation. CAP-71 delegation (`env.custom_account().get_delegated_signers()` /
-`delegate_auth`) is available but **out of v1 scope**.
+`delegate_auth`) is available in this SDK version but **out of v1 scope**; the decision record
+for whether v2 adopts it is [CAP-71 Delegated Signers](docs/research/cap71-delegated-signers.md)
+— **defer with trigger conditions**, and explicitly *not* the basis for v2 multi-key work
+(delegation is AND-only and cannot express an M-of-N threshold).
 
 **Research note (v2):** Verifiable off-chain policy attestation is explored in [Policy Attestation](docs/research/policy-attestation.md) — admin signs `policy_hash()` output; agent verifies before bootstrap. Current conclusion: deferral (direct chain read is stronger for typical deployments).
 
